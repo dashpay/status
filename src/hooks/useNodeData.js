@@ -8,7 +8,10 @@ export function useNodeData() {
   // Initial fetch
   useEffect(() => {
     fetch('/api/nodes')
-      .then((res) => res.json())
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
       .then((data) => {
         setNodes(data);
         setLoading(false);
@@ -25,14 +28,18 @@ export function useNodeData() {
     eventSourceRef.current = es;
 
     es.addEventListener('nodeUpdate', (event) => {
-      const updated = JSON.parse(event.data);
-      setNodes((prev) => {
-        const idx = prev.findIndex((n) => n.name === updated.name);
-        if (idx === -1) return [...prev, updated];
-        const next = [...prev];
-        next[idx] = updated;
-        return next;
-      });
+      try {
+        const updated = JSON.parse(event.data);
+        setNodes((prev) => {
+          const idx = prev.findIndex((n) => n.name === updated.name);
+          if (idx === -1) return [...prev, updated];
+          const next = [...prev];
+          next[idx] = updated;
+          return next;
+        });
+      } catch (err) {
+        console.warn('Failed to parse SSE message:', err);
+      }
     });
 
     es.onerror = () => {
@@ -47,7 +54,10 @@ export function useNodeData() {
 
   const refresh = useCallback(() => {
     fetch('/api/nodes')
-      .then((res) => res.json())
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
       .then(setNodes)
       .catch(console.error);
   }, []);

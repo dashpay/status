@@ -132,7 +132,7 @@ export function deriveHealthStatus(data) {
   if (data.masternodeState === 'POSE_BANNED') return 'banned';
   if (data.masternodeState === 'ERROR') return 'error';
   if (data.platformStatus === 'error') return 'error';
-  if (data.coreServiceStatus === 'syncing' || data.coreSyncProgress) return 'syncing';
+  if (data.coreServiceStatus === 'syncing' || (data.coreSyncProgress && data.coreSyncProgress !== '100%')) return 'syncing';
   if (data.platformStatus === 'syncing' || data.platformStatus === 'wait_for_core') return 'syncing';
   if (data.masternodeState === 'READY' && data.platformStatus === 'up') return 'healthy';
   if (data.masternodeState === 'READY') return 'warning';

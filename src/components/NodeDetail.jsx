@@ -1,3 +1,5 @@
+import { useEffect, useRef } from 'react';
+
 const healthLabels = {
   healthy: { text: 'Healthy', classes: 'bg-emerald-500/20 text-emerald-400' },
   syncing: { text: 'Syncing', classes: 'bg-amber-500/20 text-amber-400' },
@@ -20,6 +22,32 @@ function Row({ label, value, highlight }) {
 }
 
 export default function NodeDetail({ node, onClose }) {
+  const dialogRef = useRef(null);
+  const previousFocusRef = useRef(null);
+
+  useEffect(() => {
+    if (!node) return;
+
+    // Store the element that had focus before the modal opened
+    previousFocusRef.current = document.activeElement;
+
+    // Focus the dialog
+    dialogRef.current?.focus();
+
+    function handleKeyDown(e) {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      // Restore focus
+      previousFocusRef.current?.focus();
+    };
+  }, [node, onClose]);
+
   if (!node) return null;
 
   const health = node.health || 'unknown';
@@ -31,19 +59,30 @@ export default function NodeDetail({ node, onClose }) {
     : 'never';
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div className="bg-gray-900 border border-gray-700 rounded-xl max-w-lg w-full max-h-[90vh] overflow-y-auto shadow-2xl" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="node-detail-title"
+    >
+      <div
+        ref={dialogRef}
+        tabIndex={-1}
+        className="bg-gray-900 border border-gray-700 rounded-xl max-w-lg w-full max-h-[90vh] overflow-y-auto shadow-2xl outline-none"
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-gray-800">
           <div className="flex items-center gap-3">
-            <h2 className="text-lg font-bold text-gray-100">
+            <h2 id="node-detail-title" className="text-lg font-bold text-gray-100">
               {node.name}
             </h2>
             <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${hl.classes}`}>
               {hl.text}
             </span>
           </div>
-          <button onClick={onClose} className="text-gray-500 hover:text-gray-300 text-xl leading-none">&times;</button>
+          <button onClick={onClose} aria-label="Close" className="text-gray-500 hover:text-gray-300 text-xl leading-none">&times;</button>
         </div>
 
         {/* Content */}

@@ -1,5 +1,5 @@
 import { Client } from 'ssh2';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { parseDashmateStatus, parseSystemMetrics, deriveHealthStatus } from './parser.js';
 import { setNode, getNode } from './state.js';
 import { broadcast } from './sse.js';
@@ -11,12 +11,18 @@ const DASHMATE_CMD = 'sudo -u dashmate dashmate status; echo "===SYSMETRICS===";
 
 let privateKey = null;
 let sshUser = 'ubuntu';
+let sshPort = 22;
 let pollIntervalMs = 4000;
 let polling = false;
 
-export function configure({ sshKeyPath, sshUserName, pollInterval }) {
+export function configure({ sshKeyPath, sshUserName, pollInterval, sshPortNum }) {
+  if (!existsSync(sshKeyPath)) {
+    console.error(`SSH key not found: ${sshKeyPath}`);
+    process.exit(1);
+  }
   privateKey = readFileSync(sshKeyPath);
   sshUser = sshUserName || 'ubuntu';
+  sshPort = sshPortNum || 22;
   pollIntervalMs = pollInterval || 4000;
 }
 
@@ -76,7 +82,7 @@ function pollNode(nodeInfo) {
 
     conn.connect({
       host: nodeInfo.host,
-      port: 22,
+      port: sshPort,
       username: sshUser,
       privateKey,
       readyTimeout: SSH_CONNECT_TIMEOUT,
@@ -85,65 +91,56 @@ function pollNode(nodeInfo) {
   });
 }
 
+function processNodeResult(nodeInfo, result, elapsed) {
+  const existing = getNode(nodeInfo.name);
+
+  if (result.success) {
+    const [dashmateOutput, metricsBlock] = result.output.split('===SYSMETRICS===');
+    const status = parseDashmateStatus(dashmateOutput);
+    const health = deriveHealthStatus(status);
+    const system = metricsBlock ? parseSystemMetrics(metricsBlock) : null;
+
+    setNode(nodeInfo.name, {
+      num: nodeInfo.num,
+      host: nodeInfo.host,
+      publicIp: nodeInfo.publicIp,
+      privateIp: nodeInfo.privateIp,
+      protx: nodeInfo.protx,
+      status,
+      system,
+      health,
+      error: null,
+      pollDuration: elapsed,
+    });
+  } else {
+    setNode(nodeInfo.name, {
+      ...(existing || {}),
+      num: nodeInfo.num,
+      host: nodeInfo.host,
+      publicIp: nodeInfo.publicIp,
+      privateIp: nodeInfo.privateIp,
+      protx: nodeInfo.protx,
+      health: 'unreachable',
+      error: result.error,
+      pollDuration: elapsed,
+    });
+  }
+
+  const updatedNode = getNode(nodeInfo.name);
+  broadcast('nodeUpdate', { name: nodeInfo.name, ...updatedNode });
+}
+
 async function pollAllNodes(nodes) {
   for (const nodeInfo of nodes) {
     if (!polling) break;
 
-    const existing = getNode(nodeInfo.name);
     const startTime = Date.now();
-
     try {
       const result = await pollNode(nodeInfo);
-      const elapsed = Date.now() - startTime;
-
-      if (result.success) {
-        const [dashmateOutput, metricsBlock] = result.output.split('===SYSMETRICS===');
-        const status = parseDashmateStatus(dashmateOutput);
-        const health = deriveHealthStatus(status);
-        const system = metricsBlock ? parseSystemMetrics(metricsBlock) : null;
-
-        setNode(nodeInfo.name, {
-          num: nodeInfo.num,
-          host: nodeInfo.host,
-          publicIp: nodeInfo.publicIp,
-          privateIp: nodeInfo.privateIp,
-          protx: nodeInfo.protx,
-          status,
-          system,
-          health,
-          error: null,
-          pollDuration: elapsed,
-        });
-      } else {
-        setNode(nodeInfo.name, {
-          ...(existing || {}),
-          num: nodeInfo.num,
-          host: nodeInfo.host,
-          publicIp: nodeInfo.publicIp,
-          privateIp: nodeInfo.privateIp,
-          protx: nodeInfo.protx,
-          health: 'unreachable',
-          error: result.error,
-          pollDuration: elapsed,
-        });
-      }
+      processNodeResult(nodeInfo, result, Date.now() - startTime);
     } catch (err) {
-      setNode(nodeInfo.name, {
-        ...(existing || {}),
-        num: nodeInfo.num,
-        host: nodeInfo.host,
-        publicIp: nodeInfo.publicIp,
-        privateIp: nodeInfo.privateIp,
-        protx: nodeInfo.protx,
-        health: 'unreachable',
-        error: err.message,
-        pollDuration: Date.now() - startTime,
-      });
+      processNodeResult(nodeInfo, { success: false, error: err.message }, Date.now() - startTime);
     }
-
-    // Broadcast the updated node to SSE clients
-    const updatedNode = getNode(nodeInfo.name);
-    broadcast('nodeUpdate', { name: nodeInfo.name, ...updatedNode });
 
     // Wait before polling the next node
     if (polling) {
@@ -153,49 +150,23 @@ async function pollAllNodes(nodes) {
 }
 
 async function pollAllNodesParallel(nodes) {
+  const burstStart = Date.now();
   console.log(`Initial burst: polling all ${nodes.length} nodes in parallel...`);
-  const results = await Promise.allSettled(
+
+  await Promise.allSettled(
     nodes.map(async (nodeInfo) => {
-      const existing = getNode(nodeInfo.name);
       const startTime = Date.now();
       try {
         const result = await pollNode(nodeInfo);
-        const elapsed = Date.now() - startTime;
-        if (result.success) {
-          const [dashmateOutput, metricsBlock] = result.output.split('===SYSMETRICS===');
-          const status = parseDashmateStatus(dashmateOutput);
-          const health = deriveHealthStatus(status);
-          const system = metricsBlock ? parseSystemMetrics(metricsBlock) : null;
-          setNode(nodeInfo.name, {
-            num: nodeInfo.num, host: nodeInfo.host,
-            publicIp: nodeInfo.publicIp, privateIp: nodeInfo.privateIp,
-            protx: nodeInfo.protx, status, system, health,
-            error: null, pollDuration: elapsed,
-          });
-        } else {
-          setNode(nodeInfo.name, {
-            ...(existing || {}),
-            num: nodeInfo.num, host: nodeInfo.host,
-            publicIp: nodeInfo.publicIp, privateIp: nodeInfo.privateIp,
-            protx: nodeInfo.protx, health: 'unreachable',
-            error: result.error, pollDuration: elapsed,
-          });
-        }
+        processNodeResult(nodeInfo, result, Date.now() - startTime);
       } catch (err) {
-        setNode(nodeInfo.name, {
-          ...(existing || {}),
-          num: nodeInfo.num, host: nodeInfo.host,
-          publicIp: nodeInfo.publicIp, privateIp: nodeInfo.privateIp,
-          protx: nodeInfo.protx, health: 'unreachable',
-          error: err.message, pollDuration: Date.now() - startTime,
-        });
+        processNodeResult(nodeInfo, { success: false, error: err.message }, Date.now() - startTime);
       }
-      const updatedNode = getNode(nodeInfo.name);
-      broadcast('nodeUpdate', { name: nodeInfo.name, ...updatedNode });
     })
   );
-  const elapsed = Math.round((Date.now() - Date.now()) / 1000);
-  console.log(`Initial burst complete: ${results.filter(r => r.status === 'fulfilled').length}/${nodes.length} nodes`);
+
+  const elapsed = Math.round((Date.now() - burstStart) / 1000);
+  console.log(`Initial burst complete in ${elapsed}s`);
 }
 
 export async function startPolling(nodes) {
