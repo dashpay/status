@@ -49,7 +49,9 @@ export default function NodeCard({ node, onClick }) {
   const s = node.status || {};
   const sys = node.system || {};
 
-  const displayName = node.name.replace('hp-masternode-', 'Node ');
+  const displayName = node.type === 'hp'
+    ? `HP ${node.name.replace('hp-masternode-', '')}`
+    : `MN ${node.name.replace('masternode-', '')}`;
   const coreInfo = s.coreServiceStatus === 'syncing'
     ? `Core: ${s.coreSyncProgress || 'syncing'}`
     : s.coreServiceStatus === 'up'

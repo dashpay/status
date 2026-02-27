@@ -78,6 +78,9 @@ export default function NodeDetail({ node, onClose }) {
             <h2 id="node-detail-title" className="text-lg font-bold text-gray-100">
               {node.name}
             </h2>
+            <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${node.type === 'hp' ? 'bg-blue-500/20 text-blue-400' : 'bg-gray-500/20 text-gray-400'}`}>
+              {node.type === 'hp' ? 'HP' : 'Regular'}
+            </span>
             <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${hl.classes}`}>
               {hl.text}
             </span>

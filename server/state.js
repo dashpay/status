@@ -17,7 +17,10 @@ export function getAllNodes() {
   for (const [name, data] of nodes) {
     result.push({ name, ...data });
   }
-  result.sort((a, b) => (a.num || 0) - (b.num || 0));
+  result.sort((a, b) => {
+    if (a.type !== b.type) return a.type === 'hp' ? -1 : 1;
+    return (a.num || 0) - (b.num || 0);
+  });
   return result;
 }
 
@@ -25,6 +28,7 @@ export function initNode(nodeInfo) {
   if (!nodes.has(nodeInfo.name)) {
     nodes.set(nodeInfo.name, {
       num: nodeInfo.num,
+      type: nodeInfo.type,
       host: nodeInfo.host,
       publicIp: nodeInfo.publicIp,
       privateIp: nodeInfo.privateIp,

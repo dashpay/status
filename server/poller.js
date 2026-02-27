@@ -13,9 +13,10 @@ let privateKey = null;
 let sshUser = 'ubuntu';
 let sshPort = 22;
 let pollIntervalMs = 4000;
+let concurrency = 10;
 let polling = false;
 
-export function configure({ sshKeyPath, sshUserName, pollInterval, sshPortNum }) {
+export function configure({ sshKeyPath, sshUserName, pollInterval, sshPortNum, pollConcurrency }) {
   if (!existsSync(sshKeyPath)) {
     console.error(`SSH key not found: ${sshKeyPath}`);
     process.exit(1);
@@ -24,6 +25,7 @@ export function configure({ sshKeyPath, sshUserName, pollInterval, sshPortNum })
   sshUser = sshUserName || 'ubuntu';
   sshPort = sshPortNum || 22;
   pollIntervalMs = pollInterval || 4000;
+  concurrency = pollConcurrency || 10;
 }
 
 function pollNode(nodeInfo) {
@@ -102,6 +104,7 @@ function processNodeResult(nodeInfo, result, elapsed) {
 
     setNode(nodeInfo.name, {
       num: nodeInfo.num,
+      type: nodeInfo.type,
       host: nodeInfo.host,
       publicIp: nodeInfo.publicIp,
       privateIp: nodeInfo.privateIp,
@@ -116,6 +119,7 @@ function processNodeResult(nodeInfo, result, elapsed) {
     setNode(nodeInfo.name, {
       ...(existing || {}),
       num: nodeInfo.num,
+      type: nodeInfo.type,
       host: nodeInfo.host,
       publicIp: nodeInfo.publicIp,
       privateIp: nodeInfo.privateIp,
@@ -131,19 +135,25 @@ function processNodeResult(nodeInfo, result, elapsed) {
 }
 
 async function pollAllNodes(nodes) {
-  for (const nodeInfo of nodes) {
+  // Poll in batches of `concurrency` nodes at a time
+  for (let i = 0; i < nodes.length; i += concurrency) {
     if (!polling) break;
 
-    const startTime = Date.now();
-    try {
-      const result = await pollNode(nodeInfo);
-      processNodeResult(nodeInfo, result, Date.now() - startTime);
-    } catch (err) {
-      processNodeResult(nodeInfo, { success: false, error: err.message }, Date.now() - startTime);
-    }
+    const batch = nodes.slice(i, i + concurrency);
+    await Promise.allSettled(
+      batch.map(async (nodeInfo) => {
+        const startTime = Date.now();
+        try {
+          const result = await pollNode(nodeInfo);
+          processNodeResult(nodeInfo, result, Date.now() - startTime);
+        } catch (err) {
+          processNodeResult(nodeInfo, { success: false, error: err.message }, Date.now() - startTime);
+        }
+      })
+    );
 
-    // Wait before polling the next node
-    if (polling) {
+    // Wait between batches
+    if (polling && i + concurrency < nodes.length) {
       await new Promise((r) => setTimeout(r, pollIntervalMs));
     }
   }
@@ -171,7 +181,7 @@ async function pollAllNodesParallel(nodes) {
 
 export async function startPolling(nodes) {
   polling = true;
-  console.log(`Starting poller for ${nodes.length} nodes (${pollIntervalMs}ms interval)`);
+  console.log(`Starting poller for ${nodes.length} nodes (${pollIntervalMs}ms interval, ${concurrency} concurrent)`);
 
   // First cycle: hit all nodes in parallel for instant population
   await pollAllNodesParallel(nodes);

@@ -44,7 +44,9 @@ if (!inventoryPath || !existsSync(inventoryPath)) {
 }
 
 const nodes = parseInventory(inventoryPath);
-console.log(`Loaded ${nodes.length} HP masternodes from inventory`);
+const hpCount = nodes.filter(n => n.type === 'hp').length;
+const mnCount = nodes.filter(n => n.type === 'mn').length;
+console.log(`Loaded ${nodes.length} masternodes from inventory (${hpCount} HP, ${mnCount} regular)`);
 
 // Initialize state for all nodes
 for (const node of nodes) {
@@ -57,6 +59,7 @@ configure({
   sshUserName: process.env.SSH_USER || 'ubuntu',
   pollInterval: parseInt(process.env.POLL_INTERVAL_MS || '4000', 10),
   sshPortNum: parseInt(process.env.SSH_PORT || '22', 10),
+  pollConcurrency: parseInt(process.env.POLL_CONCURRENCY || '10', 10),
 });
 
 // API routes
@@ -65,7 +68,7 @@ app.get('/api/nodes', authMiddleware, (req, res) => {
 });
 
 app.get('/api/nodes/:name', authMiddleware, (req, res) => {
-  if (!/^hp-masternode-\d+$/.test(req.params.name)) {
+  if (!/^(hp-)?masternode-\d+$/.test(req.params.name)) {
     res.status(400).json({ error: 'Invalid node name' });
     return;
   }
