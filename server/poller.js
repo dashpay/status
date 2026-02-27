@@ -6,10 +6,10 @@ import { broadcast } from './sse.js';
 
 const SSH_CONNECT_TIMEOUT = 10000;
 const SSH_COMMAND_TIMEOUT = 15000;
-// Combined command: dashmate status + system metrics separated by a marker
-const DASHMATE_CMD = 'sudo -u dashmate dashmate status; echo "===SYSMETRICS==="; head -1 /proc/loadavg; nproc; free -m | grep Mem; df -h / | tail -1';
-// For regular masternodes: dash-cli JSON output + system metrics
-const DASHCLI_CMD = 'echo "===BLOCKCHAIN==="; dash-cli getblockchaininfo 2>&1; echo "===MASTERNODE==="; dash-cli masternode status 2>&1; echo "===SYSMETRICS==="; head -1 /proc/loadavg; nproc; free -m | grep Mem; df -h / | tail -1';
+// The dashmon user's authorized_keys has command= restriction that forces
+// /usr/local/bin/dashmon-check regardless of what we send. This is just
+// a placeholder required by the ssh2 exec() API.
+const MONITOR_CMD = 'status';
 
 let privateKey = null;
 let sshUser = 'ubuntu';
@@ -31,8 +31,6 @@ export function configure({ sshKeyPath, sshUserName, pollInterval, sshPortNum, p
 }
 
 function pollNode(nodeInfo) {
-  const cmd = nodeInfo.type === 'hp' ? DASHMATE_CMD : DASHCLI_CMD;
-
   return new Promise((resolve) => {
     const conn = new Client();
     let settled = false;
@@ -46,7 +44,7 @@ function pollNode(nodeInfo) {
     }, SSH_CONNECT_TIMEOUT + SSH_COMMAND_TIMEOUT);
 
     conn.on('ready', () => {
-      conn.exec(cmd, (err, stream) => {
+      conn.exec(MONITOR_CMD, (err, stream) => {
         if (err) {
           if (!settled) {
             settled = true;
