@@ -1,6 +1,6 @@
 import { Client } from 'ssh2';
 import { readFileSync, existsSync } from 'fs';
-import { parseDashmateStatus, parseSystemMetrics, deriveHealthStatus } from './parser.js';
+import { parseDashmateStatus, parseDashCliStatus, parseSystemMetrics, deriveHealthStatus } from './parser.js';
 import { setNode, getNode } from './state.js';
 import { broadcast } from './sse.js';
 
@@ -8,6 +8,8 @@ const SSH_CONNECT_TIMEOUT = 10000;
 const SSH_COMMAND_TIMEOUT = 15000;
 // Combined command: dashmate status + system metrics separated by a marker
 const DASHMATE_CMD = 'sudo -u dashmate dashmate status; echo "===SYSMETRICS==="; head -1 /proc/loadavg; nproc; free -m | grep Mem; df -h / | tail -1';
+// For regular masternodes: dash-cli JSON output + system metrics
+const DASHCLI_CMD = 'echo "===BLOCKCHAIN==="; dash-cli getblockchaininfo 2>&1; echo "===MASTERNODE==="; dash-cli masternode status 2>&1; echo "===SYSMETRICS==="; head -1 /proc/loadavg; nproc; free -m | grep Mem; df -h / | tail -1';
 
 let privateKey = null;
 let sshUser = 'ubuntu';
@@ -29,6 +31,8 @@ export function configure({ sshKeyPath, sshUserName, pollInterval, sshPortNum, p
 }
 
 function pollNode(nodeInfo) {
+  const cmd = nodeInfo.type === 'hp' ? DASHMATE_CMD : DASHCLI_CMD;
+
   return new Promise((resolve) => {
     const conn = new Client();
     let settled = false;
@@ -42,7 +46,7 @@ function pollNode(nodeInfo) {
     }, SSH_CONNECT_TIMEOUT + SSH_COMMAND_TIMEOUT);
 
     conn.on('ready', () => {
-      conn.exec(DASHMATE_CMD, (err, stream) => {
+      conn.exec(cmd, (err, stream) => {
         if (err) {
           if (!settled) {
             settled = true;
@@ -64,7 +68,8 @@ function pollNode(nodeInfo) {
             settled = true;
             clearTimeout(timeout);
             conn.end();
-            if (stdout.includes('║')) {
+            // HP nodes use dashmate table output, regular use JSON markers
+            if (stdout.includes('║') || stdout.includes('===BLOCKCHAIN===')) {
               resolve({ success: true, output: stdout });
             } else {
               resolve({ success: false, error: stderr || stdout || 'no output' });
@@ -97,9 +102,20 @@ function processNodeResult(nodeInfo, result, elapsed) {
   const existing = getNode(nodeInfo.name);
 
   if (result.success) {
-    const [dashmateOutput, metricsBlock] = result.output.split('===SYSMETRICS===');
-    const status = parseDashmateStatus(dashmateOutput);
-    const health = deriveHealthStatus(status);
+    let status, health;
+    const metricsBlock = result.output.split('===SYSMETRICS===')[1] || null;
+
+    if (nodeInfo.type === 'hp') {
+      const dashmateOutput = result.output.split('===SYSMETRICS===')[0];
+      status = parseDashmateStatus(dashmateOutput);
+      health = deriveHealthStatus(status);
+    } else {
+      const blockchainSection = result.output.split('===BLOCKCHAIN===')[1]?.split('===MASTERNODE===')[0] || '';
+      const masternodeSection = result.output.split('===MASTERNODE===')[1]?.split('===SYSMETRICS===')[0] || '';
+      status = parseDashCliStatus(blockchainSection, masternodeSection);
+      health = deriveHealthStatus(status);
+    }
+
     const system = metricsBlock ? parseSystemMetrics(metricsBlock) : null;
 
     setNode(nodeInfo.name, {

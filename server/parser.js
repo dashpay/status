@@ -126,6 +126,42 @@ export function parseDashmateStatus(output) {
   return result;
 }
 
+// Parse dash-cli JSON output for regular masternodes
+export function parseDashCliStatus(blockchainJson, masternodeJson) {
+  const result = {};
+
+  try {
+    const chain = JSON.parse(blockchainJson.trim());
+    result.network = chain.chain === 'test' ? 'testnet' : chain.chain;
+    result.coreHeight = chain.blocks || null;
+    result.coreServiceStatus = chain.initialblockdownload ? 'syncing' : 'up';
+    const progress = chain.verificationprogress;
+    if (progress != null) {
+      result.coreSyncProgress = progress >= 0.9999 ? '100%' : `${(progress * 100).toFixed(2)}%`;
+    }
+    result.coreSize = chain.size_on_disk
+      ? `${(chain.size_on_disk / (1024 ** 3)).toFixed(1)} GB`
+      : null;
+  } catch { /* blockchain info unavailable */ }
+
+  try {
+    const mn = JSON.parse(masternodeJson.trim());
+    result.masternodeState = mn.state?.toUpperCase() || mn.status?.toUpperCase() || null;
+    result.masternodeProTx = mn.proTxHash || null;
+    result.posePenalty = mn.dmnState?.PoSePenalty ?? null;
+    if (mn.dmnState?.PoSeBanHeight > 0) {
+      result.masternodeState = 'POSE_BANNED';
+    }
+    result.lastPaidBlock = mn.dmnState?.lastPaidHeight || null;
+  } catch { /* masternode info unavailable */ }
+
+  // Regular masternodes don't have platform
+  result.platformEnabled = false;
+  result.platformStatus = null;
+
+  return result;
+}
+
 // Derive overall health status from parsed data
 export function deriveHealthStatus(data) {
   if (!data || Object.keys(data).length === 0) return 'unreachable';
@@ -134,6 +170,8 @@ export function deriveHealthStatus(data) {
   if (data.platformStatus === 'error') return 'error';
   if (data.coreServiceStatus === 'syncing' || (data.coreSyncProgress && data.coreSyncProgress !== '100%')) return 'syncing';
   if (data.platformStatus === 'syncing' || data.platformStatus === 'wait_for_core') return 'syncing';
+  // HP nodes need platform up to be healthy; regular nodes just need READY
+  if (data.masternodeState === 'READY' && data.platformEnabled === false) return 'healthy';
   if (data.masternodeState === 'READY' && data.platformStatus === 'up') return 'healthy';
   if (data.masternodeState === 'READY') return 'warning';
   return 'warning';

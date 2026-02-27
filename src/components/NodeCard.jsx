@@ -58,11 +58,14 @@ export default function NodeCard({ node, onClick }) {
       ? `Core: up`
       : `Core: ${s.coreServiceStatus || '—'}`;
 
-  const platformInfo = s.platformStatus === 'up'
-    ? `Plat: ${s.platformBlockHeight || 'up'}`
-    : s.platformStatus
-      ? `Plat: ${s.platformStatus}`
-      : 'Plat: —';
+  const showPlatform = s.platformEnabled !== false;
+  const platformInfo = showPlatform
+    ? (s.platformStatus === 'up'
+      ? `Plat: ${s.platformBlockHeight || 'up'}`
+      : s.platformStatus
+        ? `Plat: ${s.platformStatus}`
+        : 'Plat: —')
+    : null;
 
   const mnState = s.masternodeState || '—';
   const pose = s.posePenalty !== null && s.posePenalty !== undefined
@@ -86,7 +89,7 @@ export default function NodeCard({ node, onClick }) {
           {mnState}
         </div>
         <div className="text-gray-400">{coreInfo}</div>
-        <div className="text-gray-400">{platformInfo}</div>
+        {platformInfo && <div className="text-gray-400">{platformInfo}</div>}
         {pose && <div className="text-gray-500">{pose}</div>}
       </div>
 
