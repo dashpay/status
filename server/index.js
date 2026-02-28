@@ -84,6 +84,10 @@ app.get('/api/events', authMiddleware, (req, res) => {
   addClient(res);
 });
 
+app.get('/api/config', (req, res) => {
+  res.json({ networkName: process.env.NETWORK_NAME || 'Testnet' });
+});
+
 app.get('/api/health', (req, res) => {
   const allNodes = getAllNodes();
   const counts = { healthy: 0, syncing: 0, error: 0, banned: 0, warning: 0, unreachable: 0, unknown: 0 };

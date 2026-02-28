@@ -9,7 +9,7 @@ const SSH_COMMAND_TIMEOUT = 15000;
 // The dashmon user's authorized_keys has command= restriction that forces
 // /usr/local/bin/dashmon-check regardless of what we send. This is just
 // a placeholder required by the ssh2 exec() API.
-const MONITOR_CMD = 'status';
+const MONITOR_CMD = process.env.SSH_COMMAND || 'status';
 
 let privateKey = null;
 let sshUser = 'ubuntu';

@@ -12,9 +12,9 @@ if [[ -f /home/dashmate/.dashmate/config.json ]]; then
 else
     # Regular masternode: dash-cli as the ubuntu user
     echo "===BLOCKCHAIN==="
-    sudo -u ubuntu dash-cli getblockchaininfo 2>&1
+    sudo -u ubuntu dash-cli getblockchaininfo 2>&1 || true
     echo "===MASTERNODE==="
-    sudo -u ubuntu dash-cli masternode status 2>&1
+    sudo -u ubuntu dash-cli masternode status 2>&1 || true
     echo "===SYSMETRICS==="
 fi
 
