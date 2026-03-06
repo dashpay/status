@@ -17,13 +17,14 @@ try:
         return json.loads(urllib.request.urlopen(
             "http://127.0.0.1:36657" + path, timeout=5
         ).read())
-    status = fetch("/status")
-    height = int(status["sync_info"]["latest_block_height"])
     validators = fetch("/validators?per_page=100")
-    vals = validators["validators"]
-    next_prop = max(vals, key=lambda v: int(v["proposer_priority"]))["pro_tx_hash"]
+    sorted_ptx = sorted(v["pro_tx_hash"] for v in validators["validators"])
     block = fetch("/block")
-    cur_prop = block["block"]["header"]["proposer_pro_tx_hash"]
+    header = block["block"]["header"]
+    cur_prop = header["proposer_pro_tx_hash"]
+    height = int(header["height"])
+    idx = sorted_ptx.index(cur_prop)
+    next_prop = sorted_ptx[(idx + 1) % len(sorted_ptx)]
     print(json.dumps({"currentProposer": cur_prop,
                        "nextProposer": next_prop, "platformHeight": height}))
 except Exception as e:
