@@ -1,7 +1,7 @@
 import { Client } from 'ssh2';
 import { readFileSync, existsSync } from 'fs';
-import { parseDashmateStatus, parseDashCliStatus, parseSystemMetrics, deriveHealthStatus } from './parser.js';
-import { setNode, getNode } from './state.js';
+import { parseDashmateStatus, parseDashCliStatus, parseSystemMetrics, deriveHealthStatus, parseTenderdashInfo } from './parser.js';
+import { setNode, getNode, getProposerState, setProposerState, resolveProposerNodes } from './state.js';
 import { broadcast } from './sse.js';
 
 const SSH_CONNECT_TIMEOUT = 10000;
@@ -104,9 +104,33 @@ function processNodeResult(nodeInfo, result, elapsed) {
     const metricsBlock = result.output.split('===SYSMETRICS===')[1] || null;
 
     if (nodeInfo.type === 'hp') {
-      const dashmateOutput = result.output.split('===SYSMETRICS===')[0];
+      const dashmateOutput = result.output.split('===TENDERDASH===')[0];
       status = parseDashmateStatus(dashmateOutput);
       health = deriveHealthStatus(status);
+
+      // Parse Tenderdash proposer info (ProTX hashes match inventory directly)
+      const tenderdashSection = result.output.split('===TENDERDASH===')[1]?.split('===SYSMETRICS===')[0] || '';
+      const tdInfo = parseTenderdashInfo(tenderdashSection);
+
+      if (tdInfo && !tdInfo.error) {
+        const currentPState = getProposerState();
+        if (!currentPState.platformHeight || tdInfo.platformHeight >= currentPState.platformHeight) {
+          const oldCurrent = currentPState.currentProposerNode;
+          const oldNext = currentPState.nextProposerNode;
+
+          setProposerState({
+            currentProposer: tdInfo.currentProposer,
+            nextProposer: tdInfo.nextProposer,
+            platformHeight: tdInfo.platformHeight,
+          });
+          resolveProposerNodes();
+
+          const newPState = getProposerState();
+          if (newPState.currentProposerNode !== oldCurrent || newPState.nextProposerNode !== oldNext) {
+            broadcast('proposerUpdate', newPState);
+          }
+        }
+      }
     } else {
       const blockchainSection = result.output.split('===BLOCKCHAIN===')[1]?.split('===MASTERNODE===')[0] || '';
       const masternodeSection = result.output.split('===MASTERNODE===')[1]?.split('===SYSMETRICS===')[0] || '';
@@ -191,6 +215,13 @@ async function pollAllNodesParallel(nodes) {
 
   const elapsed = Math.round((Date.now() - burstStart) / 1000);
   console.log(`Initial burst complete in ${elapsed}s`);
+
+  // Resolve proposer nodes now that all addresses are populated
+  resolveProposerNodes();
+  const pState = getProposerState();
+  if (pState.currentProposerNode || pState.nextProposerNode) {
+    broadcast('proposerUpdate', pState);
+  }
 }
 
 export async function startPolling(nodes) {

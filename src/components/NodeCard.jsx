@@ -18,6 +18,11 @@ const healthDot = {
   unknown: 'bg-gray-700',
 };
 
+const proposerStyles = {
+  current: 'ring-2 ring-cyan-400 shadow-[0_0_15px_rgba(34,211,238,0.35)]',
+  next: 'ring-2 ring-violet-400 shadow-[0_0_15px_rgba(167,139,250,0.3)]',
+};
+
 function timeAgo(timestamp) {
   if (!timestamp) return 'never';
   const seconds = Math.floor((Date.now() - timestamp) / 1000);
@@ -73,15 +78,26 @@ export default function NodeCard({ node, onClick }) {
     : '';
 
   const hasSys = sys.cpuPercent !== undefined;
+  const proposerClass = node.proposerRole ? proposerStyles[node.proposerRole] : '';
 
   return (
     <button
       onClick={() => onClick?.(node)}
-      className={`border rounded-lg p-3 text-left transition-all hover:scale-[1.02] hover:shadow-lg cursor-pointer w-full ${healthStyles[health]}`}
+      className={`border rounded-lg p-3 text-left transition-all hover:scale-[1.02] hover:shadow-lg cursor-pointer w-full ${healthStyles[health]} ${proposerClass}`}
     >
       <div className="flex items-center gap-2 mb-2">
         <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${healthDot[health]}`} />
         <span className="font-semibold text-sm text-gray-100 truncate">{displayName}</span>
+        {node.proposerRole === 'current' && (
+          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-cyan-500/20 text-cyan-300 uppercase tracking-wider shrink-0">
+            Proposer
+          </span>
+        )}
+        {node.proposerRole === 'next' && (
+          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-violet-500/20 text-violet-300 uppercase tracking-wider shrink-0">
+            Next
+          </span>
+        )}
       </div>
 
       <div className="space-y-0.5 text-xs font-mono">

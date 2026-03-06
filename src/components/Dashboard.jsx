@@ -5,7 +5,7 @@ import NodeCard from './NodeCard';
 import NodeDetail from './NodeDetail';
 
 export default function Dashboard() {
-  const { nodes, loading } = useNodeData();
+  const { nodes, proposer, loading } = useNodeData();
   const [selectedNode, setSelectedNode] = useState(null);
 
   if (loading) {
@@ -43,9 +43,31 @@ export default function Dashboard() {
         {/* HP Masternodes */}
         {hpNodes.length > 0 && (
           <section>
-            <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">
-              HP Masternodes <span className="text-gray-600">({hpNodes.length})</span>
-            </h2>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
+                HP Masternodes <span className="text-gray-600">({hpNodes.length})</span>
+              </h2>
+              {proposer.currentProposerNode && (
+                <div className="flex items-center gap-4 text-xs">
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-cyan-400" />
+                    <span className="text-gray-400">Proposer:</span>
+                    <span className="text-cyan-300 font-mono">
+                      {proposer.currentProposerNode.replace('hp-masternode-', 'HP ')}
+                    </span>
+                  </span>
+                  {proposer.nextProposerNode && (
+                    <span className="flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-violet-400" />
+                      <span className="text-gray-400">Next:</span>
+                      <span className="text-violet-300 font-mono">
+                        {proposer.nextProposerNode.replace('hp-masternode-', 'HP ')}
+                      </span>
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
               {hpNodes.map((node) => (
                 <NodeCard

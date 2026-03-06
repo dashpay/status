@@ -162,6 +162,22 @@ export function parseDashCliStatus(blockchainJson, masternodeJson) {
   return result;
 }
 
+// Parse Tenderdash proposer info from the ===TENDERDASH=== section
+export function parseTenderdashInfo(tenderdashBlock) {
+  if (!tenderdashBlock || !tenderdashBlock.trim()) return null;
+  try {
+    const data = JSON.parse(tenderdashBlock.trim());
+    if (data.error) return { error: data.error };
+    return {
+      currentProposer: data.currentProposer || null,
+      nextProposer: data.nextProposer || null,
+      platformHeight: data.platformHeight || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // Derive overall health status from parsed data
 export function deriveHealthStatus(data) {
   if (!data || Object.keys(data).length === 0) return 'unreachable';

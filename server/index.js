@@ -6,7 +6,7 @@ import { existsSync } from 'fs';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import { parseInventory } from './inventory.js';
-import { initNode, getAllNodes, getNode } from './state.js';
+import { initNode, getAllNodes, getNode, getProposerState } from './state.js';
 import { addClient, getClientCount, closeAll as closeSSE } from './sse.js';
 import { configure, startPolling, stopPolling } from './poller.js';
 
@@ -82,6 +82,10 @@ app.get('/api/nodes/:name', authMiddleware, (req, res) => {
 
 app.get('/api/events', authMiddleware, (req, res) => {
   addClient(res);
+});
+
+app.get('/api/proposer', authMiddleware, (req, res) => {
+  res.json(getProposerState());
 });
 
 app.get('/api/config', (req, res) => {

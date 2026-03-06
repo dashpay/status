@@ -2,18 +2,26 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 
 export function useNodeData() {
   const [nodes, setNodes] = useState([]);
+  const [proposer, setProposer] = useState({
+    currentProposerNode: null,
+    nextProposerNode: null,
+    platformHeight: null,
+  });
   const [loading, setLoading] = useState(true);
   const eventSourceRef = useRef(null);
 
   // Initial fetch
   useEffect(() => {
-    fetch('/api/nodes')
-      .then((res) => {
+    Promise.all([
+      fetch('/api/nodes').then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
-      })
-      .then((data) => {
-        setNodes(data);
+      }),
+      fetch('/api/proposer').then((res) => res.json()).catch(() => ({})),
+    ])
+      .then(([nodeData, proposerData]) => {
+        setNodes(nodeData);
+        if (proposerData) setProposer(proposerData);
         setLoading(false);
       })
       .catch((err) => {
@@ -42,6 +50,15 @@ export function useNodeData() {
       }
     });
 
+    es.addEventListener('proposerUpdate', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        setProposer(data);
+      } catch (err) {
+        console.warn('Failed to parse proposer SSE:', err);
+      }
+    });
+
     es.onerror = () => {
       // EventSource auto-reconnects
       console.warn('SSE connection lost, reconnecting...');
@@ -62,5 +79,14 @@ export function useNodeData() {
       .catch(console.error);
   }, []);
 
-  return { nodes, loading, refresh };
+  // Annotate nodes with proposer role
+  const annotatedNodes = nodes.map((node) => ({
+    ...node,
+    proposerRole:
+      node.name === proposer.currentProposerNode ? 'current'
+        : node.name === proposer.nextProposerNode ? 'next'
+          : null,
+  }));
+
+  return { nodes: annotatedNodes, proposer, loading, refresh };
 }

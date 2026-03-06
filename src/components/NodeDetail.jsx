@@ -133,6 +133,20 @@ export default function NodeDetail({ node, onClose }) {
             <Row label="Network" value={s.platformNetwork} />
           </div>
 
+          {/* Tenderdash */}
+          {node.type === 'hp' && (
+            <div>
+              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Tenderdash</h3>
+              <Row label="Proposer Role"
+                value={node.proposerRole === 'current' ? 'Current Proposer'
+                  : node.proposerRole === 'next' ? 'Next Proposer'
+                    : 'Validator'}
+                highlight={node.proposerRole === 'current' ? 'text-cyan-400'
+                  : node.proposerRole === 'next' ? 'text-violet-400'
+                    : ''} />
+            </div>
+          )}
+
           {/* System */}
           {node.system && (
             <div>
