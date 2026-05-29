@@ -70,7 +70,6 @@ try:
     ni = status.get("node_info", {}) or {}
     si = status.get("sync_info", {}) or {}
     if ni.get("network"): out["platformNetwork"] = ni.get("network")
-    if ni.get("version"): out["platformVersion"] = ni.get("version")
     if "catching_up" in si: out["platformCatchingUp"] = bool(si["catching_up"])
     if "latest_block_height" in si and "platformHeight" not in out:
         try: out["platformHeight"] = int(si["latest_block_height"])

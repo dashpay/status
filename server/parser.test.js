@@ -30,14 +30,14 @@ test('parseHpStatus marks platform up when only /block returned data', () => {
   assert.equal(status.platformBlockHeight, 12345);
 });
 
-test('parseHpStatus marks platform up when only /net_info returned data', () => {
+test('parseHpStatus marks platform error when only /net_info returned data', () => {
   const tdInfo = parseTenderdashInfo(JSON.stringify({
     platformPeers: 8,
     proposerError: 'x',
     statusError: 'y',
   }));
   const status = parseHpStatus(blockchainJson, masternodeJson, tdInfo, networkInfoJson);
-  assert.equal(status.platformStatus, 'up');
+  assert.equal(status.platformStatus, 'error');
   assert.equal(status.platformPeers, 8);
 });
 
@@ -55,7 +55,6 @@ test('parseHpStatus marks platform up when /status reports caught up', () => {
   const tdInfo = parseTenderdashInfo(JSON.stringify({
     platformHeight: 12345,
     platformNetwork: 'dash-testnet',
-    platformVersion: '1.0.0',
     platformPeers: 4,
     platformCatchingUp: false,
   }));

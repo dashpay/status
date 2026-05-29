@@ -190,7 +190,6 @@ export function parseTenderdashInfo(tenderdashBlock) {
       nextProposer: data.nextProposer || null,
       platformHeight: data.platformHeight || null,
       platformNetwork: data.platformNetwork || null,
-      platformVersion: data.platformVersion || null,
       platformCatchingUp: typeof data.platformCatchingUp === 'boolean'
         ? data.platformCatchingUp
         : null,
@@ -252,24 +251,21 @@ export function parseHpStatus(blockchainJson, masternodeJson, tdInfo, networkInf
 
   if (tdInfo && !tdInfo.error) {
     if (tdInfo.platformNetwork) result.platformNetwork = tdInfo.platformNetwork;
-    if (tdInfo.platformVersion) result.platformVersion = tdInfo.platformVersion;
     if (tdInfo.platformHeight != null) result.platformBlockHeight = tdInfo.platformHeight;
     if (tdInfo.platformPeers != null) result.platformPeers = tdInfo.platformPeers;
 
     // The collector reports per-endpoint errors rather than aborting the whole
-    // Tenderdash blob. Any single endpoint succeeding (height/network/version/
-    // peers/proposer) means Platform is reachable -- treat it as up unless
-    // /status explicitly said we're still catching up.
-    const hasLiveData =
+    // Tenderdash blob. Block/status data means Platform is serving chain state;
+    // /net_info alone only proves the RPC listener answered, so don't use peer
+    // count by itself to mark Platform up.
+    const hasChainStateData =
       tdInfo.platformHeight != null
       || tdInfo.platformNetwork
-      || tdInfo.platformVersion
-      || tdInfo.platformPeers != null
       || tdInfo.currentProposer;
 
     if (tdInfo.platformCatchingUp === true) {
       result.platformStatus = 'syncing';
-    } else if (hasLiveData) {
+    } else if (hasChainStateData) {
       result.platformStatus = 'up';
     } else {
       result.platformStatus = 'error';
