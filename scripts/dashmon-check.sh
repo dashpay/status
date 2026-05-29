@@ -52,19 +52,21 @@ def fetch(path):
     ).read())
 out = {}
 try:
-    validators = fetch("/validators?per_page=100")
-    sorted_ptx = sorted(v["pro_tx_hash"] for v in validators["validators"])
     block = fetch("/block")
     header = block["block"]["header"]
     cur_prop = header["proposer_pro_tx_hash"]
-    height = int(header["height"])
-    idx = sorted_ptx.index(cur_prop)
-    next_prop = sorted_ptx[(idx + 1) % len(sorted_ptx)]
     out["currentProposer"] = cur_prop
-    out["nextProposer"] = next_prop
-    out["platformHeight"] = height
+    out["platformHeight"] = int(header["height"])
 except Exception as e:
     out["proposerError"] = str(e)
+try:
+    if "currentProposer" in out:
+        validators = fetch("/validators?per_page=100")
+        sorted_ptx = sorted(v["pro_tx_hash"] for v in validators["validators"])
+        idx = sorted_ptx.index(out["currentProposer"])
+        out["nextProposer"] = sorted_ptx[(idx + 1) % len(sorted_ptx)]
+except Exception as e:
+    out["nextProposerError"] = str(e)
 try:
     status = fetch("/status")
     ni = status.get("node_info", {}) or {}
