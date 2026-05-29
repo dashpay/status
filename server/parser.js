@@ -126,12 +126,26 @@ export function parseDashmateStatus(output) {
   return result;
 }
 
+// `dashmate core cli` (and occasionally dash-cli) can prepend warnings,
+// docker-compose "Attaching to ..." banners, or deprecation notices to the
+// JSON payload. Grab the substring from the first `{` to the last `}` so
+// JSON.parse doesn't trip over leading noise.
+export function extractJsonBlob(raw) {
+  if (!raw) return '';
+  const s = raw.trim();
+  if (!s) return '';
+  const start = s.indexOf('{');
+  const end = s.lastIndexOf('}');
+  if (start === -1 || end === -1 || end < start) return s;
+  return s.slice(start, end + 1);
+}
+
 // Parse dash-cli JSON output for regular masternodes
 export function parseDashCliStatus(blockchainJson, masternodeJson) {
   const result = {};
 
   try {
-    const chain = JSON.parse(blockchainJson.trim());
+    const chain = JSON.parse(extractJsonBlob(blockchainJson));
     result.network = chain.chain === 'test' ? 'testnet' : chain.chain;
     result.coreHeight = chain.blocks || null;
     result.coreServiceStatus = chain.initialblockdownload ? 'syncing' : 'up';
@@ -145,7 +159,7 @@ export function parseDashCliStatus(blockchainJson, masternodeJson) {
   } catch { /* blockchain info unavailable */ }
 
   try {
-    const mn = JSON.parse(masternodeJson.trim());
+    const mn = JSON.parse(extractJsonBlob(masternodeJson));
     result.masternodeState = mn.state?.toUpperCase() || mn.status?.toUpperCase() || null;
     result.masternodeProTx = mn.proTxHash || null;
     result.posePenalty = mn.dmnState?.PoSePenalty ?? null;
@@ -162,7 +176,10 @@ export function parseDashCliStatus(blockchainJson, masternodeJson) {
   return result;
 }
 
-// Parse Tenderdash proposer info from the ===TENDERDASH=== section
+// Parse Tenderdash proposer + status info from the ===TENDERDASH=== section.
+// The bash collector emits a single JSON blob bundling several Tenderdash RPC
+// calls (/validators, /block, /status, /net_info). Per-endpoint failures are
+// reported as *Error fields rather than aborting the whole blob.
 export function parseTenderdashInfo(tenderdashBlock) {
   if (!tenderdashBlock || !tenderdashBlock.trim()) return null;
   try {
@@ -172,10 +189,96 @@ export function parseTenderdashInfo(tenderdashBlock) {
       currentProposer: data.currentProposer || null,
       nextProposer: data.nextProposer || null,
       platformHeight: data.platformHeight || null,
+      platformNetwork: data.platformNetwork || null,
+      platformCatchingUp: typeof data.platformCatchingUp === 'boolean'
+        ? data.platformCatchingUp
+        : null,
+      platformPeers: typeof data.platformPeers === 'number'
+        ? data.platformPeers
+        : null,
+      proposerError: data.proposerError || null,
+      statusError: data.statusError || null,
+      netInfoError: data.netInfoError || null,
     };
   } catch {
     return null;
   }
+}
+
+// Parse the new HP node output: same dash-cli JSON sections that regular
+// masternodes produce, plus Tenderdash data for platform-side fields. This
+// replaces parseDashmateStatus on the hot path -- see scripts/dashmon-check.sh
+// for the rationale (avoids mnowatch.org port probes).
+//
+// Fields previously sourced from `dashmate status` and their replacements:
+//   coreVersion              -> getnetworkinfo.subversion (networkInfoJson)
+//   coreSize                 -> getblockchaininfo.size_on_disk (parseDashCliStatus)
+//   posePenalty              -> masternode status dmnState.PoSePenalty
+//   lastPaidBlock            -> masternode status dmnState.lastPaidHeight
+//   lastPaidTime,            -> NOT derivable from on-node RPC without scanning
+//   paymentQueuePosition,       the full masternode list and per-block headers,
+//   nextPaymentTime             which would be far more expensive than the
+//                               poll cadence allows. Left null intentionally.
+export function parseHpStatus(blockchainJson, masternodeJson, tdInfo, networkInfoJson) {
+  // Core + masternode parsing is identical to the regular MN path now that
+  // both collectors emit dash-cli JSON.
+  const result = parseDashCliStatus(blockchainJson, masternodeJson);
+
+  // If neither Core RPC call produced any usable field, treat the host as
+  // errored rather than letting it fall through to a "warning" state. This
+  // covers `dashmate core cli` outright failing (container down, dashmate
+  // misconfigured) -- the bash collector swallows its exit code with
+  // `|| true`, so the only signal we have is empty/garbage output.
+  if (result.coreHeight == null && result.network == null && result.masternodeState == null) {
+    result.coreServiceStatus = 'error';
+  }
+
+  // getnetworkinfo is optional -- older deployments of dashmon-check.sh
+  // don't emit a ===NETWORKINFO=== section, so absent input is normal.
+  if (networkInfoJson && networkInfoJson.trim()) {
+    try {
+      const ni = JSON.parse(extractJsonBlob(networkInfoJson));
+      if (ni.subversion) {
+        // subversion looks like "/Dash Core:23.0.2/" -- pull just the version.
+        const match = ni.subversion.match(/Dash Core:([^/]+)/);
+        result.coreVersion = match ? match[1] : ni.subversion.replace(/^\/|\/$/g, '');
+      }
+    } catch { /* network info unavailable */ }
+  }
+
+  // HP nodes always have Platform; let Tenderdash drive the live fields.
+  result.platformEnabled = true;
+
+  if (tdInfo && !tdInfo.error) {
+    if (tdInfo.platformNetwork) result.platformNetwork = tdInfo.platformNetwork;
+    if (tdInfo.platformHeight != null) result.platformBlockHeight = tdInfo.platformHeight;
+    if (tdInfo.platformPeers != null) result.platformPeers = tdInfo.platformPeers;
+
+    // The collector reports per-endpoint errors rather than aborting the whole
+    // Tenderdash blob. Block/status data means Platform is serving chain state;
+    // /net_info alone only proves the RPC listener answered, so don't use peer
+    // count by itself to mark Platform up.
+    const hasChainStateData =
+      tdInfo.platformHeight != null
+      || tdInfo.platformNetwork
+      || tdInfo.currentProposer;
+
+    if (tdInfo.platformCatchingUp === true) {
+      result.platformStatus = 'syncing';
+    } else if (tdInfo.platformCatchingUp === false && hasChainStateData) {
+      result.platformStatus = 'up';
+    } else if (hasChainStateData) {
+      result.platformStatus = 'warning';
+    } else {
+      result.platformStatus = 'error';
+    }
+  } else if (tdInfo?.error) {
+    result.platformStatus = 'error';
+  } else {
+    result.platformStatus = null;
+  }
+
+  return result;
 }
 
 // Derive overall health status from parsed data
@@ -184,6 +287,7 @@ export function deriveHealthStatus(data) {
   if (data.masternodeState === 'POSE_BANNED') return 'banned';
   if (data.masternodeState === 'ERROR') return 'error';
   if (data.platformStatus === 'error') return 'error';
+  if (data.coreServiceStatus === 'error') return 'error';
   if (data.coreServiceStatus === 'syncing' || (data.coreSyncProgress && data.coreSyncProgress !== '100%')) return 'syncing';
   if (data.platformStatus === 'syncing' || data.platformStatus === 'wait_for_core') return 'syncing';
   // HP nodes need platform up to be healthy; regular nodes just need READY

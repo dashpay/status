@@ -117,9 +117,9 @@ export default function NodeDetail({ node, onClose }) {
               highlight={s.masternodeState === 'READY' ? 'text-emerald-400' : s.masternodeState === 'POSE_BANNED' ? 'text-red-400' : 'text-amber-400'} />
             <Row label="PoSe Penalty" value={s.posePenalty}
               highlight={s.posePenalty === 0 ? 'text-emerald-400' : s.posePenalty > 0 ? 'text-red-400' : ''} />
-            <Row label="Last Paid" value={s.lastPaidTime} />
-            <Row label="Queue Position" value={s.paymentQueuePosition} />
-            <Row label="Next Payment" value={s.nextPaymentTime} />
+            <Row label="Last Paid" value={s.lastPaidTime ?? (s.lastPaidBlock != null ? `block ${s.lastPaidBlock.toLocaleString()}` : null)} />
+            {(node.type !== 'hp' || s.paymentQueuePosition != null) && <Row label="Queue Position" value={s.paymentQueuePosition} />}
+            {(node.type !== 'hp' || s.nextPaymentTime) && <Row label="Next Payment" value={s.nextPaymentTime} />}
           </div>
 
           {/* Platform */}
@@ -127,7 +127,7 @@ export default function NodeDetail({ node, onClose }) {
             <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Platform</h3>
             <Row label="Status" value={s.platformStatus}
               highlight={s.platformStatus === 'up' ? 'text-emerald-400' : s.platformStatus === 'error' ? 'text-red-400' : 'text-amber-400'} />
-            <Row label="Version" value={s.platformVersion} />
+            {s.platformVersion && <Row label="Version" value={s.platformVersion} />}
             <Row label="Block Height" value={s.platformBlockHeight?.toLocaleString()} />
             <Row label="Peers" value={s.platformPeers} />
             <Row label="Network" value={s.platformNetwork} />

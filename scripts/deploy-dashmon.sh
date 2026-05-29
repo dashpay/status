@@ -91,13 +91,14 @@ REMOTE_SETUP
     echo "$AUTHKEYS" | ssh $SSH_OPTS -i "$ADMIN_KEY" "ubuntu@${host}" \
         "sudo tee /home/dashmon/.ssh/authorized_keys > /dev/null && sudo chown dashmon:dashmon /home/dashmon/.ssh/authorized_keys && sudo chmod 600 /home/dashmon/.ssh/authorized_keys" >> "$logfile" 2>&1
 
-    # 3. Deploy monitoring script
-    cat "$MONITOR_SCRIPT" | ssh $SSH_OPTS -i "$ADMIN_KEY" "ubuntu@${host}" \
-        "sudo tee /usr/local/bin/dashmon-check > /dev/null && sudo chmod 755 /usr/local/bin/dashmon-check" >> "$logfile" 2>&1
-
-    # 4. Deploy sudoers (validate before writing)
+    # 3. Deploy sudoers first so the existing forced command never runs a new
+    # script without its matching command allowlist.
     cat "$SUDOERS_FILE" | ssh $SSH_OPTS -i "$ADMIN_KEY" "ubuntu@${host}" \
         "cat > /tmp/dashmon-sudoers && sudo visudo -cf /tmp/dashmon-sudoers && sudo mv /tmp/dashmon-sudoers /etc/sudoers.d/dashmon && sudo chown root:root /etc/sudoers.d/dashmon && sudo chmod 440 /etc/sudoers.d/dashmon" >> "$logfile" 2>&1
+
+    # 4. Deploy monitoring script
+    cat "$MONITOR_SCRIPT" | ssh $SSH_OPTS -i "$ADMIN_KEY" "ubuntu@${host}" \
+        "sudo tee /usr/local/bin/dashmon-check > /dev/null && sudo chmod 755 /usr/local/bin/dashmon-check" >> "$logfile" 2>&1
 
     echo "[$name] OK" | tee -a "$logfile"
 }
