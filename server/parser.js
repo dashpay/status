@@ -162,7 +162,10 @@ export function parseDashCliStatus(blockchainJson, masternodeJson) {
   return result;
 }
 
-// Parse Tenderdash proposer info from the ===TENDERDASH=== section
+// Parse Tenderdash proposer + status info from the ===TENDERDASH=== section.
+// The bash collector emits a single JSON blob bundling several Tenderdash RPC
+// calls (/validators, /block, /status, /net_info). Per-endpoint failures are
+// reported as *Error fields rather than aborting the whole blob.
 export function parseTenderdashInfo(tenderdashBlock) {
   if (!tenderdashBlock || !tenderdashBlock.trim()) return null;
   try {
@@ -172,10 +175,55 @@ export function parseTenderdashInfo(tenderdashBlock) {
       currentProposer: data.currentProposer || null,
       nextProposer: data.nextProposer || null,
       platformHeight: data.platformHeight || null,
+      platformNetwork: data.platformNetwork || null,
+      platformVersion: data.platformVersion || null,
+      platformCatchingUp: typeof data.platformCatchingUp === 'boolean'
+        ? data.platformCatchingUp
+        : null,
+      platformPeers: typeof data.platformPeers === 'number'
+        ? data.platformPeers
+        : null,
+      proposerError: data.proposerError || null,
+      statusError: data.statusError || null,
+      netInfoError: data.netInfoError || null,
     };
   } catch {
     return null;
   }
+}
+
+// Parse the new HP node output: same dash-cli JSON sections that regular
+// masternodes produce, plus Tenderdash data for platform-side fields. This
+// replaces parseDashmateStatus on the hot path -- see scripts/dashmon-check.sh
+// for the rationale (avoids mnowatch.org port probes).
+export function parseHpStatus(blockchainJson, masternodeJson, tdInfo) {
+  // Core + masternode parsing is identical to the regular MN path now that
+  // both collectors emit dash-cli JSON.
+  const result = parseDashCliStatus(blockchainJson, masternodeJson);
+
+  // HP nodes always have Platform; let Tenderdash drive the live fields.
+  result.platformEnabled = true;
+
+  if (tdInfo && !tdInfo.error) {
+    if (tdInfo.platformNetwork) result.platformNetwork = tdInfo.platformNetwork;
+    if (tdInfo.platformVersion) result.platformVersion = tdInfo.platformVersion;
+    if (tdInfo.platformHeight != null) result.platformBlockHeight = tdInfo.platformHeight;
+    if (tdInfo.platformPeers != null) result.platformPeers = tdInfo.platformPeers;
+    if (typeof tdInfo.platformCatchingUp === 'boolean') {
+      result.platformStatus = tdInfo.platformCatchingUp ? 'syncing' : 'up';
+    } else if (!tdInfo.statusError && (tdInfo.platformHeight != null || tdInfo.platformNetwork)) {
+      // /status failed but other endpoints answered -- platform is reachable.
+      result.platformStatus = 'up';
+    } else {
+      result.platformStatus = 'error';
+    }
+  } else if (tdInfo?.error) {
+    result.platformStatus = 'error';
+  } else {
+    result.platformStatus = null;
+  }
+
+  return result;
 }
 
 // Derive overall health status from parsed data

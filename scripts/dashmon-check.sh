@@ -3,20 +3,45 @@
 # Read-only monitoring script for the dash testnet status dashboard.
 # Deployed to all masternodes. This is the forced command for the dashmon SSH key.
 # Detects HP vs regular masternode by checking for dashmate configuration.
+#
+# HP node path AVOIDS `dashmate status`. That command performs port-reachability
+# probes against mnowatch.org as part of its "Core Service Status" / "Platform
+# Status" fields, and the dashboard polls every few seconds across every
+# masternode -- that pattern abuses an external third-party service.
+#
+# Instead we pull equivalent fields from on-node sources only:
+#   * Core RPC via `dashmate core cli` (forwards to dash-cli inside the
+#     core container -- same data as the regular masternode path)
+#   * Tenderdash local RPC on 127.0.0.1:36657 for platform-side info
+#     (height, peers, network, version, sync state, proposer rotation)
+#
+# A future improvement is to call rs-dapi (Platform.getStatus /
+# Core.getBlockchainStatus / Core.getMasternodeStatus) via the local
+# JSON-RPC / gRPC endpoints. JSON-RPC currently only maps Platform.getStatus,
+# and the gRPC Core methods need either a gateway TLS round-trip or grpcurl,
+# neither of which we want to require on every node. The Tenderdash + Core RPC
+# combination already gives us the data we need without extra deps, so we
+# defer the rs-dapi switch until that JSON-RPC mapping is broader.
 set -euo pipefail
 
 if [[ -f /home/dashmate/.dashmate/config.json ]]; then
-    # HP masternode: dashmate status as the dashmate user
-    sudo -u dashmate dashmate status 2>&1
+    # HP masternode: Core RPC + Tenderdash. No mnowatch.org calls.
+    echo "===BLOCKCHAIN==="
+    sudo -u dashmate dashmate core cli getblockchaininfo 2>&1 || true
+    echo "===MASTERNODE==="
+    sudo -u dashmate dashmate core cli masternode status 2>&1 || true
     echo "===TENDERDASH==="
-    # Query Tenderdash RPC for proposer info (localhost only, no sudo needed)
+    # One python invocation pulls proposer rotation, sync state, peers, and
+    # node info from Tenderdash's local RPC. Best-effort: partial results are
+    # still emitted if a single endpoint fails.
     python3 -c '
 import json, urllib.request
+def fetch(path):
+    return json.loads(urllib.request.urlopen(
+        "http://127.0.0.1:36657" + path, timeout=5
+    ).read())
+out = {}
 try:
-    def fetch(path):
-        return json.loads(urllib.request.urlopen(
-            "http://127.0.0.1:36657" + path, timeout=5
-        ).read())
     validators = fetch("/validators?per_page=100")
     sorted_ptx = sorted(v["pro_tx_hash"] for v in validators["validators"])
     block = fetch("/block")
@@ -25,14 +50,33 @@ try:
     height = int(header["height"])
     idx = sorted_ptx.index(cur_prop)
     next_prop = sorted_ptx[(idx + 1) % len(sorted_ptx)]
-    print(json.dumps({"currentProposer": cur_prop,
-                       "nextProposer": next_prop, "platformHeight": height}))
+    out["currentProposer"] = cur_prop
+    out["nextProposer"] = next_prop
+    out["platformHeight"] = height
 except Exception as e:
-    print(json.dumps({"error": str(e)}))
+    out["proposerError"] = str(e)
+try:
+    status = fetch("/status")
+    ni = status.get("node_info", {}) or {}
+    si = status.get("sync_info", {}) or {}
+    if ni.get("network"): out["platformNetwork"] = ni.get("network")
+    if ni.get("version"): out["platformVersion"] = ni.get("version")
+    if "catching_up" in si: out["platformCatchingUp"] = bool(si["catching_up"])
+    if "latest_block_height" in si and "platformHeight" not in out:
+        try: out["platformHeight"] = int(si["latest_block_height"])
+        except Exception: pass
+except Exception as e:
+    out["statusError"] = str(e)
+try:
+    net_info = fetch("/net_info")
+    out["platformPeers"] = int(net_info.get("n_peers", 0))
+except Exception as e:
+    out["netInfoError"] = str(e)
+print(json.dumps(out))
 ' 2>/dev/null || echo '{"error":"tenderdash-unavailable"}'
     echo "===SYSMETRICS==="
 else
-    # Regular masternode: dash-cli as the ubuntu user
+    # Regular masternode: dash-cli as the ubuntu user.
     echo "===BLOCKCHAIN==="
     sudo -u ubuntu dash-cli getblockchaininfo 2>&1 || true
     echo "===MASTERNODE==="

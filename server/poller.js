@@ -1,6 +1,6 @@
 import { Client } from 'ssh2';
 import { readFileSync, existsSync } from 'fs';
-import { parseDashmateStatus, parseDashCliStatus, parseSystemMetrics, deriveHealthStatus, parseTenderdashInfo } from './parser.js';
+import { parseDashmateStatus, parseDashCliStatus, parseHpStatus, parseSystemMetrics, deriveHealthStatus, parseTenderdashInfo } from './parser.js';
 import { setNode, getNode, getProposerState, setProposerState, resolveProposerNodes } from './state.js';
 import { broadcast } from './sse.js';
 
@@ -104,13 +104,25 @@ function processNodeResult(nodeInfo, result, elapsed) {
     const metricsBlock = result.output.split('===SYSMETRICS===')[1] || null;
 
     if (nodeInfo.type === 'hp') {
-      const dashmateOutput = result.output.split('===TENDERDASH===')[0];
-      status = parseDashmateStatus(dashmateOutput);
-      health = deriveHealthStatus(status);
-
-      // Parse Tenderdash proposer info (ProTX hashes match inventory directly)
+      // Tenderdash bundle is parsed first because both the platform-status
+      // overlay and the proposer-rotation state update depend on it.
       const tenderdashSection = result.output.split('===TENDERDASH===')[1]?.split('===SYSMETRICS===')[0] || '';
       const tdInfo = parseTenderdashInfo(tenderdashSection);
+
+      // Hosts still running the legacy collector emit a `dashmate status`
+      // box-drawing table (note the `║` chars) before ===TENDERDASH===.
+      // Newly-deployed hosts emit dash-cli JSON in ===BLOCKCHAIN=== /
+      // ===MASTERNODE=== sections instead -- see scripts/dashmon-check.sh
+      // for why we moved off `dashmate status`.
+      if (result.output.includes('║')) {
+        const dashmateOutput = result.output.split('===TENDERDASH===')[0];
+        status = parseDashmateStatus(dashmateOutput);
+      } else {
+        const blockchainSection = result.output.split('===BLOCKCHAIN===')[1]?.split('===MASTERNODE===')[0] || '';
+        const masternodeSection = result.output.split('===MASTERNODE===')[1]?.split('===TENDERDASH===')[0] || '';
+        status = parseHpStatus(blockchainSection, masternodeSection, tdInfo);
+      }
+      health = deriveHealthStatus(status);
 
       if (tdInfo && !tdInfo.error) {
         const currentPState = getProposerState();
