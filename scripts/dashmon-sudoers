@@ -5,6 +5,7 @@
 # HP masternodes: Core RPC via dashmate. These replace `dashmate status`,
 # which was removed from the hot path because it probes mnowatch.org.
 dashmon ALL=(dashmate) NOPASSWD: /usr/bin/dashmate core cli getblockchaininfo
+dashmon ALL=(dashmate) NOPASSWD: /usr/bin/dashmate core cli getnetworkinfo
 dashmon ALL=(dashmate) NOPASSWD: /usr/bin/dashmate core cli masternode status
 
 # Transitional: keep the old `dashmate status` rule until every HP host has
