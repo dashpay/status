@@ -104,3 +104,27 @@ test('parseHpStatus preserves coreSize and posePenalty from dash-cli JSON', () =
   assert.equal(status.coreSize, '5.0 GB');
   assert.equal(status.posePenalty, 0);
 });
+
+// Contract boundary: scripts/dashmon-check.sh is responsible for unwrapping
+// Tenderdash's JSON-RPC envelope ({jsonrpc, id, result}) and emitting a flat
+// assembly object. parseTenderdashInfo only sees that post-unwrap blob -- it
+// must NOT silently accept raw-envelope input, otherwise a regression in the
+// collector would go undetected here.
+test('parseTenderdashInfo ignores raw JSON-RPC envelope shape (collector must unwrap)', () => {
+  const envelope = JSON.stringify({
+    jsonrpc: '2.0',
+    id: -1,
+    result: {
+      currentProposer: 'p1',
+      platformHeight: 12345,
+      platformNetwork: 'dash-testnet',
+      platformCatchingUp: false,
+      platformPeers: 4,
+    },
+  });
+  const tdInfo = parseTenderdashInfo(envelope);
+  assert.equal(tdInfo.currentProposer, null);
+  assert.equal(tdInfo.platformHeight, null);
+  assert.equal(tdInfo.platformNetwork, null);
+  assert.equal(tdInfo.platformPeers, null);
+});

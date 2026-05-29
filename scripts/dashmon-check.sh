@@ -46,10 +46,18 @@ if [[ -f /home/dashmate/.dashmate/config.json ]]; then
     # still emitted if a single endpoint fails.
     python3 -c '
 import json, urllib.request
+# Tenderdash HTTP RPC returns JSON-RPC envelopes
+# ({"jsonrpc":"2.0","id":-1,"result":{...}} or {"error":{...}}).
+# Unwrap result here so downstream code can address fields directly.
 def fetch(path):
-    return json.loads(urllib.request.urlopen(
+    data = json.loads(urllib.request.urlopen(
         "http://127.0.0.1:36657" + path, timeout=5
     ).read())
+    if isinstance(data, dict) and data.get("error") is not None:
+        raise RuntimeError(json.dumps(data["error"]))
+    if isinstance(data, dict) and "result" in data:
+        return data["result"]
+    return data
 out = {}
 try:
     block = fetch("/block")
