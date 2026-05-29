@@ -262,10 +262,10 @@ export function parseHpStatus(blockchainJson, masternodeJson, tdInfo, networkInf
     // /status explicitly said we're still catching up.
     const hasLiveData =
       tdInfo.platformHeight != null
-      || !!tdInfo.platformNetwork
-      || !!tdInfo.platformVersion
+      || tdInfo.platformNetwork
+      || tdInfo.platformVersion
       || tdInfo.platformPeers != null
-      || !!tdInfo.currentProposer;
+      || tdInfo.currentProposer;
 
     if (tdInfo.platformCatchingUp === true) {
       result.platformStatus = 'syncing';
