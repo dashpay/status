@@ -37,7 +37,7 @@ if [[ -f /home/dashmate/.dashmate/config.json ]]; then
     echo "===BLOCKCHAIN==="
     sudo -u dashmate dashmate core cli getblockchaininfo 2>&1 || true
     echo "===MASTERNODE==="
-    sudo -u dashmate dashmate core cli masternode status 2>&1 || true
+    sudo -u dashmate dashmate core cli "masternode status" 2>&1 || true
     echo "===NETWORKINFO==="
     sudo -u dashmate dashmate core cli getnetworkinfo 2>&1 || true
     echo "===TENDERDASH==="
