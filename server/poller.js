@@ -142,14 +142,12 @@ function processNodeResult(nodeInfo, result, elapsed) {
           const oldCurrent = currentPState.currentProposerNode;
           const oldNext = currentPState.nextProposerNode;
 
-          const proposerUpdate = {
+          setProposerState({
             currentProposer: tdInfo.currentProposer,
+            nextProposer: tdInfo.nextProposer
+              || (tdInfo.platformHeight === currentPState.platformHeight ? currentPState.nextProposer : null),
             platformHeight: tdInfo.platformHeight,
-          };
-          if (tdInfo.nextProposer) {
-            proposerUpdate.nextProposer = tdInfo.nextProposer;
-          }
-          setProposerState(proposerUpdate);
+          });
           resolveProposerNodes();
 
           const newPState = getProposerState();
