@@ -265,8 +265,10 @@ export function parseHpStatus(blockchainJson, masternodeJson, tdInfo, networkInf
 
     if (tdInfo.platformCatchingUp === true) {
       result.platformStatus = 'syncing';
-    } else if (hasChainStateData) {
+    } else if (tdInfo.platformCatchingUp === false && hasChainStateData) {
       result.platformStatus = 'up';
+    } else if (hasChainStateData) {
+      result.platformStatus = 'warning';
     } else {
       result.platformStatus = 'error';
     }

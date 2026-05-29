@@ -18,7 +18,7 @@ const masternodeJson = JSON.stringify({
 
 const networkInfoJson = JSON.stringify({ subversion: '/Dash Core:23.0.2/' });
 
-test('parseHpStatus marks platform up when only /block returned data', () => {
+test('parseHpStatus marks platform warning when only /block returned data', () => {
   const tdInfo = parseTenderdashInfo(JSON.stringify({
     currentProposer: 'p1',
     nextProposer: 'p2',
@@ -26,7 +26,7 @@ test('parseHpStatus marks platform up when only /block returned data', () => {
     statusError: 'connection refused',
   }));
   const status = parseHpStatus(blockchainJson, masternodeJson, tdInfo, networkInfoJson);
-  assert.equal(status.platformStatus, 'up');
+  assert.equal(status.platformStatus, 'warning');
   assert.equal(status.platformBlockHeight, 12345);
 });
 
