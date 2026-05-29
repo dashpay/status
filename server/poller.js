@@ -109,22 +109,27 @@ function processNodeResult(nodeInfo, result, elapsed) {
       const tenderdashSection = result.output.split('===TENDERDASH===')[1]?.split('===SYSMETRICS===')[0] || '';
       const tdInfo = parseTenderdashInfo(tenderdashSection);
 
-      // Hosts still running the legacy collector emit a `dashmate status`
-      // box-drawing table (note the `║` chars) before ===TENDERDASH===.
-      // Newly-deployed hosts emit dash-cli JSON in ===BLOCKCHAIN=== /
-      // ===MASTERNODE=== sections instead -- see scripts/dashmon-check.sh
-      // for why we moved off `dashmate status`.
-      if (result.output.includes('║')) {
-        const dashmateOutput = result.output.split('===TENDERDASH===')[0];
-        status = parseDashmateStatus(dashmateOutput);
-      } else {
+      // Detect the new collector format positively (its dedicated
+      // ===BLOCKCHAIN=== marker). Anything else -- including the legacy
+      // `dashmate status` box-drawing table OR a failed `dashmate core cli`
+      // call that prints a boxed error containing `║` -- falls through to
+      // the legacy parser, which tolerates partial input. See
+      // scripts/dashmon-check.sh for why we moved off `dashmate status`.
+      if (result.output.includes('===BLOCKCHAIN===')) {
         const blockchainSection = result.output.split('===BLOCKCHAIN===')[1]?.split('===MASTERNODE===')[0] || '';
         const masternodeSection = result.output.split('===MASTERNODE===')[1]?.split('===TENDERDASH===')[0] || '';
         status = parseHpStatus(blockchainSection, masternodeSection, tdInfo);
+      } else {
+        const dashmateOutput = result.output.split('===TENDERDASH===')[0];
+        status = parseDashmateStatus(dashmateOutput);
       }
       health = deriveHealthStatus(status);
 
-      if (tdInfo && !tdInfo.error) {
+      // Only update proposer state when /block actually returned a proposer.
+      // Without this guard, a successful /status fetch (which provides
+      // platformHeight) combined with a failed /block (no proposer) would
+      // overwrite known-good proposer info with nulls.
+      if (tdInfo && !tdInfo.error && tdInfo.currentProposer) {
         const currentPState = getProposerState();
         if (!currentPState.platformHeight || tdInfo.platformHeight >= currentPState.platformHeight) {
           const oldCurrent = currentPState.currentProposerNode;

@@ -126,12 +126,26 @@ export function parseDashmateStatus(output) {
   return result;
 }
 
+// `dashmate core cli` (and occasionally dash-cli) can prepend warnings,
+// docker-compose "Attaching to ..." banners, or deprecation notices to the
+// JSON payload. Grab the substring from the first `{` to the last `}` so
+// JSON.parse doesn't trip over leading noise.
+function extractJsonBlob(raw) {
+  if (!raw) return '';
+  const s = raw.trim();
+  if (!s) return '';
+  const start = s.indexOf('{');
+  const end = s.lastIndexOf('}');
+  if (start === -1 || end === -1 || end < start) return s;
+  return s.slice(start, end + 1);
+}
+
 // Parse dash-cli JSON output for regular masternodes
 export function parseDashCliStatus(blockchainJson, masternodeJson) {
   const result = {};
 
   try {
-    const chain = JSON.parse(blockchainJson.trim());
+    const chain = JSON.parse(extractJsonBlob(blockchainJson));
     result.network = chain.chain === 'test' ? 'testnet' : chain.chain;
     result.coreHeight = chain.blocks || null;
     result.coreServiceStatus = chain.initialblockdownload ? 'syncing' : 'up';
@@ -145,7 +159,7 @@ export function parseDashCliStatus(blockchainJson, masternodeJson) {
   } catch { /* blockchain info unavailable */ }
 
   try {
-    const mn = JSON.parse(masternodeJson.trim());
+    const mn = JSON.parse(extractJsonBlob(masternodeJson));
     result.masternodeState = mn.state?.toUpperCase() || mn.status?.toUpperCase() || null;
     result.masternodeProTx = mn.proTxHash || null;
     result.posePenalty = mn.dmnState?.PoSePenalty ?? null;
@@ -201,6 +215,15 @@ export function parseHpStatus(blockchainJson, masternodeJson, tdInfo) {
   // both collectors emit dash-cli JSON.
   const result = parseDashCliStatus(blockchainJson, masternodeJson);
 
+  // If neither Core RPC call produced any usable field, treat the host as
+  // errored rather than letting it fall through to a "warning" state. This
+  // covers `dashmate core cli` outright failing (container down, dashmate
+  // misconfigured) -- the bash collector swallows its exit code with
+  // `|| true`, so the only signal we have is empty/garbage output.
+  if (result.coreHeight == null && result.network == null && result.masternodeState == null) {
+    result.coreServiceStatus = 'error';
+  }
+
   // HP nodes always have Platform; let Tenderdash drive the live fields.
   result.platformEnabled = true;
 
@@ -232,6 +255,7 @@ export function deriveHealthStatus(data) {
   if (data.masternodeState === 'POSE_BANNED') return 'banned';
   if (data.masternodeState === 'ERROR') return 'error';
   if (data.platformStatus === 'error') return 'error';
+  if (data.coreServiceStatus === 'error') return 'error';
   if (data.coreServiceStatus === 'syncing' || (data.coreSyncProgress && data.coreSyncProgress !== '100%')) return 'syncing';
   if (data.platformStatus === 'syncing' || data.platformStatus === 'wait_for_core') return 'syncing';
   // HP nodes need platform up to be healthy; regular nodes just need READY
