@@ -127,7 +127,7 @@ export default function NodeDetail({ node, onClose }) {
             <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Platform</h3>
             <Row label="Status" value={s.platformStatus}
               highlight={s.platformStatus === 'up' ? 'text-emerald-400' : s.platformStatus === 'error' ? 'text-red-400' : 'text-amber-400'} />
-            <Row label="Version" value={s.platformVersion} />
+            {s.platformVersion && <Row label="Version" value={s.platformVersion} />}
             <Row label="Block Height" value={s.platformBlockHeight?.toLocaleString()} />
             <Row label="Peers" value={s.platformPeers} />
             <Row label="Network" value={s.platformNetwork} />

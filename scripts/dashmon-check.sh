@@ -13,7 +13,7 @@
 #   * Core RPC via `dashmate core cli` (forwards to dash-cli inside the
 #     core container -- same data as the regular masternode path)
 #   * Tenderdash local RPC on 127.0.0.1:36657 for platform-side info
-#     (height, peers, network, version, sync state, proposer rotation)
+#     (height, peers, network, sync state, proposer rotation)
 #
 # A future improvement is to call rs-dapi (Platform.getStatus /
 # Core.getBlockchainStatus / Core.getMasternodeStatus) via the local
