@@ -117,8 +117,15 @@ function processNodeResult(nodeInfo, result, elapsed) {
       // scripts/dashmon-check.sh for why we moved off `dashmate status`.
       if (result.output.includes('===BLOCKCHAIN===')) {
         const blockchainSection = result.output.split('===BLOCKCHAIN===')[1]?.split('===MASTERNODE===')[0] || '';
-        const masternodeSection = result.output.split('===MASTERNODE===')[1]?.split('===TENDERDASH===')[0] || '';
-        status = parseHpStatus(blockchainSection, masternodeSection, tdInfo);
+        // Older collector deployments don't emit ===NETWORKINFO===, so strip
+        // it conditionally: the inner split returns the full remaining buffer
+        // when the marker is absent, which the outer ===TENDERDASH=== split
+        // then trims correctly.
+        const masternodeSection = result.output.split('===MASTERNODE===')[1]
+          ?.split('===TENDERDASH===')[0]
+          ?.split('===NETWORKINFO===')[0] || '';
+        const networkInfoSection = result.output.split('===NETWORKINFO===')[1]?.split('===TENDERDASH===')[0] || '';
+        status = parseHpStatus(blockchainSection, masternodeSection, tdInfo, networkInfoSection);
       } else {
         const dashmateOutput = result.output.split('===TENDERDASH===')[0];
         status = parseDashmateStatus(dashmateOutput);

@@ -130,7 +130,7 @@ export function parseDashmateStatus(output) {
 // docker-compose "Attaching to ..." banners, or deprecation notices to the
 // JSON payload. Grab the substring from the first `{` to the last `}` so
 // JSON.parse doesn't trip over leading noise.
-function extractJsonBlob(raw) {
+export function extractJsonBlob(raw) {
   if (!raw) return '';
   const s = raw.trim();
   if (!s) return '';
@@ -210,7 +210,17 @@ export function parseTenderdashInfo(tenderdashBlock) {
 // masternodes produce, plus Tenderdash data for platform-side fields. This
 // replaces parseDashmateStatus on the hot path -- see scripts/dashmon-check.sh
 // for the rationale (avoids mnowatch.org port probes).
-export function parseHpStatus(blockchainJson, masternodeJson, tdInfo) {
+//
+// Fields previously sourced from `dashmate status` and their replacements:
+//   coreVersion              -> getnetworkinfo.subversion (networkInfoJson)
+//   coreSize                 -> getblockchaininfo.size_on_disk (parseDashCliStatus)
+//   posePenalty              -> masternode status dmnState.PoSePenalty
+//   lastPaidBlock            -> masternode status dmnState.lastPaidHeight
+//   lastPaidTime,            -> NOT derivable from on-node RPC without scanning
+//   paymentQueuePosition,       the full masternode list and per-block headers,
+//   nextPaymentTime             which would be far more expensive than the
+//                               poll cadence allows. Left null intentionally.
+export function parseHpStatus(blockchainJson, masternodeJson, tdInfo, networkInfoJson) {
   // Core + masternode parsing is identical to the regular MN path now that
   // both collectors emit dash-cli JSON.
   const result = parseDashCliStatus(blockchainJson, masternodeJson);
@@ -224,6 +234,19 @@ export function parseHpStatus(blockchainJson, masternodeJson, tdInfo) {
     result.coreServiceStatus = 'error';
   }
 
+  // getnetworkinfo is optional -- older deployments of dashmon-check.sh
+  // don't emit a ===NETWORKINFO=== section, so absent input is normal.
+  if (networkInfoJson && networkInfoJson.trim()) {
+    try {
+      const ni = JSON.parse(extractJsonBlob(networkInfoJson));
+      if (ni.subversion) {
+        // subversion looks like "/Dash Core:23.0.2/" -- pull just the version.
+        const match = ni.subversion.match(/Dash Core:([^/]+)/);
+        result.coreVersion = match ? match[1] : ni.subversion.replace(/^\/|\/$/g, '');
+      }
+    } catch { /* network info unavailable */ }
+  }
+
   // HP nodes always have Platform; let Tenderdash drive the live fields.
   result.platformEnabled = true;
 
@@ -232,10 +255,21 @@ export function parseHpStatus(blockchainJson, masternodeJson, tdInfo) {
     if (tdInfo.platformVersion) result.platformVersion = tdInfo.platformVersion;
     if (tdInfo.platformHeight != null) result.platformBlockHeight = tdInfo.platformHeight;
     if (tdInfo.platformPeers != null) result.platformPeers = tdInfo.platformPeers;
-    if (typeof tdInfo.platformCatchingUp === 'boolean') {
-      result.platformStatus = tdInfo.platformCatchingUp ? 'syncing' : 'up';
-    } else if (!tdInfo.statusError && (tdInfo.platformHeight != null || tdInfo.platformNetwork)) {
-      // /status failed but other endpoints answered -- platform is reachable.
+
+    // The collector reports per-endpoint errors rather than aborting the whole
+    // Tenderdash blob. Any single endpoint succeeding (height/network/version/
+    // peers/proposer) means Platform is reachable -- treat it as up unless
+    // /status explicitly said we're still catching up.
+    const hasLiveData =
+      tdInfo.platformHeight != null
+      || !!tdInfo.platformNetwork
+      || !!tdInfo.platformVersion
+      || tdInfo.platformPeers != null
+      || !!tdInfo.currentProposer;
+
+    if (tdInfo.platformCatchingUp === true) {
+      result.platformStatus = 'syncing';
+    } else if (hasLiveData) {
       result.platformStatus = 'up';
     } else {
       result.platformStatus = 'error';

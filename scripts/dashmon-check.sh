@@ -26,10 +26,20 @@ set -euo pipefail
 
 if [[ -f /home/dashmate/.dashmate/config.json ]]; then
     # HP masternode: Core RPC + Tenderdash. No mnowatch.org calls.
+    #
+    # Fields surfaced on HP cards/details vs the old `dashmate status` source:
+    #   coreVersion              -> getnetworkinfo.subversion (this script)
+    #   coreSize                 -> getblockchaininfo.size_on_disk
+    #   posePenalty / lastPaid*  -> masternode status dmnState
+    # Intentionally NOT surfaced (would require scanning the full MN list +
+    # per-block headers, which is too expensive at our poll cadence):
+    #   lastPaidTime, paymentQueuePosition, nextPaymentTime.
     echo "===BLOCKCHAIN==="
     sudo -u dashmate dashmate core cli getblockchaininfo 2>&1 || true
     echo "===MASTERNODE==="
     sudo -u dashmate dashmate core cli masternode status 2>&1 || true
+    echo "===NETWORKINFO==="
+    sudo -u dashmate dashmate core cli getnetworkinfo 2>&1 || true
     echo "===TENDERDASH==="
     # One python invocation pulls proposer rotation, sync state, peers, and
     # node info from Tenderdash's local RPC. Best-effort: partial results are
