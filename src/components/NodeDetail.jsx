@@ -106,7 +106,9 @@ export default function NodeDetail({ node, onClose }) {
             <Row label="Status" value={s.coreServiceStatus}
               highlight={s.coreServiceStatus === 'up' ? 'text-emerald-400' : 'text-amber-400'} />
             <Row label="Height" value={s.coreHeight?.toLocaleString()} />
+            <Row label="Difficulty" value={s.coreDifficulty?.toLocaleString(undefined, { maximumFractionDigits: 6 })} />
             <Row label="Sync Progress" value={s.coreSyncProgress} />
+            <Row label="Best Block Time" value={s.coreBestBlockTime ? new Date(s.coreBestBlockTime * 1000).toLocaleString() : null} />
             <Row label="Size" value={s.coreSize} />
           </div>
 

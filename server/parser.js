@@ -148,6 +148,10 @@ export function parseDashCliStatus(blockchainJson, masternodeJson) {
     const chain = JSON.parse(extractJsonBlob(blockchainJson));
     result.network = chain.chain === 'test' ? 'testnet' : chain.chain;
     result.coreHeight = chain.blocks || null;
+    result.coreDifficulty = Number.isFinite(chain.difficulty) ? chain.difficulty : null;
+    result.coreBestBlockHash = chain.bestblockhash || null;
+    result.coreBestBlockTime = Number.isFinite(chain.time) ? chain.time : null;
+    result.coreMedianTime = Number.isFinite(chain.mediantime) ? chain.mediantime : null;
     result.coreServiceStatus = chain.initialblockdownload ? 'syncing' : 'up';
     const progress = chain.verificationprogress;
     if (progress != null) {

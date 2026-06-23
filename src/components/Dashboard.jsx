@@ -3,6 +3,8 @@ import { useNodeData } from '../hooks/useNodeData';
 import SummaryBar from './SummaryBar';
 import NodeCard from './NodeCard';
 import NodeDetail from './NodeDetail';
+import DifficultyAlert from './DifficultyAlert';
+import { getDifficultyAlert } from '../utils/difficultyAlert';
 
 export default function Dashboard() {
   const { nodes, proposer, loading } = useNodeData();
@@ -18,6 +20,7 @@ export default function Dashboard() {
 
   const hpNodes = nodes.filter((n) => n.type === 'hp');
   const mnNodes = nodes.filter((n) => n.type === 'mn');
+  const difficultyAlert = getDifficultyAlert(nodes);
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
@@ -40,6 +43,8 @@ export default function Dashboard() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 py-6 space-y-8">
+        <DifficultyAlert alert={difficultyAlert} />
+
         {/* HP Masternodes */}
         {hpNodes.length > 0 && (
           <section>
