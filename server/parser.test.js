@@ -5,6 +5,10 @@ import { parseHpStatus, parseTenderdashInfo } from './parser.js';
 const blockchainJson = JSON.stringify({
   chain: 'test',
   blocks: 1000,
+  bestblockhash: '000000000abc',
+  difficulty: 42.5,
+  time: 1766450000,
+  mediantime: 1766449900,
   initialblockdownload: false,
   verificationprogress: 0.99995,
   size_on_disk: 5 * 1024 ** 3,
@@ -103,6 +107,14 @@ test('parseHpStatus preserves coreSize and posePenalty from dash-cli JSON', () =
   const status = parseHpStatus(blockchainJson, masternodeJson, null, networkInfoJson);
   assert.equal(status.coreSize, '5.0 GB');
   assert.equal(status.posePenalty, 0);
+});
+
+test('parseHpStatus preserves best block metadata from getblockchaininfo', () => {
+  const status = parseHpStatus(blockchainJson, masternodeJson, null, networkInfoJson);
+  assert.equal(status.coreDifficulty, 42.5);
+  assert.equal(status.coreBestBlockHash, '000000000abc');
+  assert.equal(status.coreBestBlockTime, 1766450000);
+  assert.equal(status.coreMedianTime, 1766449900);
 });
 
 // Contract boundary: scripts/dashmon-check.sh is responsible for unwrapping

@@ -8,6 +8,7 @@
     "dev:frontend": "vite",
     "dev:backend": "node server/index.js",
     "build": "vite build",
+    "test": "node --test",
     "start": "node server/index.js",
     "lint": "eslint .",
     "preview": "vite preview"
