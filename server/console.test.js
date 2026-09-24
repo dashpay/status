@@ -27,6 +27,24 @@ test('public projection excludes all private fields and cannot infer health from
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('fresh failed health is degraded without leaking diagnostics; stale or mismatched health is not current evidence', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dash-console-')); try {
+    const { n, snapshot } = fixture(dir); const now = Date.parse(snapshot.observedAt);
+    const health = { snapshot, observedAt: snapshot.observedAt, healthy: false, problems: ['PRIVATE-ADDRESS secret diagnostic'] };
+    const failed = projectNetwork(n, snapshot, health, now);
+    assert.equal(failed.status, 'degraded'); assert.match(failed.notice, /health checks detected/);
+    assert.equal(failed.verifiedAt, null); assert.doesNotMatch(JSON.stringify(failed), /PRIVATE|secret diagnostic/);
+    // A fleet-level progress failure does not invent a failed individual host.
+    assert.equal(failed.nodes[0].status, 'observed');
+    assert.equal(projectNetwork(n, snapshot, { ...health, healthy: true }, now).status, 'healthy');
+    assert.equal(projectNetwork(n, snapshot, health, now + 700_000).status, 'stale');
+    const unrelated = { ...health, snapshot: { ...snapshot, id: 'b'.repeat(64) } };
+    assert.equal(projectNetwork(n, snapshot, unrelated, now).status, 'observed');
+    const future = { ...health, healthy: true, observedAt: new Date(now + 120_000).toISOString() };
+    assert.equal(projectNetwork(n, snapshot, future, now).status, 'observed');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('GitHub login grants only configured network permissions; CSRF and public/private boundaries hold', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dash-console-'));
   const { n } = fixture(dir), secret = fixture(dir, 'private-devnet').n; secret.public = false;

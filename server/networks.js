@@ -42,8 +42,12 @@ export function projectNetwork(n, snapshot, health, now = Date.now(), operator =
   const stale = !Number.isFinite(at) || now - at > maxAge * 1000 || at > now + 60_000;
   const targets = snapshot.fleet.targets;
   if (!Array.isArray(targets) || !targets.length) throw new Error('Missing targets');
-  const verified = health?.snapshot?.id === snapshot.id && health.healthy === true &&
-    Number.isFinite(Date.parse(health.observedAt)) && Math.abs(Date.parse(health.observedAt) - at) < maxAge * 1000;
+  const healthAt = Date.parse(health?.observedAt);
+  const currentHealth = health?.snapshot?.id === snapshot.id && typeof health.healthy === 'boolean' &&
+    Number.isFinite(healthAt) && Math.abs(healthAt - at) < maxAge * 1000 &&
+    healthAt <= now + 60_000 && now - healthAt < maxAge * 1000;
+  const verified = currentHealth && health.healthy;
+  const failedHealth = currentHealth && !health.healthy;
   const nodes = targets.map((t) => {
     const o = snapshot.nodes?.[t.name];
     const unknown = !o || !!o.error || o.instanceId !== t.instanceId;
@@ -61,12 +65,13 @@ export function projectNetwork(n, snapshot, health, now = Date.now(), operator =
     return row;
   });
   const counts = Object.fromEntries(['healthy', 'observed', 'degraded', 'unknown', 'stale'].map((s) => [s, nodes.filter((n) => n.status === s).length]));
-  const status = stale ? 'stale' : counts.unknown ? 'unknown' : counts.degraded ? 'degraded' : verified ? 'healthy' : 'observed';
+  const status = stale ? 'stale' : counts.unknown ? 'unknown' : counts.degraded || failedHealth ? 'degraded' : verified ? 'healthy' : 'observed';
   const heights = (key) => nodes.map((v) => v[key]).filter((v) => v !== null && v > 0);
   const range = (key) => { const values = heights(key); return values.length ? { min: Math.min(...values), max: Math.max(...values) } : null; };
   const protocols = [...new Set(Object.values(snapshot.nodes || {}).map((v) => v.chain?.platformProtocol).filter(Boolean))];
   return { name: n.name, displayName: n.displayName || snapshot.fleet.metadata.displayName, description: n.description || snapshot.fleet.metadata.description,
     type: snapshot.fleet.chainType, status, observedAt: snapshot.observedAt, verifiedAt: verified ? health.observedAt : null,
+    notice: failedHealth && !stale ? 'Independent health checks detected a problem.' : undefined,
     freshnessSeconds: Number.isFinite(at) ? Math.max(0, Math.floor((now - at) / 1000)) : null, expectedNodes: targets.length, counts,
     core: range('coreHeight'), platform: range('platformHeight'), protocols, endpoints: (n.endpoints || []).map(({ label, url }) => ({ label, url })), nodes };
 }
