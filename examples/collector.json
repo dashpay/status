@@ -1,0 +1,25 @@
+{
+  "binary": "/opt/dashnet/dashnet",
+  "networks": [
+    {
+      "name": "testnet",
+      "manifest": "/etc/dash-observer/testnet.json",
+      "sshKey": "/etc/dash-observer/ssh-key",
+      "knownHosts": "/etc/dash-observer/testnet-known_hosts",
+      "observationWindow": "4m",
+      "snapshot": "/var/lib/dash-observations/testnet/snapshot.json",
+      "health": "/var/lib/dash-observations/testnet/health.json",
+      "collection": "/var/lib/dash-observations/testnet/collection.json"
+    },
+    {
+      "name": "devnet-moutai",
+      "manifest": "/etc/dash-observer/moutai.json",
+      "sshKey": "/etc/dash-observer/ssh-key",
+      "knownHosts": "/etc/dash-observer/moutai-known_hosts",
+      "observationWindow": "4m",
+      "snapshot": "/var/lib/dash-observations/moutai/snapshot.json",
+      "health": "/var/lib/dash-observations/moutai/health.json",
+      "collection": "/var/lib/dash-observations/moutai/collection.json"
+    }
+  ]
+}

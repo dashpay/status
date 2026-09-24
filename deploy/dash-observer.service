@@ -1,0 +1,19 @@
+[Unit]
+Description=Dash network independent observation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=dash-observer
+Group=dash-observations
+WorkingDirectory=/opt/dash-status
+EnvironmentFile=/etc/dash-observer/runtime.env
+ExecStart=/usr/bin/node server/collect.js /etc/dash-observer/collector.json
+TimeoutStartSec=20min
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/dash-observations
+UMask=0027

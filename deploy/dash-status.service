@@ -1,0 +1,24 @@
+[Unit]
+Description=Dash public and authenticated network console
+After=network-online.target
+
+[Service]
+User=dash-status
+Group=dash-observations
+WorkingDirectory=/opt/dash-status
+Environment=NODE_ENV=production
+Environment=NETWORKS_CONFIG=/etc/dash-status/networks.json
+Environment=BIND_ADDRESS=127.0.0.1
+Environment=PORT=3001
+EnvironmentFile=/etc/dash-status/runtime.env
+ExecStart=/usr/bin/node server/index.js
+Restart=on-failure
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/dash-status/operations
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,38 @@
+{
+  "origin": "https://status.example.org",
+  "operationsDir": "/var/lib/dash-status/operations",
+  "workflow": {
+    "enabled": false
+  },
+  "operators": {},
+  "networks": [
+    {
+      "name": "testnet",
+      "displayName": "Testnet",
+      "public": true,
+      "description": "The shared proving ground for Dash Core and Platform. This view covers our managed nodes, not the entire decentralized network.",
+      "snapshot": "/var/lib/dash-observations/testnet/snapshot.json",
+      "health": "/var/lib/dash-observations/testnet/health.json",
+      "collection": "/var/lib/dash-observations/testnet/collection.json",
+      "plan": "/var/lib/dash-status/plans/testnet.json",
+      "observationWindow": "4m",
+      "maxAgeSeconds": 600,
+      "management": "not-enrolled",
+      "endpoints": []
+    },
+    {
+      "name": "devnet-moutai",
+      "displayName": "Moutai",
+      "public": true,
+      "description": "Rapid iteration. Real consensus. The next generation of Dash Platform.",
+      "snapshot": "/var/lib/dash-observations/moutai/snapshot.json",
+      "health": "/var/lib/dash-observations/moutai/health.json",
+      "collection": "/var/lib/dash-observations/moutai/collection.json",
+      "plan": "/var/lib/dash-status/plans/moutai.json",
+      "observationWindow": "4m",
+      "maxAgeSeconds": 600,
+      "management": "not-enrolled",
+      "endpoints": []
+    }
+  ]
+}
