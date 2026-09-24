@@ -46,6 +46,7 @@ test('GitHub login grants only configured network permissions; CSRF and public/p
     const headers = { Cookie: cookie, 'Content-Type': 'application/json', Origin: config.origin, 'X-CSRF-Token': session.csrf };
     const post = (body, override = {}) => fetch(base + '/api/networks/testnet/preview', { method: 'POST', headers: { ...headers, ...override }, body: JSON.stringify(body) });
     assert.equal((await post({ action: 'doctor' }, { Origin: 'https://attacker.invalid' })).status, 403);
+    assert.equal((await post({ action: 'doctor' }, { 'X-CSRF-Token': '\u00e9'.repeat(session.csrf.length) })).status, 403);
     assert.equal((await post({ action: 'upgrade' })).status, 403);
     assert.equal((await post({ action: 'doctor' })).status, 200);
     assert.equal((await fetch(base + '/api/networks/private-devnet', { headers: { Cookie: cookie } })).status, 404);
@@ -63,6 +64,8 @@ test('lost workflow response is journaled, never blindly re-dispatched, and reco
     } });
     assert.equal((await service.dispatch(n, 'doctor', snapshot.id, request, actor)).status, 'unknown');
     assert.equal((await service.dispatch(n, 'doctor', snapshot.id, request, actor)).status, 'unknown'); assert.equal(dispatches, 1);
+    const restarted = createWorkflowService(config, { getToken: async () => 'PRIVATE-TOKEN', fetcher: async () => { throw new Error('must not dispatch again'); } });
+    assert.equal((await restarted.dispatch(n, 'doctor', snapshot.id, request, actor)).status, 'unknown');
     await assert.rejects(() => service.dispatch(n, 'doctor', snapshot.id, randomUUID(), actor), /Reconcile/);
     const records = await service.reconcile('testnet'); assert.equal(records[0].conclusion, 'success'); assert.equal(records[0].runUrl, 'https://github.com/dashpay/dash-network-go/actions/runs/123');
     assert.doesNotMatch(JSON.stringify(records), /PRIVATE-TOKEN/);

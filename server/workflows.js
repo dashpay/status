@@ -1,5 +1,5 @@
 import { createPrivateKey, randomUUID, sign } from 'node:crypto';
-import { readFileSync, mkdirSync, readdirSync, writeFileSync, renameSync } from 'node:fs';
+import { readFileSync, mkdirSync, readdirSync, writeFileSync, renameSync, openSync, closeSync, fsyncSync } from 'node:fs';
 import { join } from 'node:path';
 import { readJSON } from './networks.js';
 
@@ -57,7 +57,12 @@ export function preview(n, action) {
 
 export function createWorkflowService(config, { fetcher = fetch, getToken = tokenProvider(process.env, fetcher) } = {}) {
   mkdirSync(config.operationsDir, { recursive: true, mode: 0o700 });
-  const save = (record) => { const dest = join(config.operationsDir, record.id + '.json'); const tmp = dest + '.tmp'; writeFileSync(tmp, JSON.stringify(record), { mode: 0o600 }); renameSync(tmp, dest); };
+  const syncDirectory = () => { const fd = openSync(config.operationsDir, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); } };
+  const write = (path, record, flag) => {
+    const fd = openSync(path, flag, 0o600);
+    try { writeFileSync(fd, JSON.stringify(record)); fsyncSync(fd); } finally { closeSync(fd); }
+  };
+  const save = (record) => { const dest = join(config.operationsDir, record.id + '.json'); const tmp = dest + '.tmp'; write(tmp, record, 'w'); renameSync(tmp, dest); syncDirectory(); };
   const load = (id) => readJSON(join(config.operationsDir, id + '.json'));
   const active = new Set();
   async function api(path, options = {}) {
@@ -88,7 +93,7 @@ export function createWorkflowService(config, { fetcher = fetch, getToken = toke
     const record = { id, network: n.name, action, planId: plan.planId, actor: { id: user.id, login: user.login }, status: 'dispatching', createdAt: new Date().toISOString() };
     // Exclusive durable intent precedes the external request. A lost response
     // never causes a second dispatch on retry or after a server restart.
-    try { writeFileSync(join(config.operationsDir, id + '.json'), JSON.stringify(record), { flag: 'wx', mode: 0o600 }); }
+    try { write(join(config.operationsDir, id + '.json'), record, 'wx'); syncDirectory(); }
     catch (error) { active.delete(n.name); throw error; }
     try {
       await api(`actions/workflows/${workflow}/dispatches`, { method: 'POST', body: JSON.stringify({ ref: 'main', inputs: { network: n.name, operation: action,

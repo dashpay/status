@@ -1,6 +1,6 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 const nonce = () => randomBytes(32).toString('base64url');
-const equal = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+const equal = (a, b) => typeof a === 'string' && typeof b === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 const cookies = (req) => Object.fromEntries((req.headers.cookie || '').split(';').map((s) => s.trim().split('=')));
 
 export function createAuth(config, { clientId = process.env.GITHUB_OAUTH_CLIENT_ID, clientSecret = process.env.GITHUB_OAUTH_CLIENT_SECRET, fetcher = fetch, clock = Date.now } = {}) {
