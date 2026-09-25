@@ -4,6 +4,12 @@ Public network health and a separately authorized operator workspace for
 [dash-network-go](https://github.com/dashpay/dash-network-go). Testnet and Moutai
 are first-class networks. Login is not an administration grant.
 
+## Releases
+
+Use **Actions → Stage release** to prepare a versioned draft with tested native
+Linux AMD64/ARM64 bundles and checksums. There is no staging environment and no
+automatic site deployment. See [release staging and promotion](deploy/RELEASING.md).
+
 ## Run and verify
 
 ```sh
