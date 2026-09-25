@@ -36,8 +36,13 @@ jobs:
           node --input-type=module -e 'import {releaseIdentity} from "./scripts/package-release.mjs"; releaseIdentity(process.env.RELEASE_VERSION, process.env.RELEASE_REVISION)'
           image="dash-status:${RELEASE_VERSION}-${RELEASE_ARCH}"
           docker build --pull --build-arg "RELEASE_VERSION=$RELEASE_VERSION" --build-arg "RELEASE_REVISION=$RELEASE_REVISION" -t "$image" .
-          node scripts/smoke-image.mjs "$image"
+          python3 -m unittest discover -s scripts -p 'test_image_archive.py'
           node scripts/package-image.mjs "$image"
+          archive="release-dist/dash-status-${RELEASE_VERSION}-docker-${RELEASE_ARCH}"
+          docker image rm "$image"
+          docker load --input "$archive.tar.gz"
+          loaded_id=$(python3 scripts/image-archive.py verify "$archive.tar.gz" "$archive.json")
+          node scripts/smoke-image.mjs "$loaded_id"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: status-docker-${{ matrix.arch }}

@@ -1,7 +1,7 @@
 name: dash-status
 services:
   web:
-    # Docker image ID from the verified release manifest after `docker load`.
+    # Local immutable ID returned by image-archive.py after verifying docker load.
     # No mutable tag and no runtime registry credential on the status host.
     image: ${STATUS_IMAGE:?Set the verified sha256 image ID}
     pull_policy: never
