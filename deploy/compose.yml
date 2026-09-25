@@ -1,0 +1,33 @@
+name: dash-status
+services:
+  web:
+    # Docker image ID from the verified release manifest after `docker load`.
+    # No mutable tag and no runtime registry credential on the status host.
+    image: ${STATUS_IMAGE:?Set the verified sha256 image ID}
+    pull_policy: never
+    init: true
+    user: "1000:1000"
+    restart: unless-stopped
+    stop_grace_period: 20s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 768m
+    ports:
+      - "127.0.0.1:${STATUS_PORT:-3002}:3001"
+    env_file:
+      - /etc/dash-status/runtime.env
+    environment:
+      PORT: "3001"
+      BIND_ADDRESS: 0.0.0.0
+    volumes:
+      - /etc/dash-status/config:/etc/dash-status:ro
+      - /var/lib/dash-status:/var/lib/dash-status
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16777216
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

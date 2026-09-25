@@ -1,6 +1,12 @@
-node_modules
-.git
-.env
-scripts/
-*.md
-dist/
+# Allowlist: no credentials, inventory, observations, operations, or Git history.
+**
+!Dockerfile
+!package.json
+!package-lock.json
+!index.html
+!vite.config.js
+!src/
+!src/**
+!server/
+!server/**
+server/*.test.js

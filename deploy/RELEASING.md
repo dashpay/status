@@ -10,8 +10,9 @@ it changes any host, nginx configuration, DNS record or running network.
 2. Run **Actions → Stage release** on `master`, with a fresh version such as
    `v0.1.0-rc.1`. Only the upstream `dashpay/status` repository may publish drafts.
 3. The workflow tests the console and real desktop/mobile browser flow, builds
-   native Linux AMD64/ARM64 bundles and starts each unpacked production bundle.
-4. Review the resulting **draft**: both archives, per-architecture manifests,
+   native Linux AMD64/ARM64 bundles and Docker images. It starts each unpacked
+   bundle and tests legacy/console modes in non-root, read-only containers.
+4. Review the resulting **draft**: all four archives, per-architecture manifests,
    `SHA256SUMS` and the exact source commit. Existing versions are never replaced.
 5. Publish deliberately when approved. **Publishing is not deployment.** If a
    workflow failed after creating a partial draft, inspect/delete that unpublished
@@ -31,18 +32,18 @@ a PR are test builds, not approved production releases. Native dependencies are
 built on the matching architecture; no ARM64 bundle is assembled with AMD64 npm
 modules. CI smoke tests use synthetic observations and no AWS/SSH/OAuth secrets.
 
-Bundles contain only built `dist/`, tracked runtime `server/` source, production
+Native bundles contain only built `dist/`, tracked runtime `server/` source, production
 `node_modules`, package metadata and `release.json`. They omit `.env`, `networks/`,
 SSH keys, live observations and operator state. They require **Node 22**, not an
 unreviewed runtime download during an emergency. The build OS is Ubuntu 24.04.
 
 ## Production promotion boundary
 
-The inspected live service is native Node/systemd, not Docker. It is still on a
-legacy difficulty-alert branch with an untracked private `networks/` directory;
-do not overwrite that checkout or replace its private configuration. The live
-runtime was Node 20, so adopting these Node 22 bundles requires a deliberate
-runtime upgrade and service readback. PR merging alone is not a migration plan.
+The existing native Node/systemd service and its legacy difficulty-alert checkout
+must be retained for rollback during the Docker migration. Do not overwrite its
+untracked private `networks/` or `.env`. Docker includes Node 22; the host Node 20
+installation need not change. Follow [DOCKER.md](DOCKER.md) for the approved
+on-host preflight, cutover and rollback. PR merging alone is not a host migration.
 
 Before a host rollout:
 
@@ -60,12 +61,13 @@ Before a host rollout:
   do not overwrite operation state or silently run concurrent collectors.
 
 Host activation is intentionally not part of this release-staging workflow. The
-legacy Docker publisher is now **manual only**; a merge does not push `:latest`.
+old Docker Hub `:latest` publisher has been removed. The same release workflow
+stages Docker-save archives with exact image IDs; it does not publish registry
+tags or require a registry login on production.
 
 ## Access
 
 Staging a release uses the repository's `GITHUB_TOKEN` with Contents write only
 in the final draft job. No AWS role, SSH secret or site credential is needed.
-The agent's current fork access permits PRs and CI; an upstream maintainer must
-merge and dispatch the upstream workflow (or grant the required access). No
+An upstream maintainer with Actions access must dispatch the workflow. No
 production credential should be put in a release, repository or chat.

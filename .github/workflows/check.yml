@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 jobs:
+  images:
+    uses: ./.github/workflows/images.yml
+    with:
+      version: ${{ inputs.release_version || format('v0.0.0-ci.{0}', github.run_id) }}
   bundles:
     uses: ./.github/workflows/bundle.yml
     with:
