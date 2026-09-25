@@ -12,6 +12,7 @@ dist
 dist-ssr
 artifacts/
 console-data/
+release-dist/
 *.local
 .env
 

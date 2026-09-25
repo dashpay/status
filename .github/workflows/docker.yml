@@ -1,12 +1,16 @@
-name: Build & Push Docker Image
+name: Legacy Docker image (manual)
 
 on:
-  push:
-    branches: [master]
   workflow_dispatch:
+
+# The live host uses native Node/systemd. Release staging is release.yml and
+# never updates :latest. Keep this legacy publisher explicitly opt-in.
+permissions:
+  contents: read
 
 jobs:
   build-push:
+    if: github.repository == 'dashpay/status' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
 
     steps:

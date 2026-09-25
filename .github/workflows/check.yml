@@ -1,11 +1,20 @@
 name: Console checks
 on:
+  workflow_call:
+    inputs:
+      release_version:
+        type: string
+        required: false
   pull_request:
   push:
     branches: [master, feat/network-console]
 permissions:
   contents: read
 jobs:
+  bundles:
+    uses: ./.github/workflows/bundle.yml
+    with:
+      version: ${{ inputs.release_version || format('v0.0.0-ci.{0}', github.run_id) }}
   console:
     runs-on: ubuntu-latest
     timeout-minutes: 12

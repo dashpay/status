@@ -1,0 +1,68 @@
+name: Stage release
+run-name: Stage ${{ inputs.version }} from ${{ github.sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to stage (e.g. v0.1.0-rc.1); creates a DRAFT, does not deploy
+        type: string
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: status-release
+  cancel-in-progress: false
+jobs:
+  intent:
+    if: github.repository == 'dashpay/status' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Validate immutable release identity and refuse existing versions
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          node --input-type=module -e 'import {releaseIdentity} from "./scripts/package-release.mjs"; releaseIdentity(process.env.RELEASE_VERSION, process.env.RELEASE_REVISION)'
+          # API failures other than an exact 404 are failures, not "available".
+          python3 .github/scripts/release-availability.py "$RELEASE_VERSION"
+          echo "version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+  checks:
+    needs: intent
+    uses: ./.github/workflows/check.yml
+    with:
+      release_version: ${{ needs.intent.outputs.version }}
+  draft:
+    needs: [intent, checks]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: status-linux-*
+          merge-multiple: true
+          path: release-dist
+      - name: Verify both architectures and stage draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.intent.outputs.version }}
+          RELEASE_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          node scripts/release-notes.mjs
+          python3 .github/scripts/release-availability.py "$RELEASE_VERSION"
+          gh release create "$RELEASE_VERSION" release-dist/*.tar.gz release-dist/*.json release-dist/SHA256SUMS \
+            --draft --target "$RELEASE_REVISION" --title "Dash Status $RELEASE_VERSION" --notes-file release-dist/NOTES.md
+          echo 'Draft prepared; no image tag, host service or public site was changed.' >> "$GITHUB_STEP_SUMMARY"
