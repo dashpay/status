@@ -29,8 +29,11 @@ assert.equal((await exited)[0], 0, 'docker save failed');
 const hash = createHash('sha256');
 for await (const data of fs.createReadStream(archive)) hash.update(data);
 const sha256 = hash.digest('hex');
+const identity = JSON.parse(execFileSync('python3', ['scripts/image-archive.py', 'identity', archive], { encoding: 'utf8' }));
+assert.equal(identity.architecture, arch);
+assert.equal(identity.labels['org.opencontainers.image.revision'], revision);
 const manifest = { kind: 'DockerImage', version, revision, architecture: arch, os: 'linux', nodeMajor: 22,
-  image, imageId: inspection.Id, archive: path.basename(archive), sha256 };
+  image, configDigest: identity.configDigest, buildEngineImageId: inspection.Id, archive: path.basename(archive), sha256 };
 fs.writeFileSync(path.join('release-dist', base + '.json'), JSON.stringify(manifest, null, 2) + '\n', { flag: 'wx' });
 fs.writeFileSync(archive + '.sha256', `${sha256}  ${path.basename(archive)}\n`, { flag: 'wx' });
 console.log(`Packaged ${arch} image ${inspection.Id} at ${revision}`);

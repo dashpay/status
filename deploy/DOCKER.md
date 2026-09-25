@@ -3,18 +3,26 @@
 `Stage release` builds native Linux AMD64/ARM64 Docker images with a pinned Node
 22 base. The artifacts are Docker-save archives (`*-docker-ARCH.tar.gz`) with
 checksums and JSON manifests. They are real container images, not application
-bundles or registry-published tags. `imageId` is the Docker image content ID, not
-a multi-platform registry manifest digest. Load only the host's architecture.
+bundles or registry-published tags. `configDigest` pins the exact configuration
+bytes, including the uncompressed layer digests. Docker classic and containerd
+stores can expose different image IDs for this same content. Load only the host's
+architecture; never substitute a mutable tag for verification.
 
 ```sh
 sha256sum --check SHA256SUMS --ignore-missing
 docker load --input dash-status-VERSION-docker-arm64.tar.gz
-docker image inspect IMAGE_ID
+python3 scripts/image-archive.py verify dash-status-VERSION-docker-arm64.tar.gz dash-status-VERSION-docker-arm64.json
 ```
 
-Verify the release revision and archive checksum, then compare the loaded image
-ID, architecture and `org.opencontainers.image.revision` with its JSON manifest.
-Pin `STATUS_IMAGE=sha256:...` in `/etc/dash-status/compose.env`; do not use `latest`.
+Use the verifier from the exact release source revision (Python 3.11+ and Docker
+CLI). It checks the archive checksum, architecture and release labels, then
+re-exports the immutable loaded image to prove its configuration digest matches.
+Temporary disk space for one uncompressed image is required. Only after all checks
+pass does it print the host's immutable image ID. Pin that returned
+`STATUS_IMAGE=sha256:...` in `/etc/dash-status/compose.env`; do not use `latest`.
+`buildEngineImageId` is diagnostic, not a portable deployment identity.
+The verifier also accepts the earlier `v0.1.0-rc.2` manifest's `imageId` field,
+but only if that value equals the archive and loaded configuration digests.
 No registry credential or host Node upgrade is required. Keep the verified image
 archive for disaster recovery.
 
