@@ -1,0 +1,46 @@
+name: Build Docker images
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  image:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Build native image and prove both application modes
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_REVISION: ${{ github.sha }}
+          RELEASE_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          node --input-type=module -e 'import {releaseIdentity} from "./scripts/package-release.mjs"; releaseIdentity(process.env.RELEASE_VERSION, process.env.RELEASE_REVISION)'
+          image="dash-status:${RELEASE_VERSION}-${RELEASE_ARCH}"
+          docker build --pull --build-arg "RELEASE_VERSION=$RELEASE_VERSION" --build-arg "RELEASE_REVISION=$RELEASE_REVISION" -t "$image" .
+          node scripts/smoke-image.mjs "$image"
+          node scripts/package-image.mjs "$image"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: status-docker-${{ matrix.arch }}
+          path: release-dist/
+          if-no-files-found: error
+          retention-days: 14

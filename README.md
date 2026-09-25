@@ -6,9 +6,12 @@ are first-class networks. Login is not an administration grant.
 
 ## Releases
 
-Use **Actions → Stage release** to prepare a versioned draft with tested native
-Linux AMD64/ARM64 bundles and checksums. There is no staging environment and no
-automatic site deployment. See [release staging and promotion](deploy/RELEASING.md).
+Use **Actions → Stage release** to prepare a versioned draft with tested Docker
+images and native Linux AMD64/ARM64 bundles, manifests and checksums. Docker images
+include Node 22 and are delivered as offline-loadable archives, not mutable
+registry tags. There is no staging environment or automatic site deployment.
+See [Docker deployment](deploy/DOCKER.md) and
+[release staging and promotion](deploy/RELEASING.md).
 
 ## Run and verify
 

@@ -1,0 +1,36 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { pipeline } from 'node:stream/promises';
+import { createGzip } from 'node:zlib';
+import { releaseIdentity } from './package-release.mjs';
+
+const { version, revision } = releaseIdentity(process.env.RELEASE_VERSION, process.env.RELEASE_REVISION);
+const image = process.argv[2];
+const [inspection] = JSON.parse(execFileSync('docker', ['image', 'inspect', image], { encoding: 'utf8' }));
+const arch = inspection.Architecture;
+assert.ok(['amd64', 'arm64'].includes(arch));
+assert.equal(arch, process.env.RELEASE_ARCH);
+assert.equal(inspection.Os, 'linux');
+assert.equal(inspection.Config.Labels['org.opencontainers.image.version'], version);
+assert.equal(inspection.Config.Labels['org.opencontainers.image.revision'], revision);
+assert.equal(inspection.Config.User, 'node');
+assert.match(inspection.Id, /^sha256:[a-f0-9]{64}$/);
+fs.mkdirSync('release-dist', { recursive: true });
+const base = `dash-status-${version}-docker-${arch}`;
+const archive = path.join('release-dist', base + '.tar.gz');
+const saved = spawn('docker', ['image', 'save', image], { stdio: ['ignore', 'pipe', 'inherit'] });
+const exited = once(saved, 'exit');
+await pipeline(saved.stdout, createGzip({ level: 1 }), fs.createWriteStream(archive, { flags: 'wx' }));
+assert.equal((await exited)[0], 0, 'docker save failed');
+const hash = createHash('sha256');
+for await (const data of fs.createReadStream(archive)) hash.update(data);
+const sha256 = hash.digest('hex');
+const manifest = { kind: 'DockerImage', version, revision, architecture: arch, os: 'linux', nodeMajor: 22,
+  image, imageId: inspection.Id, archive: path.basename(archive), sha256 };
+fs.writeFileSync(path.join('release-dist', base + '.json'), JSON.stringify(manifest, null, 2) + '\n', { flag: 'wx' });
+fs.writeFileSync(archive + '.sha256', `${sha256}  ${path.basename(archive)}\n`, { flag: 'wx' });
+console.log(`Packaged ${arch} image ${inspection.Id} at ${revision}`);

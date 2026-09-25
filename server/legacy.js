@@ -44,6 +44,10 @@ if (!inventoryPath || !existsSync(inventoryPath)) {
 }
 
 const nodes = parseInventory(inventoryPath);
+if (!nodes.length) {
+  console.error('Inventory contains no monitored nodes; refusing an empty polling loop');
+  process.exit(1);
+}
 const hpCount = nodes.filter(n => n.type === 'hp').length;
 const mnCount = nodes.filter(n => n.type === 'mn').length;
 console.log(`Loaded ${nodes.length} masternodes from inventory (${hpCount} HP, ${mnCount} regular)`);

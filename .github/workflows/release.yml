@@ -51,7 +51,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: status-linux-*
+          pattern: status-*
           merge-multiple: true
           path: release-dist
       - name: Verify both architectures and stage draft release
@@ -65,4 +65,4 @@ jobs:
           python3 .github/scripts/release-availability.py "$RELEASE_VERSION"
           gh release create "$RELEASE_VERSION" release-dist/*.tar.gz release-dist/*.json release-dist/SHA256SUMS \
             --draft --target "$RELEASE_REVISION" --title "Dash Status $RELEASE_VERSION" --notes-file release-dist/NOTES.md
-          echo 'Draft prepared; no image tag, host service or public site was changed.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Draft prepared with native bundles and Docker image archives; no registry tag, host service or public site was changed.' >> "$GITHUB_STEP_SUMMARY"
