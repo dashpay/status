@@ -35,3 +35,30 @@ test('legacy supplement retains fixed targets, validates identity and age, and c
     assert.equal(missing.expectedNodes, 4); assert.equal(missing.nodes[0].name, 'seed-1'); assert.equal(missing.nodes[0].status, 'unknown');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('resource meters use fresh same-host numeric readings only, preserving managed health and public redaction', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'status-resources-'));
+  try {
+    const now = Date.now(), t = { name: 'hp-masternode-1', type: 'hp', host: 'PRIVATE-ONE' };
+    const n = { name: 'testnet', legacySnapshot: join(dir, 'legacy.json'), legacyTargets: [t] };
+    const row = { ...t, health: 'healthy', lastUpdated: now, status: { masternodeState: 'READY', posePenalty: 0, password: 'PRIVATE' }, system: { cpuPercent: 5.5, memPercent: 42, diskPercent: 73, privateField: 'PRIVATE' } };
+    const report = { kind: 'LegacyStatusObservation', network: n.name, observedAt: new Date(now).toISOString(), nodes: [row] };
+    const baseline = { status: 'degraded', nodes: [{ name: t.name, status: 'degraded', masternodeState: 'POSE_BANNED', services: [] }] };
+    const targets = [{ name: t.name, address: t.host }];
+    const read = (view = baseline, managed = targets) => { writeFileSync(n.legacySnapshot, JSON.stringify(report)); return supplementLegacy(n, view, now, false, managed); };
+    let result = read();
+    assert.deepEqual(result.nodes[0].resources, { cpuPercent: 5.5, memPercent: 42, diskPercent: 73 });
+    assert.equal(result.nodes[0].status, 'degraded'); assert.equal(result.nodes[0].masternodeState, 'POSE_BANNED');
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE|privateField|password/);
+    row.system = { cpuPercent: '5', memPercent: -1, diskPercent: 101 }; result = read();
+    assert.deepEqual(result.nodes[0].resources, {});
+    row.system = { cpuPercent: 10 }; row.lastUpdated = now - 200_000;
+    assert.equal(read().nodes[0].resources, undefined);
+    row.lastUpdated = now; report.failed = true;
+    assert.equal(read().nodes[0].resources, undefined);
+    report.failed = false;
+    assert.equal(read(baseline, [{ name: t.name, address: 'OTHER-HOST' }]).nodes[0].resources, undefined);
+    assert.equal(read({ ...baseline, nodes: [{ ...baseline.nodes[0], status: 'unknown' }] }).nodes[0].resources, undefined);
+    report.nodes.push(row); assert.equal(read().nodes[0].resources, undefined);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

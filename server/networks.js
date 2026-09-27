@@ -71,6 +71,7 @@ export function projectNetwork(n, snapshot, health, now = Date.now(), operator =
     const row = { name: t.name, role: t.role, status, coreHeight: finite(c.coreHeight), platformHeight: finite(c.platformHeight),
       dapi: unknown || stale ? 'unknown' : c.dapiHealthy ? 'available' : t.role === 'validator' ? 'unavailable' : 'not-applicable',
       services: Object.entries(o?.components || {}).map(([component, s]) => ({ component, image: String(s.image || ''), running: !!s.running, restarts: finite(s.restarts) })) };
+    if (!unknown && !stale && ['READY', 'POSE_BANNED', 'WAITING_FOR_PROTX', 'WAITING_FOR_PROTX_CONF', 'ERROR', 'REMOVED'].includes(c.masternodeState)) row.masternodeState = c.masternodeState;
     if (operator) row.operator = { instanceId: t.instanceId, address: t.address, architecture: t.architecture,
       error: o?.error || null, problems: o?.problems || [], filesFingerprint: o?.filesHash || null,
       proTxHash: c.proTxHash || null, coreGenesis: c.coreGenesis || null, platformChainId: c.platformChainId || null };
@@ -110,7 +111,7 @@ export function networkView(n, user, config, now = Date.now()) {
         view.counts = { unknown: view.expectedNodes };
       }
     }
-    return { ...supplementLegacy(n, view, now, operator), permissions: operator ? grants(config, user, n.name) : [], management: operator ? n.management || 'not-enrolled' : undefined };
+    return { ...supplementLegacy(n, view, now, operator, snapshot.fleet.targets), permissions: operator ? grants(config, user, n.name) : [], management: operator ? n.management || 'not-enrolled' : undefined };
   } catch {
     const nodes = (n.expectedTargets || []).map((t) => ({ name: t.name, role: t.role, status: 'unknown', coreHeight: null, platformHeight: null, dapi: 'unknown', services: [] }));
     return supplementLegacy(n, { name: n.name, displayName: n.displayName || n.name, description: n.description || '', status: 'unknown',
