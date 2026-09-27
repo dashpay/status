@@ -9,6 +9,8 @@ import { loadRegistry, canView, grants, networkView } from './networks.js';
 
 export function createConsole(config, dependencies = {}) {
   const app = express(), auth = createAuth(config, dependencies.auth), workflows = createWorkflowService(config, dependencies.workflows);
+  // Optional fixed reverse-proxy CIDRs, never blindly trust arbitrary forwarded IPs.
+  if (config.trustedProxies) app.set('trust proxy', config.trustedProxies);
   app.use(helmet({ contentSecurityPolicy: { directives: { 'style-src': ["'self'", "'unsafe-inline'"], 'img-src': ["'self'", 'data:'] } } }));
   app.use('/api', rateLimit({ windowMs: 60_000, limit: 180, standardHeaders: true, legacyHeaders: false }));
   app.use(express.json({ limit: '8kb' }));

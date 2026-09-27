@@ -1,5 +1,6 @@
 import { readFileSync, statSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
+import { supplementLegacy } from './legacy-view.js';
 
 export function readJSON(path) {
   if (statSync(path).size > 8 * 1024 * 1024) throw new Error('Input too large');
@@ -15,8 +16,19 @@ export function loadRegistry(path) {
   for (const n of config.networks) {
     if (!/^[a-z][a-z0-9-]{0,62}$/.test(n.name) || names.has(n.name) || typeof n.public !== 'boolean') throw new Error('Invalid network registration');
     names.add(n.name);
-    for (const key of ['snapshot', 'health', 'plan', 'collection']) if (n[key]) n[key] = resolve(dirname(path), n[key]);
+    for (const key of ['snapshot', 'health', 'plan', 'collection', 'legacySnapshot']) if (n[key]) n[key] = resolve(dirname(path), n[key]);
     if (!n.snapshot) throw new Error('Observation source required');
+    if (n.expectedTargets) {
+      if (!Array.isArray(n.expectedTargets) || n.expectedTargets.length > 1000 || new Set(n.expectedTargets.map((t) => t.name)).size !== n.expectedTargets.length || n.expectedTargets.some((t) => !/^[a-z][a-z0-9-]{0,62}$/.test(t.name) || !['validator', 'seed', 'core'].includes(t.role))) throw new Error('Invalid expected inventory');
+    }
+    if (n.legacyTargets) {
+      if (!n.legacySnapshot || !Array.isArray(n.legacyTargets) || n.legacyTargets.length > 1000) throw new Error('Explicit legacy inventory required');
+      const ids = new Set();
+      for (const t of n.legacyTargets) {
+        if (!/^(hp-)?masternode-\d+$/.test(t.name) || ids.has(t.name) || !['hp', 'mn'].includes(t.type) || typeof t.host !== 'string' || !t.host) throw new Error('Invalid legacy target');
+        ids.add(t.name);
+      }
+    }
     for (const e of n.endpoints || []) {
       const url = new URL(e.url);
       if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) throw new Error('Public endpoints must be credential-free HTTPS without query strings');
@@ -98,10 +110,11 @@ export function networkView(n, user, config, now = Date.now()) {
         view.counts = { unknown: view.expectedNodes };
       }
     }
-    return { ...view, permissions: operator ? grants(config, user, n.name) : [], management: operator ? n.management || 'not-enrolled' : undefined };
+    return { ...supplementLegacy(n, view, now, operator), permissions: operator ? grants(config, user, n.name) : [], management: operator ? n.management || 'not-enrolled' : undefined };
   } catch {
-    return { name: n.name, displayName: n.displayName || n.name, description: n.description || '', status: 'unknown',
-      observedAt: null, expectedNodes: null, counts: {}, nodes: [], endpoints: [], permissions: operator ? grants(config, user, n.name) : [],
-      notice: 'Observation unavailable. No targets are assumed healthy.' };
+    const nodes = (n.expectedTargets || []).map((t) => ({ name: t.name, role: t.role, status: 'unknown', coreHeight: null, platformHeight: null, dapi: 'unknown', services: [] }));
+    return supplementLegacy(n, { name: n.name, displayName: n.displayName || n.name, description: n.description || '', status: 'unknown',
+      observedAt: null, expectedNodes: nodes.length || null, counts: { unknown: nodes.length }, nodes, endpoints: [], permissions: operator ? grants(config, user, n.name) : [],
+      notice: 'Observation unavailable. No targets are assumed healthy.' }, now, operator);
   }
 }
