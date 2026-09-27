@@ -7,6 +7,6 @@ export default function App() {
   useEffect(() => {
     fetch('/api/health').then((r) => r.json()).then((v) => setMode(v.service === 'dash-network-console' ? 'console' : 'legacy')).catch(() => setMode('console'));
   }, []);
-  if (!mode) return <div style={{ padding: 40, fontFamily: 'system-ui' }}>Connecting to Dash networks…</div>;
+  if (!mode) return <div style={{ padding: 16, fontFamily: 'system-ui', minHeight: '100vh', background: '#030712', color: '#9ca3af' }}>Loading nodes…</div>;
   return mode === 'console' ? <NetworkConsole /> : <Dashboard />;
 }
