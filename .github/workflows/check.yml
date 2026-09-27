@@ -34,6 +34,11 @@ jobs:
       - run: npm test
       - run: npm run lint
       - run: npm run build
+      - name: Verify original API and SSE alongside console routes
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends nginx
+          node scripts/smoke-api-compat.mjs
       - run: npx playwright install --with-deps chromium
       - run: node scripts/browser-check.mjs
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
