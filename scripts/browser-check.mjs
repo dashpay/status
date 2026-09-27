@@ -93,6 +93,7 @@ try {
   await page.setViewportSize({ width: 390, height: 844 }); await page.goto(config.origin);
   await page.getByRole('heading', { name: 'Testnet', exact: true }).waitFor();
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1));
+  assert.ok((await page.getByRole('searchbox', { name: 'Find node' }).boundingBox()).width >= 160, 'Mobile search must remain usable');
   await page.screenshot({ path: join(screenshots, 'console-mobile.png'), fullPage: true });
   await page.getByRole('navigation', { name: 'Networks' }).getByRole('link', { name: /Moutai/ }).click();
   await page.getByRole('heading', { name: 'Moutai', exact: true }).waitFor();
