@@ -1,8 +1,8 @@
-# Dash Network Observatory
+# Dash Status
 
-Public network health and a separately authorized operator workspace for
-[dash-network-go](https://github.com/dashpay/dash-network-go). Testnet and Moutai
-are first-class networks. Login is not an administration grant.
+Dash status dashboard with additional networks, GitHub sign-in and an operator
+workspace for [dash-network-go](https://github.com/dashpay/dash-network-go).
+The original Testnet API and live updates remain supported alongside these additions.
 
 ## Releases
 
@@ -32,9 +32,12 @@ per-network permissions, plan review, dispatch and logout against **fixture**
 identity/workflow providers. It does not contact an identity provider or change
 a real network. Screenshots land in ignored `artifacts/`.
 
-Without `NETWORKS_CONFIG`, the existing single-network collector and dashboard
-remain active. This allows a staged migration without replacing the live service
-merely by merging source. Legacy routes are **not** mounted in console mode.
+Without `NETWORKS_CONFIG`, the original single-network collector and API remain
+active. The public deployment keeps that collector behind the original routes,
+while the console handles `/api/networks/*`, sign-in and operator endpoints.
+Setting `NETWORKS_CONFIG` alone is not a compatible replacement for the original
+service. Follow the [API compatibility contract](deploy/API-COMPATIBILITY.md)
+and run its JSON/SSE check before every public promotion.
 
 ## Two views, one source of observations
 

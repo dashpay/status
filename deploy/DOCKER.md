@@ -63,8 +63,10 @@ container migration.
    During the short verification window the restricted read-only poller may run
    alongside the old one. Verify full inventory, data freshness, assets and
    Docker health before switching traffic; process health alone is not enough.
-4. Update nginx's frontend **and** API locations together to proxy to `3002`,
-   retaining TLS/certbot settings and SSE buffering/timeout configuration. Run
+4. For a legacy-only deployment, update nginx's frontend and API locations to
+   proxy to `3002`. When adding the console, retain the original API on `3002`
+   using [API-COMPATIBILITY.md](API-COMPATIBILITY.md); only new API paths and the
+   frontend go to the console. Retain TLS/certbot and SSE timeout settings. Run
    `nginx -t` before reload. Stop and disable the original `status-dashboard`
    service after verified cutover so two collectors do not remain active.
 5. Verify public HTTPS, asset loading, API data, SSE, fresh polling and restart

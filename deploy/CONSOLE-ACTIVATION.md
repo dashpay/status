@@ -37,3 +37,9 @@ Actual operator login requires the human to complete GitHub authorization.
 A redirect check or fixture session is not proof of their real login.
 If observers stop, the public console must become stale; the frontend does not
 start SSH work or manufacture a fresh observation timestamp.
+# Preserve the original API
+
+Keep the original collector running and route its six documented API endpoints
+through [nginx-legacy-api.conf](nginx-legacy-api.conf). Follow
+[API-COMPATIBILITY.md](API-COMPATIBILITY.md) before any console activation or
+promotion. A working `/api/networks` endpoint does not prove backward compatibility.
