@@ -328,3 +328,31 @@ test('a devnet moves to a newer dashnet only when its plans bind the same node a
   await d.doctor(r).catch(() => {});
   assert.match(readFileSync(join(dir, 'dashnet'), 'utf8'), /20260928T120000Z/, 'no downgrade');
 });
+
+test('a resumed upgrade moves to a newer dashnet only when the reviewed plan still accepts it', async () => {
+  const { createDevnets } = await import('./devnets.js');
+  const root = mkdtempSync(join(tmpdir(), 'snap-'));
+  const dirs = { data: root, private: join(root, 'p'), state: join(root, 'state') };
+  const dir = join(dirs.private, 'devnets', 'devnet-x');
+  mkdirSync(dir, { recursive: true });
+  const fake = (version, upgrade) => `#!/bin/sh\ncase "$1" in version) echo ${version};; recipes) echo '{"node":"n1","bootstrap":"b","upgrade":"${upgrade}"}';; *) exit 0;; esac\n`;
+  const V = (date, c) => `${date}-${c.repeat(40)}`;
+  writeFileSync(join(dir, 'deployment.json'), JSON.stringify({ recipeSha256: 'n1' }));
+  writeFileSync(join(dir, 'network.yaml'), 'images:\n  core: docker.io/dashpay/dashd:23.1.7\n');
+  writeFileSync(join(dir, 'upgrade-0.json'), JSON.stringify({ id: 'p'.repeat(64), scope: 'core', recipeSha256: 'u1', from: {}, to: {} }));
+  writeFileSync(join(dir, 'candidate-0.yaml'), 'images:\n  core: docker.io/dashpay/dashd:23.1.8\n');
+  const snap = join(dir, 'dashnet.upgrade-t');
+  writeFileSync(snap, fake(V('20260928T120000Z', 'a'), 'u1'), { mode: 0o755 });
+  const binary = join(root, 'current');
+  const used = [];
+  const d = createDevnets({ ctx: { dashnet: async (r, args, opts) => { used.push(readFileSync(opts.bin, 'utf8')); return 0; }, step: () => () => {}, save: () => {}, write: () => {}, pinBinary: () => snap, binary }, dirs, key: { path: '/k' }, pool: {}, getSettings: () => settings, region: 'us-west-2', log: () => {} });
+  const r = () => ({ id: 'u', network: 'devnet-x', steps: [], review: { planId: 'p'.repeat(64) }, artifacts: { ts: 't', bin: snap, phases: [{ scope: 'core', components: ['core'], plan: 'upgrade-0.json', planId: 'p'.repeat(64), candidate: 'candidate-0.yaml' }] }, request: { components: ['core'], images: {} } });
+  // A newer build with a different upgrade recipe would be refused by the plan: keep the snapshot.
+  writeFileSync(binary, fake(V('20260929T000000Z', 'b'), 'u2'), { mode: 0o755 });
+  await d.executeUpgrade(r());
+  assert.match(used.pop(), /20260928T120000Z/);
+  // Same upgrade and node recipes, newer build: the resume uses it.
+  writeFileSync(binary, fake(V('20260929T000000Z', 'b'), 'u1'), { mode: 0o755 });
+  await d.executeUpgrade(r());
+  assert.match(used.pop(), /20260929T000000Z/);
+});
