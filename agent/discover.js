@@ -16,7 +16,8 @@ const ROLES = [
   [/^logs-(\d+)/, 'logs', (m) => `logs-${m[1]}`],
   [/^vpn$/, 'vpn', () => 'vpn'],
 ];
-export const ROLE_ORDER = ['validator', 'masternode', 'seed', 'web', 'wallet', 'miner', 'mixer', 'quorums', 'metrics', 'logs', 'vpn', 'other'];
+const DASHNET_ROLES = { validator: 'validator', wallet: 'wallet', miner: 'miner', fullnode: 'fullnode', seed: 'seed' };
+export const ROLE_ORDER = ['validator', 'masternode', 'seed', 'fullnode', 'web', 'wallet', 'miner', 'mixer', 'quorums', 'metrics', 'logs', 'vpn', 'other'];
 
 export function classify(tagValue, nameTag) {
   const prefix = new RegExp(`^d[nh]-${tagValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-(.+)$`);
@@ -53,7 +54,10 @@ export function createDiscovery({ region, tagKey }, client = new EC2Client({ reg
       const tag = (k) => i.Tags?.find((t) => t.Key === k)?.Value;
       const nameTag = tag('Name');
       for (const n of networks) {
-        const c = classify(n.tag, nameTag);
+        // dash-network-go instances carry their role and node name as tags.
+        const c = tag('dashnet:managed-by') === 'dash-network-go' && tag('dashnet:network') === n.tag
+          ? { role: DASHNET_ROLES[tag('dashnet:role')] || 'other', name: tag('dashnet:node') || i.InstanceId }
+          : classify(n.tag, nameTag);
         if (!c || (tag(tagKey) && tag(tagKey) !== n.tag)) continue;
         result[n.name].push({
           name: c.name, role: c.role, nameTag, instanceId: i.InstanceId, state: i.State?.Name,

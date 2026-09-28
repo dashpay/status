@@ -7,11 +7,14 @@ const ACTIVE = new Set(['queued', 'preparing', 'confirmed', 'running']);
 export default function Operation({ name, id }) {
   const session = useSession();
   const now = useNow(1000);
-  const { data: op, error, reload } = useResource(`/api/ops/${id}`, (t, d) => t === 'op' && d.id === id);
+  const { data: op, error, reload } = useResource(`/api/ops/${id}`, (t, d) => t === 'op' && (d.id === id || d.id === '*'));
   const [actionError, setActionError] = useState(null);
   const [pending, setPending] = useState(false);
   if (!session.loaded) return null;
-  if (!session.operatorOf?.includes(name)) return <div className="mt-6"><Empty>Operator access required.</Empty></div>;
+  if (!session.memberOf?.includes(name)) return <div className="mt-6"><Empty>Access to this network required.</Empty></div>;
+  // Lifecycle operations (devnet create/delete/services, Platform reset) are admin-only.
+  const lifecycle = ['create-devnet', 'delete-devnet', 'devnet-services', 'platform-reset'].includes(op?.request?.action);
+  const operator = lifecycle ? !!session.admin : session.operatorOf?.includes(name);
   if (error) return <div className="mt-6"><Err error={error} /></div>;
   if (!op) return <div className="mt-6 text-dim">Loading…</div>;
   const q = op.request;
@@ -30,11 +33,11 @@ export default function Operation({ name, id }) {
         <h1 className="text-[18px] font-semibold">{q.action}</h1>
         <OpBadge status={op.status} />
         <span className="text-dim mono text-[12px]">{op.id}</span>
-        <div className="ml-auto flex gap-2">
+        {operator && <div className="ml-auto flex gap-2">
           {['queued', 'review', 'confirmed', 'preparing', 'running'].includes(op.status) && <button className="btn btn-danger" disabled={pending} onClick={() => act('cancel')}>{op.status === 'running' ? 'Stop (SIGTERM dashnet)' : 'Cancel'}</button>}
-          {['failed', 'interrupted', 'cancelled'].includes(op.status) && <button className="btn" disabled={pending} onClick={() => act('resume')}>{op.confirmedAt ? 'Resume same plan' : 'Prepare again'}</button>}
-          {['succeeded', 'failed', 'cancelled', 'interrupted', 'rejected'].includes(op.status) && <Link className="btn" to={`/n/${name}/deploy?action=${q.action}&nodes=${q.nodes.join(',')}&components=${(q.components || []).join(',')}`}>New from this</Link>}
-        </div>
+          {['failed', 'interrupted', 'cancelled'].includes(op.status) && <button className="btn" disabled={pending} onClick={() => act('resume')}>{op.confirmedAt ? (q.action === 'create-devnet' ? 'Resume creation' : 'Resume same plan') : 'Prepare again'}</button>}
+          {!q.action.endsWith('-devnet') && ['succeeded', 'failed', 'cancelled', 'interrupted', 'rejected'].includes(op.status) && <Link className="btn" to={`/n/${name}/deploy?action=${q.action}&nodes=${q.nodes.join(',')}&components=${(q.components || []).join(',')}`}>New from this</Link>}
+        </div>}
       </div>
       <div className="mt-2 panel px-3 py-2 grid gap-x-6 gap-y-1 text-[12px] sm:grid-cols-2 lg:grid-cols-4">
         <div><span className="text-dim">network </span><span className="mono">{op.network}</span></div>
@@ -74,7 +77,12 @@ export default function Operation({ name, id }) {
         </Section>
       )}
 
-      {review && (
+      {review?.kind === 'create-devnet' && <CreateReview op={op} review={review} operator={operator} pending={pending} act={act} expiresIn={expiresIn} />}
+      {review?.kind === 'platform-reset' && <ResetReview op={op} review={review} operator={operator} pending={pending} act={act} />}
+      {op.stages && <Stages op={op} />}
+      {review?.kind === 'devnet-services' && <ServicesReview op={op} review={review} operator={operator} pending={pending} act={act} />}
+      {review?.kind === 'delete-devnet' && <DeleteReview op={op} review={review} operator={operator} pending={pending} act={act} />}
+      {review && !review.kind && (
         <Section title={`Plan ${short(review.planId, 16)} · ${review.changes.length} container change(s)`} right={op.status === 'review' && <span className="text-dim text-[12px]">expires in {Math.max(0, Math.round(expiresIn / 60))} min</span>}>
           <div className="panel scroll-x">
             <table className="grid"><thead><tr><th>node</th><th>component</th><th>from</th><th>to (pinned)</th><th /></tr></thead>
@@ -91,7 +99,7 @@ export default function Operation({ name, id }) {
               </tbody>
             </table>
           </div>
-          {op.status === 'review' && (
+          {op.status === 'review' && operator && (
             <div className="mt-3 flex items-center gap-3">
               <button className="btn btn-primary" disabled={pending || !review.changes.length} onClick={() => act('confirm', { planId: review.planId })}>Confirm and {q.action === 'upgrade' ? 'upgrade' : 'restore'} {review.targets.length} node(s)</button>
               <span className="text-dim text-[12px]">Executes exactly this plan. One host at a time; stops at the first failed health gate. No automatic rollback.</span>
@@ -119,11 +127,18 @@ function LiveLog({ id, initial, active }) {
   const [text, setText] = useState(initial?.text || '');
   const ref = useRef(null);
   const stick = useRef(true);
+  // Opened once per operation from the first loaded offset; op refreshes do not reconnect it.
+  const offset = useRef(initial?.offset || 0);
   useEffect(() => {
-    const es = new EventSource(`/api/ops/${id}/log?offset=${initial?.offset || 0}`);
-    es.addEventListener('log', (e) => { const d = JSON.parse(e.data); setText((t) => (t + d.text).slice(-400_000)); });
-    return () => es.close();
-  }, [id, initial?.offset]);
+    let es, timer, closed = false;
+    const open = () => {
+      es = new EventSource(`/api/ops/${id}/log?offset=${offset.current}`);
+      es.addEventListener('log', (e) => { const d = JSON.parse(e.data); offset.current = d.offset; setText((t) => (t + d.text).slice(-400_000)); });
+      es.onerror = () => { if (es.readyState === EventSource.CLOSED && !closed) timer = setTimeout(open, 3000); };
+    };
+    open();
+    return () => { closed = true; clearTimeout(timer); es?.close(); };
+  }, [id]);
   useEffect(() => { if (stick.current && ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [text]);
   return (
     <div ref={ref} className="log h-[440px]" onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
@@ -131,5 +146,136 @@ function LiveLog({ id, initial, active }) {
       {text || <span className="text-faint">no output yet</span>}
       {active && <span className="live text-accent">▍</span>}
     </div>
+  );
+}
+
+function CreateReview({ op, review, operator, pending, act, expiresIn }) {
+  const e = review.estimate || {};
+  return (
+    <>
+      <Section title={`Devnet ${op.network} · ${review.instances} instances`} right={op.status === 'review' && <span className="text-dim text-[12px]">expires in {Math.max(0, Math.round(expiresIn / 60))} min</span>}>
+        <div className="grid gap-3 lg:grid-cols-2">
+          <div className="panel">
+            <table className="grid"><thead><tr><th>group</th><th>type</th><th>arch</th><th className="num">count</th></tr></thead><tbody className="[&_tr]:!cursor-default">
+              {review.footprint.map((f) => <tr key={f.group}><td>{f.group}</td><td className="mono">{f.type}</td><td className="mono">{f.arch}</td><td className="num">{f.count}</td></tr>)}
+            </tbody></table>
+            <div className="px-3 py-2 text-[12px] border-t border-line">
+              {review.storageGiB} GiB gp3 · BYOIP public IPv4 ({review.network.ipamPool}) · estimate <span className="mono">${e.hourly}/h</span>, ≈ <span className="mono">${e.monthly}/month</span> incl. storage
+            </div>
+          </div>
+          <div className="panel px-3 py-2 text-[12px] space-y-1">
+            <div><span className="text-dim">Core chain </span><span className="mono">{review.coreNetwork}</span> · <span className="text-dim">Platform </span><span className="mono">{review.platformChainId}</span> · <span className="text-dim">protocol </span><span className="mono">{review.protocol}</span></div>
+            <div><span className="text-dim">Placement </span><span className="mono">{review.network.vpc} / {review.network.subnet} / {review.network.securityGroups.join(',')}</span></div>
+            <div><span className="text-dim">AMIs (Ubuntu 24.04) </span><span className="mono">{Object.entries(review.amis).map(([a, id]) => `${a} ${id}`).join(' · ')}</span></div>
+            <div className="pt-1 text-dim">Services on the wallet host</div>
+            {Object.entries(review.dns).map(([k, v]) => <div key={k} className="mono">{k}: https://{v.host}</div>)}
+            <div className="text-dim">quorum server <span className="mono text-fg">{review.services.quorumServer}</span> · explorer <span className="mono text-fg">{review.services.explorerVersion}</span> · faucet <span className="mono text-fg">{review.services.faucetRef.slice(0, 12)}</span>, {review.services.faucetAmount} per request, {review.services.faucetFunding} funded</div>
+          </div>
+        </div>
+        <div className="panel scroll-x mt-3">
+          <table className="grid"><thead><tr><th>component</th><th>requested</th><th>pinned per architecture</th></tr></thead><tbody className="[&_tr]:!cursor-default">
+            {Object.entries(review.images).map(([c, v]) => <tr key={c}><td>{c}</td><td className="mono">{v.ref}</td><td className="mono text-dim text-[11.5px]">{Object.entries(v.digests).map(([a, dg]) => `${a} ${dg.slice(7, 19)}…`).join('  ') || '—'}</td></tr>)}
+          </tbody></table>
+        </div>
+      </Section>
+      {op.status === 'review' && operator && (
+        <div className="mt-3 flex items-center gap-3">
+          <button className="btn btn-primary" disabled={pending} onClick={() => act('confirm', { planId: review.planId })}>Create {op.network} (starts billable EC2)</button>
+          <span className="text-dim text-[12px]">Runs provision → bootstrap → deploy → services → health gate (typically 60–90 min). Each stage resumes if interrupted.</span>
+        </div>
+      )}
+    </>
+  );
+}
+
+function DeleteReview({ op, review, operator, pending, act }) {
+  return (
+    <>
+      <Section title={`Delete ${op.network}`}>
+        <div className="panel scroll-x">
+          <table className="grid"><thead><tr><th>instance</th><th>name</th><th>public IP</th><th>state</th></tr></thead><tbody className="[&_tr]:!cursor-default">
+            {review.instances.map((i) => <tr key={i.id}><td className="mono">{i.id}</td><td className="mono">{i.name}</td><td className="mono">{i.ip || '—'}</td><td>{i.state}</td></tr>)}
+            {!review.instances.length && <tr><td colSpan={4} className="text-dim">no instances left</td></tr>}
+          </tbody></table>
+          <div className="px-3 py-2 text-[12px] border-t border-line">{review.volumes} EBS volume(s) · DNS {review.dns.join(', ') || 'none'} · BYOIP addresses released back to the pool. The dashnet journal record stays, so the name cannot be reused.</div>
+        </div>
+      </Section>
+      {op.status === 'review' && operator && (
+        <div className="mt-3 flex items-center gap-3">
+          <button className="btn btn-danger" disabled={pending} onClick={() => act('confirm', { planId: review.planId })}>Permanently delete {op.network}</button>
+          <span className="text-dim text-[12px]">Terminates every instance and deletes their disks. Not reversible.</span>
+        </div>
+      )}
+    </>
+  );
+}
+
+function ServicesReview({ op, review, operator, pending, act }) {
+  const to = review.to;
+  const keys = ['quorumServer', 'explorerVersion', 'faucetRef', 'faucetAmount', 'faucetRateLimit', 'faucetFunding'];
+  return (
+    <>
+      <Section title={`Services on ${op.network}`}>
+        <div className="panel scroll-x">
+          <table className="grid"><thead><tr><th>setting</th><th>current</th><th>after</th></tr></thead><tbody className="[&_tr]:!cursor-default">
+            {keys.map((k) => <tr key={k}><td>{k}</td><td className="mono text-dim">{String(review.from?.[k] ?? '—')}</td><td className={`mono ${String(review.from?.[k]) !== String(to[k]) ? 'lv-warn' : ''}`}>{String(to[k])}</td></tr>)}
+          </tbody></table>
+          <div className="px-3 py-2 text-[12px] border-t border-line text-dim">Re-installs quorum-list-server, Platform Explorer and dash-faucet on the wallet host ({Object.values(review.dns).map((x) => x.host).join(', ')}); builds images when versions change. Chain data is not touched.</div>
+        </div>
+      </Section>
+      {op.status === 'review' && operator && (
+        <div className="mt-3 flex items-center gap-3">
+          <button className="btn btn-primary" disabled={pending} onClick={() => act('confirm', { planId: review.planId })}>Apply services</button>
+          <span className="text-dim text-[12px]">Versions come from Settings → New devnet defaults; change them there and prepare again.</span>
+        </div>
+      )}
+    </>
+  );
+}
+
+function ResetReview({ op, review, operator, pending, act }) {
+  const [typed, setTyped] = useState('');
+  const img = (x) => Object.entries(x || {}).map(([k, v]) => `${k} ${v}`).join(' · ');
+  return (
+    <>
+      <Section title={`Platform wipe/redeploy · ${review.hpmns} HPMNs + ${review.seeds} seed(s)`}>
+        <div className="panel px-3 py-2 text-[12px] space-y-1">
+          <div><span className="text-dim">Core chain </span><span className="mono">{review.coreChain}</span> · <span className="text-dim">Core height </span><span className="mono">{review.coreHeight}</span></div>
+          <div><span className="text-dim">Genesis ChainLock anchor </span><span className="mono lv-warn">{review.anchor.height}</span> <span className="mono text-dim">{review.anchor.hash}</span> <span className="text-dim">(previous {review.previousAnchor.join(', ')})</span></div>
+          <div><span className="text-dim">Images now </span><span className="mono">{review.current.map(img).join(' | ')}</span></div>
+          <div><span className="text-dim">Images after </span><span className="mono">{img(review.next)}</span> · <span className="text-dim">seed Tenderdash now </span><span className="mono">{review.seedImages.join(', ')}</span></div>
+          <div><span className="text-dim">Epoch </span><span className="mono">{review.epoch.current.join(', ')} → {review.epoch.next} s</span> · <span className="text-dim">dashmate </span><span className="mono">{review.dashmate.join(', ')}</span> · <span className="text-dim">config format </span><span className="mono">{review.configFormat.join(', ')}</span> · <span className="text-dim">Tor enabled </span><span className="mono">{review.tor.map(String).join(', ')}</span></div>
+          <div className="pt-1"><span className="text-dim">Canary </span><span className="mono">{`epochTime ${review.canary.epochTime}, env ${review.canary.epochEnv}, Core config unchanged ${review.canary.coreSectionUnchanged}, anchor ${review.canary.anchor}${review.canary.nodeKeyUnchanged ? `, node key preserved, genesis ${review.canary.genesisChainId} (only anchor changes)` : ''}`}</span></div>
+          <div className="text-dim">Renders only: <span className="mono">{review.rendered.join(', ')}</span></div>
+        </div>
+      </Section>
+      {op.status === 'review' && operator && (
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <span className="text-[12px] text-dim">type <span className="mono">{op.network}</span> to confirm</span>
+          <input className="input mono w-56" value={typed} onChange={(e) => setTyped(e.target.value.trim())} />
+          <button className="btn btn-danger" disabled={pending || typed !== op.network} onClick={() => act('confirm', { planId: review.planId })}>Wipe Platform and redeploy</button>
+          <span className="text-dim text-[12px]">Stops at the first stage that fails on any target; backups and logs stay on each host.</span>
+        </div>
+      )}
+    </>
+  );
+}
+
+function Stages({ op }) {
+  const names = Object.keys(op.stages);
+  const hosts = [...new Set(names.flatMap((n) => Object.keys(op.stages[n])))];
+  return (
+    <Section title="Per-target results">
+      <div className="panel scroll-x">
+        <table className="grid"><thead><tr><th>target</th>{names.map((n) => <th key={n}>{n}</th>)}</tr></thead><tbody className="[&_tr]:!cursor-default">
+          {hosts.map((h) => (
+            <tr key={h}><td className="mono">{h}</td>{names.map((n) => {
+              const v = op.stages[n][h];
+              return <td key={n} title={v?.error || (v?.result?.problems || []).join('; ')}>{v ? (v.ok ? <span className="lv-ok">ok</span> : <span className="lv-down">fail</span>) : <span className="text-faint">—</span>}</td>;
+            })}</tr>
+          ))}
+        </tbody></table>
+      </div>
+    </Section>
   );
 }

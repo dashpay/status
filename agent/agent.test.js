@@ -81,7 +81,7 @@ function fakeDashnet(calls) {
 
 test('operation lifecycle: request -> enroll -> plan -> review -> confirm -> upgrade', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ops-'));
-  const dirs = { requests: join(root, 'req'), ops: join(root, 'ops'), work: join(root, 'work'), state: join(root, 'state') };
+  const dirs = { data: root, private: join(root, 'private'), requests: join(root, 'req'), ops: join(root, 'ops'), work: join(root, 'work'), state: join(root, 'state') };
   const calls = [];
   const s = structuredClone(settings);
   const ops = createOps({ settings: () => s, dirs, key: { path: '/key' }, pool: { knownHosts: () => 'x\n', pins: new Proxy({}, { get: () => ({ type: 'ssh-ed25519', key: 'k' }) }) }, binary: 'dashnet', log: () => {}, spawnImpl: fakeDashnet(calls) });
@@ -112,10 +112,125 @@ test('operation lifecycle: request -> enroll -> plan -> review -> confirm -> upg
 
 test('requests from non-operators are dropped', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ops-'));
-  const dirs = { requests: join(root, 'req'), ops: join(root, 'ops'), work: join(root, 'work'), state: join(root, 'state') };
+  const dirs = { data: root, private: join(root, 'private'), requests: join(root, 'req'), ops: join(root, 'ops'), work: join(root, 'work'), state: join(root, 'state') };
   const ops = createOps({ settings: () => settings, dirs, key: { path: '/key' }, pool: { knownHosts: () => '', pins: {} }, binary: 'dashnet', log: () => {}, spawnImpl: fakeDashnet([]) });
   const id = '7c8139ad-e92f-40da-943d-1e001efaccb5';
   writeFileSync(join(dirs.requests, `${id}.json`), JSON.stringify({ type: 'create', id, network: 'testnet', action: 'doctor', nodes: ['seed-1'], actor: { id: 1, login: 'mallory' } }));
   ops.tick();
   assert.equal(existsSync(join(dirs.ops, `${id}.json`)), false);
+});
+
+test('devnet requests: admin-only fields, permanent names, placement from settings', async () => {
+  const { validateDevnetRequest, networkYaml, estimate } = await import('./devnets.js');
+  const s = structuredClone(settings);
+  const q = { id: '6c8139ad-e92f-40da-943d-1e001efaccb5', network: 'devnet-bonsai', action: 'create-devnet', devnet: { validators: 15 } };
+  const d = validateDevnetRequest(s, q, {});
+  assert.equal(d.validators, 15);
+  assert.equal(d.subnetId, s.devnets.subnetId);
+  assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { subnetId: 'subnet-evil' } }, {}), /not settable/);
+  assert.throws(() => validateDevnetRequest(s, { ...q, network: 'devnet-moutai' }, {}), /already exists/);
+  assert.throws(() => validateDevnetRequest(s, q, { 'devnet-bonsai': { status: 'deleted' } }), /already exists/);
+  assert.throws(() => validateDevnetRequest(s, { ...q, network: 'bonsai' }, {}), /devnet-<name>/);
+  assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { validators: 7 } }, {}), /13..25/);
+  assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { images: { drive: 'evil/drive:1' } } }, {}), /images.drive/);
+  assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { services: { faucetAmount: '1\nDASH_RPC_HOST=evil' } } }, {}), /faucetAmount/);
+  assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { services: { quorumServer: 'evil/image:1' } } }, {}), /quorumServer/);
+  assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { services: { explorerVersion: '--orphan=x' } } }, {}), /explorerVersion/);
+  assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { services: { dnsZoneId: 'Z1' } } }, {}), /not settable/);
+  assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { displayName: '<script>' } }, {}), /display name/);
+  assert.equal(validateDevnetRequest(s, { ...q, devnet: { services: { faucetAmount: 25 } } }, {}).services.faucetAmount, 25);
+  const yaml = networkYaml(s, 'devnet-bonsai', d, { arm64: 'ami-1', amd64: 'ami-2' });
+  assert.match(yaml, /name: devnet-bonsai/);
+  assert.match(yaml, /count: 15/);
+  assert.match(yaml, /ipamPoolId: ipam-pool-/);
+  assert.match(yaml, /drive: docker.io\/dashpay\/drive:/);
+  assert.ok(estimate(d).hourly > 0.5);
+  assert.throws(() => validateRequest(s, { id: q.id, network: 'devnet-bonsai', action: 'delete-devnet', confirmName: 'devnet-bonsai' }, {}), /only devnets created/);
+  assert.throws(() => validateRequest(s, { id: q.id, network: 'devnet-bonsai', action: 'delete-devnet', confirmName: 'nope' }, { 'devnet-bonsai': { status: 'ready' } }), /type devnet-bonsai/);
+});
+
+test('discovery classifies dash-network-go instances by tag', async () => {
+  const { createDiscovery } = await import('./discover.js');
+  const tags = (o) => Object.entries(o).map(([Key, Value]) => ({ Key, Value }));
+  const client = { send: async () => ({ Reservations: [{ Instances: [
+    { InstanceId: 'i-01', State: { Name: 'running' }, Architecture: 'arm64', PublicIpAddress: '68.67.122.90', Tags: tags({ Name: 'devnet-bonsai-validators-001', DashNetwork: 'devnet-bonsai', 'dashnet:managed-by': 'dash-network-go', 'dashnet:network': 'devnet-bonsai', 'dashnet:role': 'validator', 'dashnet:node': 'validators-001' }) },
+    { InstanceId: 'i-02', State: { Name: 'running' }, Architecture: 'x86_64', PublicIpAddress: '68.67.122.91', Tags: tags({ Name: 'devnet-bonsai-wallet-001', DashNetwork: 'devnet-bonsai', 'dashnet:managed-by': 'dash-network-go', 'dashnet:network': 'devnet-bonsai', 'dashnet:role': 'wallet', 'dashnet:node': 'wallet-001' }) },
+  ] }] }) };
+  const found = await createDiscovery({ region: 'us-west-2', tagKey: 'DashNetwork' }, client)([{ name: 'devnet-bonsai', tag: 'devnet-bonsai' }]);
+  assert.deepEqual(found['devnet-bonsai'].map((h) => [h.name, h.role, h.arch]), [['validators-001', 'validator', 'arm64'], ['wallet-001', 'wallet', 'amd64']]);
+});
+
+test('a truncated DAPI gRPC-web reply fails fast instead of hanging', async () => {
+  const { dapiCheck } = await import('./collector.js');
+  const http = await import('node:http');
+  const server = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/grpc-web+proto' }); res.end(Buffer.from([0, 0, 0, 0, 10, 0x0a, 8, 8])); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    const started = Date.now();
+    const r = await dapiCheck(`http://127.0.0.1:${server.address().port}/`, 2000);
+    assert.equal(r.ok, false);
+    assert.ok(Date.now() - started < 2000);
+  } finally { server.close(); }
+});
+
+test('cancel during a running operation ends it as cancelled', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ops-'));
+  const dirs = { data: root, private: join(root, 'private'), requests: join(root, 'req'), ops: join(root, 'ops'), work: join(root, 'work'), state: join(root, 'state') };
+  const slow = (binary, args) => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+    const t = setTimeout(() => { writeFileSync(args[args.indexOf('--out') + 1], JSON.stringify({ id: 'a'.repeat(64), nodes: { 'seed-2': {} } })); child.emit('close', 0); }, 300);
+    child.kill = () => { clearTimeout(t); setImmediate(() => child.emit('close', null, 'SIGTERM')); };
+    return child;
+  };
+  const ops = createOps({ settings: () => settings, dirs, key: { path: '/key' }, pool: { knownHosts: () => 'x\n', pins: new Proxy({}, { get: () => ({ type: 'ssh-ed25519', key: 'k' }) }) }, binary: 'dashnet', log: () => {}, spawnImpl: slow });
+  mkdirSync(dirs.state, { recursive: true });
+  writeFileSync(join(dirs.state, 'testnet.json'), JSON.stringify({ hosts: [host('seed-2', 'seed', [['dashd', 'dashpay/dashd'], ['tenderdash', 'dashpay/tenderdash']])] }));
+  const id = '8c8139ad-e92f-40da-943d-1e001efaccb5', actor = { id: 9920871, login: 'ktechmidas' };
+  writeFileSync(join(dirs.requests, `${id}.json`), JSON.stringify({ type: 'create', id, network: 'testnet', action: 'doctor', nodes: ['seed-2'], actor }));
+  const read = () => JSON.parse(readFileSync(join(dirs.ops, `${id}.json`), 'utf8'));
+  ops.tick();
+  for (let i = 0; i < 100 && read().status !== 'preparing'; i++) { ops.tick(); await new Promise((r) => setTimeout(r, 5)); }
+  writeFileSync(join(dirs.requests, `${id}.cancel-a.json`), JSON.stringify({ type: 'cancel', id, network: 'testnet', actor }));
+  ops.tick();
+  for (let i = 0; i < 200 && !['cancelled', 'failed', 'succeeded'].includes(read().status); i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(read().status, 'cancelled');
+});
+
+test('platform reset: review from non-destructive stages; a failed wipe stops before apply', async () => {
+  const { createReset } = await import('./reset.js');
+  const root = mkdtempSync(join(tmpdir(), 'reset-'));
+  const dirs = { private: join(root, 'p'), state: join(root, 'state') };
+  mkdirSync(dirs.state, { recursive: true });
+  const mk = (name, role) => ({ name, role, state: 'running', publicIp: `192.0.2.${name.length}`, instanceId: `i-${name}`, probe: { ok: true } });
+  writeFileSync(join(dirs.state, 'devnet-moutai.json'), JSON.stringify({ hosts: [mk('hp-masternode-1', 'validator'), mk('hp-masternode-2', 'validator'), mk('seed-1', 'seed'), mk('web-1', 'web')] }));
+  const calls = [];
+  let failWipeOn = 'hp-masternode-2';
+  const pool = { exec: async (h, cmd) => {
+    const stage = cmd.split(' ')[4];
+    calls.push(`${stage}:${h.name}`);
+    const result = { baseline: { images: { drive: 'dashpay/drive:1' }, anchor: 10, epochTime: 3600, dashmate: 'dm', configFormatVersion: '4.2.0', tor: { enabled: false }, height: 100, tenderdashImage: 'dashpay/tenderdash:1' },
+      anchor: { height: 99, hash: 'ab' }, canary: { checks: { epochTime: 3600, epochEnv: '3600', coreSectionUnchanged: true, anchor: 99 }, rendered: ['dynamic-compose.yml'] } }[stage] || {};
+    const ok = !(stage === 'wipe' && h.name === failWipeOn);
+    return JSON.stringify({ ok, stage, result, error: ok ? undefined : 'boom' });
+  } };
+  const records = [];
+  const r = { id: 'x1', network: 'devnet-moutai', steps: [], request: { network: 'devnet-moutai', images: { drive: 'dashpay/drive:2', dapi: 'dashpay/rs-dapi:2', tenderdash: 'dashpay/tenderdash:2' }, options: {} } };
+  const ctx = { step: () => () => {}, save: (x) => records.push(x.status), write: () => {} };
+  const reset = createReset({ ctx, dirs, pool, getSettings: () => settings });
+  await reset.prepareReset(r);
+  assert.equal(r.review.hpmns, 2);
+  assert.equal(r.review.seeds, 1);
+  assert.equal(r.review.anchor.height, 99);
+  assert.ok(!calls.some((c) => c.includes('web-1')), 'web hosts are never targets');
+  assert.ok(calls.includes('canary:hp-masternode-1') && !calls.some((c) => /^(wipe|apply|start)/.test(c)), 'prepare is non-destructive');
+  await assert.rejects(reset.executeReset(r), /wipe failed on hp-masternode-2/);
+  assert.ok(!calls.some((c) => /^(apply|start)/.test(c)), 'nothing applied after a failed wipe');
+  assert.ok(!calls.includes('wipe:seed-1'), 'seed is reset only after every HPMN wiped');
+  failWipeOn = null;
+  await reset.executeReset(r);
+  assert.equal(calls.filter((c) => c === 'wipe:hp-masternode-1').length, 1, 'successful targets are not wiped twice on resume');
+  assert.ok(calls.includes('verify:seed-1') && r.result.healthy === true);
+  // Per-host results are recorded as each host finishes.
+  assert.ok(r.stages.start['hp-masternode-2'].ok && r.stages.verify['seed-1'].ok);
 });

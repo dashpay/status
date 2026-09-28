@@ -51,3 +51,64 @@ test('evaluation gives a level with concrete reasons, and orphan containers are 
   assert.equal(op.hosts[0].instanceId, 'i-1');
   assert.match(op.hosts[3].reasons[0].text, /ETIMEDOUT/);
 });
+
+test('roles: admins cover everything, viewers never operate, one admin must remain', async () => {
+  const { memberOf, adminFor } = await import('./settings.js');
+  const s = structuredClone(settings);
+  s.operators.push({ id: 5, login: 'v', role: 'viewer', networks: ['devnet-moutai'] }, { id: 6, login: 'o', role: 'operator', networks: ['testnet'] });
+  const v = validateSettings(s);
+  assert.equal(memberOf(v, { id: 5 }, 'devnet-moutai'), true);
+  assert.equal(operatorFor(v, { id: 5 }, 'devnet-moutai'), false);
+  assert.equal(operatorFor(v, { id: 6 }, 'testnet'), true);
+  assert.equal(operatorFor(v, { id: 6 }, 'devnet-moutai'), false);
+  assert.equal(adminFor(v, { id: 9920871 }), true);
+  assert.equal(adminFor(v, { id: 6 }), false);
+  s.operators = [{ id: 5, login: 'v', role: 'viewer', networks: ['testnet'] }];
+  assert.throws(() => validateSettings(s), /At least one admin/);
+  s.operators = [{ id: 1, login: 'a', networks: ['*'] }, { id: 1, login: 'a', networks: ['*'] }];
+  assert.throws(() => validateSettings(s), /listed twice/);
+});
+
+test('console devnets merge into settings and deleted ones drop out', async () => {
+  const { mergeDevnets } = await import('./settings.js');
+  const s = structuredClone(settings);
+  const merged = mergeDevnets(s, { 'devnet-bonsai': { status: 'ready', displayName: 'Bonsai', coreNetwork: 'devnet-bonsai-g1', dns: { quorums: { host: 'quorums.bonsai.networks.dash.org' } } } });
+  const n = merged.networks.find((x) => x.name === 'devnet-bonsai');
+  assert.equal(n.kind, 'dashnet');
+  assert.equal(n.coreNetwork, 'devnet-bonsai-g1');
+  // dashnet plans name the chain without the devnet- prefix Core reports.
+  assert.equal(mergeDevnets(structuredClone(settings), { 'devnet-bonsai': { status: 'ready', coreNetwork: 'bonsai-g1' } }).networks.find((x) => x.name === 'devnet-bonsai').coreNetwork, 'devnet-bonsai-g1');
+  assert.equal(n.endpoints[0].url, 'https://quorums.bonsai.networks.dash.org/health');
+  assert.ok(validateSettings(merged));
+  const gone = mergeDevnets(structuredClone(merged), { 'devnet-bonsai': { status: 'deleted' } });
+  assert.equal(gone.networks.some((x) => x.name === 'devnet-bonsai'), false);
+});
+
+test('saving settings never freezes console devnet entries', async () => {
+  const { mergeDevnets, saveSettings } = await import('./settings.js');
+  const { mkdtempSync, readFileSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'settings-'));
+  const registry = { 'devnet-bonsai': { status: 'creating', coreNetwork: 'devnet-bonsai-g1' } };
+  writeFileSync(join(dir, 'devnets.json'), JSON.stringify(registry));
+  const saved = saveSettings(join(dir, 'settings.json'), mergeDevnets(structuredClone(settings), registry));
+  assert.ok(saved.networks.some((n) => n.name === 'devnet-bonsai'), 'still merged in memory');
+  assert.ok(!JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf8')).networks.some((n) => n.name === 'devnet-bonsai'), 'not written to settings.json');
+});
+
+test('hidden balances never reach the public projection', () => {
+  const s = structuredClone(settings);
+  const n = { ...s.networks[2], showBalances: false };
+  const host = { name: 'wallet-1', role: 'wallet', state: 'running', publicIp: '192.0.2.9', probe: { ok: true, at: new Date().toISOString(), data: {
+    core: { chain: 'main', blocks: 10, wallets: [{ name: 'dashd-wallet-1-faucet', trusted: 12.34 }] }, faucet: { kind: 'dash-faucet', status: 503, state: 'low_balance', balance: 12.34, utxos: 3 }, containers: [] } } };
+  const e = evaluateNetwork(n, { hosts: [host] }, s);
+  const pub = JSON.stringify(projectNetwork(n, e, { hosts: [host] }, false));
+  assert.ok(!pub.includes('12.34'), pub);
+  assert.ok(pub.includes('balance below threshold'));
+});
+
+test('a validator without Tenderdash RPC is down, not merely behind', () => {
+  const e = evaluateNetwork(network, { hosts: [evo('a'), evo('b', { tenderdash: null })] }, settings);
+  assert.equal(e.rows[1].level, 'down');
+});

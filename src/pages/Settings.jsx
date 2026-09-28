@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { api, useSession } from '../lib.js';
 import { Empty, Err, Section } from '../ui.jsx';
 
+const ROLE_TEXT = { admin: 'all networks, deployments, settings and users', operator: 'deploy and operate the granted networks', viewer: 'read-only, including private networks and operation logs' };
+
 const blankNetwork = () => ({ name: '', displayName: '', tag: '', chainType: 'devnet', coreNetwork: 'devnet-', p2pPort: 20001, public: true, deployable: true, showBalances: true, endpoints: [], observationWindow: '4m', operationTimeout: '110m', description: '' });
 
 export default function Settings() {
@@ -31,7 +33,7 @@ export default function Settings() {
     <div className="max-w-[1100px] pb-24">
       <div className="mt-4 flex items-center gap-3">
         <h1 className="text-[18px] font-semibold">Settings</h1>
-        <span className="text-dim text-[12px]">applied by the agent on its next cycle; no restart. {ro ? 'Read-only: only operators with access to all networks can edit.' : ''}</span>
+        <span className="text-dim text-[12px]">applied by the agent on its next cycle; no restart. {ro ? 'Read-only: only admins can edit.' : ''}</span>
       </div>
 
       <Section title="Collection">
@@ -55,23 +57,9 @@ export default function Settings() {
         </div>
       </Section>
 
-      <Section title="Operators (GitHub accounts)" right={!ro && <button className="btn" onClick={() => set((d) => { d.operators.push({ id: 0, login: '', networks: [] }); })}>Add operator</button>}>
-        <div className="panel scroll-x">
-          <table className="grid"><thead><tr><th>GitHub user id</th><th>login</th><th>networks (* = all, also grants settings)</th><th /></tr></thead>
-            <tbody className="[&_tr]:!cursor-default">
-              {doc.operators.map((o, i) => (
-                <tr key={i}>
-                  <td><input className="input w-32 mono" disabled={ro} value={o.id || ''} onChange={(e) => set((d) => { d.operators[i].id = Number(e.target.value.replace(/\D/g, '')) || 0; })} /></td>
-                  <td><input className="input w-40" disabled={ro} value={o.login} onChange={(e) => set((d) => { d.operators[i].login = e.target.value.trim(); })} /></td>
-                  <td><input className="input w-80 mono" disabled={ro} value={o.networks.join(', ')} onChange={(e) => set((d) => { d.operators[i].networks = e.target.value.split(',').map((x) => x.trim()).filter(Boolean); })} /></td>
-                  <td>{!ro && <button className="btn btn-danger !py-0.5" onClick={() => set((d) => { d.operators.splice(i, 1); })}>remove</button>}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <div className="text-dim text-[11.5px] mt-1">User id: <span className="mono">https://api.github.com/users/&lt;login&gt;</span> → <span className="mono">id</span>.</div>
-      </Section>
+      <Access doc={doc} ro={ro} set={set} self={session.user} />
+
+      <DevnetDefaults d={doc.devnets} ro={ro} update={(fn) => set((x) => fn(x.devnets))} />
 
       <Section title="Networks" right={!ro && <button className="btn" onClick={() => set((d) => { d.networks.push(blankNetwork()); })}>Add network</button>}>
         <div className="space-y-3">
@@ -144,4 +132,109 @@ function NumberField({ label, value, onChange, ro, float }) {
 }
 function Toggle({ label, value, onChange, ro }) {
   return <label className={`text-[12px] flex items-center gap-2 ${ro ? 'opacity-60' : 'cursor-pointer'}`}><input type="checkbox" disabled={ro} checked={!!value} onChange={(e) => onChange(e.target.checked)} />{label}</label>;
+}
+
+function Access({ doc, ro, set, self }) {
+  const [login, setLogin] = useState('');
+  const [found, setFound] = useState(null);
+  const [lookupError, setLookupError] = useState(null);
+  const [role, setRole] = useState('operator');
+  const [networks, setNetworks] = useState([]);
+  const names = doc.networks.map((n) => n.name);
+  const lookup = async (e) => {
+    e?.preventDefault();
+    setFound(null); setLookupError(null);
+    try { setFound(await api(`/api/github/users/${encodeURIComponent(login.trim().replace(/^@/, ''))}`)); }
+    catch (err) { setLookupError(err.message); }
+  };
+  const existing = found && doc.operators.find((o) => o.id === found.id);
+  const add = () => {
+    set((d) => { d.operators.push({ id: found.id, login: found.login, role, networks: role === 'admin' ? ['*'] : networks }); });
+    setFound(null); setLogin(''); setNetworks([]);
+  };
+  const toggle = (list, n) => (list.includes(n) ? list.filter((x) => x !== n) : [...list, n]);
+  return (
+    <Section title={`Access · ${doc.operators.length} GitHub account(s)`}>
+      {!ro && (
+        <form onSubmit={lookup} className="panel p-3 mb-2 flex flex-wrap items-center gap-3">
+          <span className="text-dim text-[12px]">Add a GitHub user</span>
+          <input className="input w-56" placeholder="GitHub login, e.g. octocat" value={login} onChange={(e) => setLogin(e.target.value)} />
+          <button className="btn" disabled={!login.trim()}>Look up</button>
+          {lookupError && <span className="lv-down text-[12px]">{lookupError}</span>}
+          {found && (
+            <div className="w-full flex flex-wrap items-center gap-3 border-t border-line pt-3">
+              <img src={found.avatar} alt="" className="w-8 h-8 rounded-full" />
+              <div><div className="font-medium">{found.name || found.login}</div><div className="text-dim mono text-[11px]">@{found.login} · id {found.id}{found.type !== 'User' ? ` · ${found.type}` : ''}</div></div>
+              {existing ? <span className="lv-warn text-[12px]">already has {existing.role} access</span> : <>
+                <select className="input" value={role} onChange={(e) => setRole(e.target.value)}>
+                  <option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option>
+                </select>
+                {role !== 'admin' && <div className="flex flex-wrap gap-1">{names.map((n) => <span key={n} className={`chip ${networks.includes(n) ? 'on' : ''}`} onClick={() => setNetworks((l) => toggle(l, n))}>{n}</span>)}
+                  <span className={`chip ${networks.includes('*') ? 'on' : ''}`} onClick={() => setNetworks((l) => toggle(l, '*'))}>all networks</span></div>}
+                <span className="text-dim text-[11.5px]">{ROLE_TEXT[role]}</span>
+                <button type="button" className="btn btn-primary" disabled={role !== 'admin' && !networks.length} onClick={add}>Add @{found.login}</button>
+              </>}
+            </div>
+          )}
+        </form>
+      )}
+      <div className="panel scroll-x">
+        <table className="grid"><thead><tr><th>account</th><th>role</th><th>networks</th><th /></tr></thead>
+          <tbody className="[&_tr]:!cursor-default">
+            {doc.operators.map((o, i) => {
+              const r = o.role || (o.networks.includes('*') ? 'admin' : 'operator');
+              const me = self?.id === o.id;
+              return (
+                <tr key={o.id || i}>
+                  <td><span className="flex items-center gap-2"><img src={`https://avatars.githubusercontent.com/u/${o.id}?s=40`} alt="" className="w-5 h-5 rounded-full" /><span className="mono">@{o.login}</span><span className="text-faint mono text-[11px]">{o.id}</span>{me && <span className="tag">you</span>}</span></td>
+                  <td>
+                    <select className="input" disabled={ro || me} value={r} onChange={(e) => set((d) => { d.operators[i].role = e.target.value; if (e.target.value === 'admin') d.operators[i].networks = ['*']; })}>
+                      <option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option>
+                    </select>
+                  </td>
+                  <td className="!whitespace-normal">
+                    {r === 'admin' ? <span className="text-dim">all networks</span> : <div className="flex flex-wrap gap-1">
+                      {['*', ...names].map((n) => <span key={n} className={`chip ${o.networks.includes(n) ? 'on' : ''} ${ro ? 'pointer-events-none' : ''}`} onClick={() => set((d) => { d.operators[i].networks = toggle(d.operators[i].networks, n); })}>{n === '*' ? 'all networks' : n}</span>)}
+                    </div>}
+                  </td>
+                  <td>{!ro && !me && <button className="btn btn-danger !py-0.5" onClick={() => set((d) => { d.operators.splice(i, 1); })}>remove</button>}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="text-dim text-[11.5px] mt-1">Access is bound to the GitHub numeric user id, so a renamed account keeps its access. Changes apply after Save.</div>
+    </Section>
+  );
+}
+
+function DevnetDefaults({ d, ro, update }) {
+  if (!d) return null;
+  const T = (label, key, mono = true) => <TextField label={label} value={d[key]} ro={ro} mono={mono} onChange={(v) => update((x) => { x[key] = v.trim(); })} />;
+  const N = (label, key) => <NumberField label={label} value={d[key]} ro={ro} onChange={(v) => update((x) => { x[key] = v; })} />;
+  return (
+    <Section title="New devnet defaults">
+      <div className="panel">
+        <div className="p-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {T('VPC', 'vpcId')}{T('Subnet', 'subnetId')}
+          <TextField label="Security groups (comma separated)" value={d.securityGroupIds.join(', ')} ro={ro} mono onChange={(v) => update((x) => { x.securityGroupIds = v.split(',').map((g) => g.trim()).filter(Boolean); })} />
+          {T('EC2 key pair (agent key)', 'keyName')}{T('BYOIP IPAM pool', 'ipamPoolId')}{T('Route 53 zone', 'dnsZoneId')}{T('DNS suffix', 'dnsSuffix')}{N('Root disk GiB', 'rootVolumeGiB')}
+          {N('Validators', 'validators')}{T('Validator type', 'validatorType')}{T('Validator arch', 'validatorArch')}{N('Platform protocol', 'protocol')}
+          {T('Wallet + services type', 'walletType')}{T('Wallet + services arch', 'walletArch')}
+        </div>
+        <div className="px-3 pb-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {Object.keys(d.images).map((c) => <TextField key={c} label={`${c} image`} value={d.images[c]} ro={ro} mono onChange={(v) => update((x) => { x.images[c] = v.trim(); })} />)}
+        </div>
+        <div className="px-3 pb-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 border-t border-line pt-3">
+          <TextField label="Quorum list server image" value={d.services.quorumServer} ro={ro} mono onChange={(v) => update((x) => { x.services.quorumServer = v.trim(); })} />
+          <TextField label="Platform Explorer release" value={d.services.explorerVersion} ro={ro} mono onChange={(v) => update((x) => { x.services.explorerVersion = v.trim(); })} />
+          <TextField label="dash-faucet commit" value={d.services.faucetRef} ro={ro} mono onChange={(v) => update((x) => { x.services.faucetRef = v.trim(); })} />
+          <NumberField label="Faucet payout (DASH)" value={d.services.faucetAmount} ro={ro} float onChange={(v) => update((x) => { x.services.faucetAmount = v; })} />
+          <NumberField label="Faucet requests per IP per hour" value={d.services.faucetRateLimit} ro={ro} onChange={(v) => update((x) => { x.services.faucetRateLimit = v; })} />
+          <NumberField label="Faucet wallet funding (DASH)" value={d.services.faucetFunding} ro={ro} float onChange={(v) => update((x) => { x.services.faucetFunding = v; })} />
+        </div>
+      </div>
+    </Section>
+  );
 }

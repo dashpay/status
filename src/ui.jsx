@@ -35,7 +35,7 @@ export function Section({ title, right, children, className = '' }) {
 }
 
 export function Bar({ counts, total }) {
-  const order = ['ok', 'warn', 'down', 'unreachable', 'stopped'];
+  const order = ['ok', 'deploying', 'warn', 'down', 'unreachable', 'stopped'];
   const t = total || order.reduce((a, k) => a + (counts[k] || 0), 0) || 1;
   return (
     <div className="flex h-1.5 w-full overflow-hidden rounded-full bg-line">

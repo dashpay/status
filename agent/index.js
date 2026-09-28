@@ -14,14 +14,15 @@ import { createOps, manifestFor } from './ops.js';
 const DATA = process.env.STATUS_DATA_DIR || '/var/lib/dash-status';
 const PRIVATE = process.env.AGENT_PRIVATE_DIR || '/var/lib/dash-status-agent';
 const BINARY = process.env.DASHNET_BINARY || '/usr/local/bin/dashnet';
-const dirs = { state: join(DATA, 'state'), requests: join(DATA, 'requests'), ops: join(DATA, 'ops'), work: join(PRIVATE, 'work') };
+const dirs = { data: DATA, private: PRIVATE, state: join(DATA, 'state'), requests: join(DATA, 'requests'), ops: join(DATA, 'ops'), work: join(PRIVATE, 'work') };
 for (const d of [dirs.state, dirs.requests, dirs.ops, dirs.work, join(PRIVATE, 'journal')]) mkdirSync(d, { recursive: true });
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 let settings = loadSettings(join(DATA, 'settings.json'));
 const key = loadOrCreateKey(PRIVATE);
 const pool = createPool({ key, stateDir: PRIVATE, region: settings.aws.region, accountId: settings.aws.accountId, log });
-const discover = createDiscovery({ region: settings.aws.region, tagKey: settings.aws.tagKey });
+let discover = createDiscovery({ region: settings.aws.region, tagKey: settings.aws.tagKey });
+let awsKey = JSON.stringify([settings.aws.region, settings.aws.tagKey]);
 const collector = createCollector({ pool, stateDir: dirs.state, log });
 const wake = new Set();
 const ops = createOps({
@@ -57,6 +58,7 @@ function readJournal(network, state) {
   const out = join(dir, `op-${Date.now()}.json`);
   return new Promise((resolve) => {
     const child = spawn(BINARY, ['managed-operation', '--manifest', join(dir, 'manifest.json'), '--timeout', '1m', '--out', out], { stdio: ['ignore', 'ignore', 'pipe'] });
+    setTimeout(() => child.kill('SIGKILL'), 90_000).unref();
     let err = '';
     child.stderr.on('data', (d) => { err += d; });
     child.on('error', (e) => resolve({ at: new Date().toISOString(), error: e.message }));
@@ -74,30 +76,43 @@ function readJournal(network, state) {
   });
 }
 
+const journalAt = new Map();
 async function collect(network) {
   const hosts = inventory.networks[network.name] || [];
   const state = await collector.collectNetwork(network, hosts, { ...meta, journal: journals[network.name] || null, pollSeconds: settings.pollSeconds });
-  journals[network.name] = await readJournal(network, state);
+  // The journal changes only with operations: read it every few minutes, not every probe.
+  if (network.kind !== 'dashnet' && Date.now() - (journalAt.get(network.name) || 0) > 5 * 60_000) {
+    journalAt.set(network.name, Date.now());
+    journals[network.name] = await readJournal(network, state);
+  }
 }
 
 let lastDiscovery = 0;
 const busy = new Set();
+const lastRun = new Map();
+// Each network refreshes on its own cadence; a slow network never delays others.
 async function loop() {
   settings = loadSettings(join(DATA, 'settings.json'));
-  if (Date.now() - lastDiscovery > settings.discoverySeconds * 1000 || !inventory.at) {
+  const nextKey = JSON.stringify([settings.aws.region, settings.aws.tagKey]);
+  if (nextKey !== awsKey) { awsKey = nextKey; discover = createDiscovery({ region: settings.aws.region, tagKey: settings.aws.tagKey }); lastDiscovery = 0; log('aws settings changed; discovery rebuilt'); }
+  const names = new Set(settings.networks.map((n) => n.name));
+  // Missing inventory retries sooner than the schedule, but never in a tight loop.
+  const missing = !inventory.at || settings.networks.some((n) => !inventory.networks[n.name]);
+  const since = Date.now() - lastDiscovery;
+  if (since > settings.discoverySeconds * 1000 || (missing && since > 30_000)) {
     lastDiscovery = Date.now();
     await refreshInventory();
   }
-  await Promise.all(settings.networks.map(async (n) => {
-    if (busy.has(n.name)) return;
-    busy.add(n.name);
-    try { await collect(n); } catch (e) { log(`collect ${n.name} failed:`, e.message); } finally { busy.delete(n.name); }
-  }));
+  for (const n of settings.networks) {
+    if (busy.has(n.name) || Date.now() - (lastRun.get(n.name) || 0) < settings.pollSeconds * 1000) continue;
+    busy.add(n.name); lastRun.set(n.name, Date.now());
+    collect(n).catch((e) => log(`collect ${n.name} failed:`, e.message)).finally(() => busy.delete(n.name));
+  }
+  for (const k of lastRun.keys()) if (!names.has(k)) lastRun.delete(k);
 }
 
 async function main() {
   log(`agent starting; key ${key.pub.split(' ').slice(0, 2).join(' ').slice(0, 40)}…`);
-  let next = 0;
   setInterval(() => {
     try { ops.tick(); } catch (e) { log('ops:', e.message); }
     for (const n of wake) {
@@ -107,12 +122,18 @@ async function main() {
     }
   }, 1000);
   for (;;) {
-    const started = Date.now();
     await loop().catch((e) => log('loop:', e.message));
-    next = started + settings.pollSeconds * 1000;
-    await new Promise((r) => setTimeout(r, Math.max(1000, next - Date.now())));
+    await new Promise((r) => setTimeout(r, 2000));
   }
 }
 
-for (const s of ['SIGTERM', 'SIGINT']) process.on(s, () => { pool.close(); process.exit(0); });
+let stopping = false;
+for (const s of ['SIGTERM', 'SIGINT']) process.on(s, async () => {
+  if (stopping) return;
+  stopping = true;
+  log(`${s}: stopping running dashnet operations`);
+  await ops.shutdown().catch(() => {});
+  pool.close();
+  process.exit(0);
+});
 main();

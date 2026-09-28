@@ -1,9 +1,12 @@
 // Operator-editable configuration shared by the web process (writer) and the
 // agent (reader). Everything here is non-secret.
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
+// admin: every network, settings and user management; operator: deploy on the
+// granted networks; viewer: see granted (including private) networks read-only.
+export const ROLES = ['admin', 'operator', 'viewer'];
 export const COMPONENTS = ['core', 'drive', 'tenderdash', 'dapi', 'gateway', 'helper'];
 export const COMPONENT_REPOS = {
   core: 'dashpay/dashd', drive: 'dashpay/drive', tenderdash: 'dashpay/tenderdash',
@@ -19,8 +22,26 @@ export const DEFAULT_SETTINGS = {
   pollSeconds: 30,
   discoverySeconds: 300,
   aws: { accountId: '854439639386', region: 'us-west-2', tagKey: 'DashNetwork', stateTable: 'dashnet-managed-state' },
-  operators: [{ id: 9920871, login: 'ktechmidas', networks: ['*'] }],
+  operators: [{ id: 9920871, login: 'ktechmidas', role: 'admin', networks: ['*'] }],
   thresholds: { coreLagBlocks: 3, platformLagBlocks: 10, diskWarnPercent: 85, memWarnPercent: 92, balanceWarn: 100 },
+  // Defaults for devnets created from the console (dash-network-go lifecycle).
+  devnets: {
+    vpcId: 'vpc-08b7a214713ca4ce9', subnetId: 'subnet-01765e4b0fc0a2aa4', securityGroupIds: ['sg-0246983c2e14a5f34'],
+    keyName: 'dash-status-agent', ipamPoolId: 'ipam-pool-0de83ed8bba5f9b48', rootVolumeGiB: 60,
+    validators: 13, validatorType: 't4g.medium', validatorArch: 'arm64', walletType: 't3.large', walletArch: 'amd64',
+    protocol: 14,
+    images: {
+      core: 'dashpay/dashd:23', drive: 'dashpay/drive:4.2.0-beta.5', dapi: 'dashpay/rs-dapi:4.2.0-beta.5',
+      tenderdash: 'dashpay/tenderdash:1.8.1', gateway: 'dashpay/envoy:1.39.0-impr.1', helper: 'dashpay/dashmate-helper:4.2.0-beta.5',
+    },
+    services: {
+      quorumServer: 'dashpay/quorum-list-server:0.7.0',
+      explorerVersion: '2.5.3',
+      faucetRef: 'b927e6058845ebf3c0722e56eb0e89642e98c28b',
+      faucetAmount: 10, faucetRateLimit: 20, faucetFunding: 5000, epochSeconds: 3600,
+    },
+    dnsZoneId: 'Z0875113JJTK7DOU978T', dnsSuffix: 'networks.dash.org',
+  },
   networks: [
     {
       name: 'testnet', displayName: 'Testnet', tag: 'testnet', chainType: 'testnet', coreNetwork: 'test', p2pPort: 19999,
@@ -68,17 +89,26 @@ export function validateSettings(input) {
   int(s.pollSeconds, 10, 3600, 'pollSeconds');
   int(s.discoverySeconds, 60, 86400, 'discoverySeconds');
   if (!s.aws || !/^\d{12}$/.test(s.aws.accountId) || !/^[a-z]{2}(-[a-z]+)+-\d$/.test(s.aws.region) || !s.aws.tagKey || !s.aws.stateTable) throw new Error('aws account/region/tagKey/stateTable required');
-  if (!Array.isArray(s.operators) || !s.operators.length) throw new Error('At least one operator is required');
+  if (!Array.isArray(s.operators) || !s.operators.length) throw new Error('At least one user is required');
+  const ids = new Set();
   for (const o of s.operators) {
-    int(o.id, 1, 2 ** 40, 'operator id');
-    if (typeof o.login !== 'string' || !/^[A-Za-z0-9-]{1,39}$/.test(o.login)) throw new Error('operator login invalid');
-    if (!Array.isArray(o.networks) || !o.networks.every((n) => n === '*' || slug.test(n))) throw new Error('operator networks invalid');
+    int(o.id, 1, 2 ** 40, 'GitHub user id');
+    if (ids.has(o.id)) throw new Error(`${o.login}: listed twice`);
+    ids.add(o.id);
+    if (typeof o.login !== 'string' || !/^[A-Za-z0-9-]{1,39}$/.test(o.login)) throw new Error('GitHub login invalid');
+    if (!Array.isArray(o.networks) || !o.networks.every((n) => n === '*' || slug.test(n))) throw new Error(`${o.login}: networks invalid`);
+    o.role ??= o.networks.includes('*') ? 'admin' : 'operator';
+    if (!ROLES.includes(o.role)) throw new Error(`${o.login}: role must be ${ROLES.join(', ')}`);
+    if (o.role === 'admin') o.networks = ['*'];
+    if (!o.networks.length) throw new Error(`${o.login}: grant at least one network`);
   }
+  if (!s.operators.some((o) => o.role === 'admin')) throw new Error('At least one admin is required');
   const t = s.thresholds || {};
   int(t.coreLagBlocks, 0, 1000, 'coreLagBlocks'); int(t.platformLagBlocks, 0, 10000, 'platformLagBlocks');
   int(t.diskWarnPercent, 1, 100, 'diskWarnPercent'); int(t.memWarnPercent, 1, 100, 'memWarnPercent');
   if (typeof t.balanceWarn !== 'number' || t.balanceWarn < 0) throw new Error('balanceWarn must be a non-negative number');
-  if (!Array.isArray(s.networks) || !s.networks.length || s.networks.length > 20) throw new Error('1-20 networks required');
+  s.devnets = validateDevnetDefaults(s.devnets ?? structuredClone(DEFAULT_SETTINGS.devnets));
+  if (!Array.isArray(s.networks) || !s.networks.length || s.networks.length > 40) throw new Error('1-40 networks required');
   const names = new Set();
   for (const n of s.networks) {
     if (!slug.test(n.name) || names.has(n.name)) throw new Error(`network name "${n.name}" invalid or duplicated`);
@@ -99,22 +129,87 @@ export function validateSettings(input) {
       if (e.kind !== undefined && !['http', 'dapi'].includes(e.kind)) throw new Error(`${n.name}: endpoint kind must be http or dapi`);
     }
     if (n.description !== undefined && (typeof n.description !== 'string' || n.description.length > 500)) throw new Error(`${n.name}: description too long`);
+    if (n.kind !== undefined && !['managed', 'dashnet'].includes(n.kind)) throw new Error(`${n.name}: kind must be managed or dashnet`);
+    delete n.lifecycle;
   }
   return s;
 }
 
+const IMAGE_TAG = /^(docker\.io\/)?[a-z0-9]+(?:[._-][a-z0-9]+)*\/[a-z0-9]+(?:[._-][a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|@sha256:[0-9a-f]{64})$/;
+export function validateDevnetDefaults(d) {
+  const req = (cond, msg) => { if (!cond) throw new Error(`devnets: ${msg}`); };
+  req(d && typeof d === 'object', 'defaults required');
+  req(/^vpc-[0-9a-f]+$/.test(d.vpcId) && /^subnet-[0-9a-f]+$/.test(d.subnetId), 'vpcId/subnetId invalid');
+  req(Array.isArray(d.securityGroupIds) && d.securityGroupIds.length >= 1 && d.securityGroupIds.length <= 5 && d.securityGroupIds.every((g) => /^sg-[0-9a-f]+$/.test(g)), 'securityGroupIds invalid');
+  req(/^[A-Za-z0-9_.-]{1,255}$/.test(d.keyName), 'keyName invalid');
+  req(d.ipamPoolId === '' || /^ipam-pool-[0-9a-f]+$/.test(d.ipamPoolId), 'ipamPoolId invalid');
+  req(Number.isInteger(d.rootVolumeGiB) && d.rootVolumeGiB >= 30 && d.rootVolumeGiB <= 1000, 'rootVolumeGiB 30..1000');
+  req(Number.isInteger(d.validators) && d.validators >= 13 && d.validators <= 25, 'validators 13..25');
+  for (const k of ['validatorType', 'walletType']) req(/^[a-z][a-z0-9-]*\.[a-z0-9]+$/.test(d[k]), `${k} invalid`);
+  for (const k of ['validatorArch', 'walletArch']) req(['arm64', 'amd64'].includes(d[k]), `${k} must be arm64 or amd64`);
+  req(Number.isInteger(d.protocol) && d.protocol >= 1 && d.protocol <= 100, 'protocol invalid');
+  for (const c of COMPONENTS) req(IMAGE_TAG.test(d.images?.[c] || '') && d.images[c].replace(/^docker\.io\//, '').split(/[@:]/)[0] === COMPONENT_REPOS[c], `images.${c} must be ${COMPONENT_REPOS[c]}:<tag>`);
+  const sv = d.services || {};
+  req(IMAGE_TAG.test(sv.quorumServer || '') && /^(docker\.io\/)?dashpay\/quorum-list-server[:@]/.test(sv.quorumServer), 'services.quorumServer must be dashpay/quorum-list-server:<tag>');
+  req(/^\d+\.\d+\.\d+$|^nightly$/.test(sv.explorerVersion || ''), 'services.explorerVersion like 2.5.3');
+  req(/^[0-9a-f]{40}$/.test(sv.faucetRef || ''), 'services.faucetRef must be a full dash-faucet commit');
+  req(typeof sv.faucetAmount === 'number' && sv.faucetAmount > 0 && sv.faucetAmount <= 1000, 'services.faucetAmount 0..1000');
+  req(Number.isInteger(sv.faucetRateLimit) && sv.faucetRateLimit >= 1 && sv.faucetRateLimit <= 10000, 'services.faucetRateLimit >= 1');
+  req(typeof sv.faucetFunding === 'number' && sv.faucetFunding >= 100, 'services.faucetFunding >= 100');
+  req(Number.isInteger(sv.epochSeconds) && sv.epochSeconds >= 60, 'services.epochSeconds >= 60');
+  req(/^Z[0-9A-Z]+$/.test(d.dnsZoneId) && /^[a-z0-9.-]+\.[a-z]+$/.test(d.dnsSuffix), 'dnsZoneId/dnsSuffix invalid');
+  return d;
+}
+
 export function loadSettings(path) {
-  try { return validateSettings(JSON.parse(readFileSync(path, 'utf8'))); }
+  let settings;
+  try { settings = validateSettings(JSON.parse(readFileSync(path, 'utf8'))); }
   catch (e) {
     if (e.code !== 'ENOENT') console.error(`settings: ${e.message}; using defaults`);
-    return structuredClone(DEFAULT_SETTINGS);
+    settings = structuredClone(DEFAULT_SETTINGS);
   }
+  return mergeDevnets(settings, readJSON(join(dirname(path), 'devnets.json'), {}));
+}
+
+// Devnets created from the console are registered by the agent in devnets.json
+// and appear as networks without anyone editing settings. Deleted ones drop out.
+export function mergeDevnets(settings, registry) {
+  settings.networks = settings.networks.filter((n) => registry[n.name]?.status !== 'deleted');
+  const names = new Set(settings.networks.map((n) => n.name));
+  for (const [name, reg] of Object.entries(registry)) {
+    if (reg.status === 'deleted' || names.has(name)) continue;
+    settings.networks.push(devnetEntry(name, reg));
+  }
+  for (const n of settings.networks) if (registry[n.name]) n.lifecycle = lifecycleOf(registry[n.name]);
+  return settings;
+}
+const lifecycleOf = (reg) => ({ status: reg.status, operation: reg.operation, createdBy: reg.createdBy, createdAt: reg.createdAt, readyAt: reg.readyAt || null, dns: reg.dns || null });
+
+// Core reports a devnet's chain as devnet-<name>; dashnet plans carry <name>.
+export const devnetChain = (core) => (core.startsWith('devnet-') ? core : `devnet-${core}`);
+
+export function devnetEntry(name, reg) {
+  const dns = reg.dns || {};
+  return {
+    name, displayName: reg.displayName || name, tag: name, chainType: 'devnet', coreNetwork: devnetChain(reg.coreNetwork || `${name.replace(/^devnet-/, '')}-g1`),
+    p2pPort: 20001, public: reg.public !== false, deployable: reg.status === 'ready', showBalances: true, kind: 'dashnet',
+    description: '',
+    endpoints: [
+      dns.quorums && { label: 'Quorums', url: `https://${dns.quorums.host}/health` },
+      dns.explorer && { label: 'Explorer', url: `https://${dns.explorer.host}/` },
+      dns.faucet && { label: 'Faucet', url: `https://${dns.faucet.host}/api/status` },
+    ].filter(Boolean),
+    observationWindow: '90s', operationTimeout: '110m',
+  };
 }
 
 export function saveSettings(path, settings) {
   const valid = validateSettings(settings);
+  // Console devnets live in devnets.json; saving must not freeze their entries.
+  const registry = readJSON(join(dirname(path), 'devnets.json'), {});
+  valid.networks = valid.networks.filter((n) => !(n.kind === 'dashnet' && registry[n.name]));
   writeAtomic(path, JSON.stringify(valid, null, 2));
-  return valid;
+  return mergeDevnets(valid, registry);
 }
 
 export function writeAtomic(path, data, mode = 0o640) {
@@ -128,8 +223,20 @@ export function readJSON(path, fallback = null) {
   try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return fallback; }
 }
 
+export function accessFor(settings, user) {
+  const o = user ? settings.operators.find((x) => x.id === user.id) : null;
+  return o ? { ...o, role: o.role || (o.networks.includes('*') ? 'admin' : 'operator') } : null;
+}
+const covers = (a, network) => network === undefined || a.networks.includes('*') || a.networks.includes(network);
+// Members (any role) see granted networks in full detail, including private ones.
+export function memberOf(settings, user, network) {
+  const a = accessFor(settings, user);
+  return !!a && covers(a, network);
+}
 export function operatorFor(settings, user, network) {
-  if (!user) return false;
-  const o = settings.operators.find((x) => x.id === user.id);
-  return !!o && (network === undefined || o.networks.includes('*') || o.networks.includes(network));
+  const a = accessFor(settings, user);
+  return !!a && a.role !== 'viewer' && covers(a, network);
+}
+export function adminFor(settings, user) {
+  return accessFor(settings, user)?.role === 'admin';
 }

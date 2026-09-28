@@ -8,7 +8,7 @@ export async function loadSession() {
     fetch('/api/session', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({})),
     fetch('/api/me', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({})),
   ]);
-  session = { ...s, operatorOf: me.operatorOf || [], admin: !!me.admin, loaded: true };
+  session = { ...s, operatorOf: me.operatorOf || [], memberOf: me.memberOf || [], role: me.role || null, admin: !!me.admin, loaded: true };
   sessionSubs.forEach((f) => f());
 }
 export function useSession() {
@@ -32,6 +32,9 @@ export async function logout() {
 // ---- live updates --------------------------------------------------------
 const listeners = new Set();
 let source;
+// EventSource gives up for good after a non-200 reconnect (e.g. a 502 while the
+// web container restarts); recreate it with backoff and resync everything.
+let backoff = 1000;
 function ensureStream() {
   if (source) return;
   source = new EventSource('/api/stream');
@@ -39,7 +42,16 @@ function ensureStream() {
     const data = JSON.parse(e.data);
     listeners.forEach((l) => l(type, data));
   });
-  source.onerror = () => {};
+  source.onopen = () => {
+    if (backoff > 1000) listeners.forEach((l) => { l('network', { name: '*' }); l('op', { id: '*' }); });
+    backoff = 1000;
+  };
+  source.onerror = () => {
+    if (source.readyState !== EventSource.CLOSED) return;
+    source = null;
+    setTimeout(ensureStream, backoff);
+    backoff = Math.min(backoff * 2, 30_000);
+  };
 }
 export function useStream(fn) {
   const ref = useRef(fn);
@@ -124,5 +136,5 @@ export const pct = (v) => (v == null ? '—' : `${Math.round(v)}%`);
 export const dash = (v) => (v == null ? '—' : Number(v).toLocaleString('en-US', { maximumFractionDigits: 2 }));
 export const short = (h, n = 8) => (h ? `${h.slice(0, n)}…` : '—');
 
-export const LEVEL_LABEL = { ok: 'ok', warn: 'warn', down: 'down', unreachable: 'unreachable', stopped: 'stopped', info: 'info' };
-export const ROLE_LABEL = { validator: 'Evo masternodes', masternode: 'Regular masternodes', seed: 'Seeds', web: 'Web', wallet: 'Wallet', miner: 'Miners', mixer: 'Mixers', quorums: 'Quorum list', metrics: 'Metrics', logs: 'Logs', vpn: 'VPN', other: 'Other' };
+export const LEVEL_LABEL = { ok: 'ok', warn: 'warn', down: 'down', unreachable: 'unreachable', stopped: 'stopped', info: 'info', deploying: 'deploying' };
+export const ROLE_LABEL = { validator: 'Evo masternodes', masternode: 'Regular masternodes', seed: 'Seeds', fullnode: 'Full nodes', web: 'Web', wallet: 'Wallet / services', miner: 'Miners', mixer: 'Mixers', quorums: 'Quorum list', metrics: 'Metrics', logs: 'Logs', vpn: 'VPN', other: 'Other' };

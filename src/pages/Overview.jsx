@@ -29,7 +29,7 @@ function NetworkCard({ n, now }) {
       </div>
       <div className="px-4 py-3 grid grid-cols-2 gap-x-6 gap-y-2">
         <Fact k="Core height" v={num(s.core?.height)} sub={coreAge != null ? `block ${ago(s.core.blockTime, now)} ago` : null} warn={coreAge > 1800} />
-        <Fact k="ChainLock" v={num(s.core?.chainLock)} sub={s.core?.height && s.core?.chainLock ? `${s.core.height - s.core.chainLock} behind tip` : null} warn={s.core && s.core.height - s.core.chainLock > 2} />
+        <Fact k="ChainLock" v={num(s.core?.chainLock)} sub={s.core?.height && s.core?.chainLock ? `${s.core.height - s.core.chainLock} behind tip` : s.core ? 'no ChainLock yet' : null} warn={!!(s.core?.chainLock && s.core.height - s.core.chainLock > 2)} />
         <Fact k="Platform height" v={num(s.platform?.height)} sub={platAge != null ? `block ${ago(s.platform.blockTime, now)} ago` : 'no platform'} warn={platAge > 600} />
         <Fact k="Protocol" v={s.platform?.protocol != null ? `v${s.platform.protocol}` : '—'} sub={s.core?.protocol ? `core ${s.core.protocol}` : null} />
         <Fact k="Masternodes READY" v={s.masternodes?.total ? `${s.masternodes.ready}/${s.masternodes.total}` : '—'} sub={s.masternodes?.pose ? `${s.masternodes.pose} with PoSe` : null} warn={s.masternodes && s.masternodes.ready < s.masternodes.total} />
@@ -38,7 +38,7 @@ function NetworkCard({ n, now }) {
       <div className="px-4 pb-3">
         <div className="flex items-center justify-between text-[11px] text-dim mb-1.5">
           <span>{n.hostCount} hosts</span>
-          <span className="mono">{['ok', 'warn', 'down', 'unreachable', 'stopped'].filter((k) => s.counts?.[k]).map((k) => <span key={k} className={`ml-2 lv-${k}`}>{s.counts[k]} {k}</span>)}</span>
+          <span className="mono">{['ok', 'deploying', 'warn', 'down', 'unreachable', 'stopped'].filter((k) => s.counts?.[k]).map((k) => <span key={k} className={`ml-2 lv-${k}`}>{s.counts[k]} {k}</span>)}</span>
         </div>
         <Bar counts={s.counts || {}} />
         <div className="mt-2 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-dim">

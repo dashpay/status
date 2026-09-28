@@ -4,9 +4,11 @@
 // records, logs and every dashnet artifact. One operation runs per network.
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { COMPONENTS, COMPONENT_REPOS, readJSON, writeAtomic } from '../shared/settings.js';
+import { COMPONENTS, COMPONENT_REPOS, adminFor, operatorFor, readJSON, validateDevnetDefaults, writeAtomic } from '../shared/settings.js';
+import { createDevnets, validateDevnetRequest } from './devnets.js';
+import { createReset, validateReset } from './reset.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ACTIONS = new Set(['upgrade', 'deploy', 'enroll', 'doctor']);
@@ -45,9 +47,41 @@ export function manifestFor(settings, network, state) {
   };
 }
 
-export function validateRequest(settings, q) {
+export const LIFECYCLE = new Set(['create-devnet', 'delete-devnet', 'devnet-services', 'platform-reset']);
+
+export function validateRequest(settings, q, registry = {}) {
   if (!q || !UUID.test(q.id)) throw new Error('invalid request id');
+  if (q.action === 'create-devnet') { validateDevnetRequest(settings, q, registry); return { lifecycle: true }; }
+  if (q.action === 'platform-reset') { validateReset(settings, q); return { lifecycle: true }; }
+  if (q.action === 'devnet-services') {
+    const reg = registry[q.network];
+    if (!reg || reg.status === 'deleted') throw new Error('services are managed only for console devnets');
+    const sv = q.services || {};
+    const allowed = ['quorumServer', 'explorerVersion', 'faucetRef', 'faucetAmount', 'faucetRateLimit', 'faucetFunding'];
+    if (Object.keys(sv).some((k) => !allowed.includes(k))) throw new Error(`service settings: ${allowed.join(', ')}`);
+    validateDevnetDefaults({ ...settings.devnets, services: { ...settings.devnets.services, ...sv } });
+    return { lifecycle: true };
+  }
+  if (q.action === 'delete-devnet') {
+    const reg = registry[q.network];
+    if (!reg || reg.status === 'deleted') throw new Error('only devnets created from this console can be deleted');
+    if (q.confirmName !== q.network) throw new Error(`type ${q.network} to confirm deletion`);
+    return { lifecycle: true };
+  }
   const network = settings.networks.find((n) => n.name === q.network);
+  if (network?.kind === 'dashnet') {
+    // Console devnets: dash-network-go native upgrade (all validators) and doctor.
+    if (!['upgrade', 'doctor'].includes(q.action)) throw new Error('console devnets support upgrade and health gate');
+    if (!registry[q.network] || registry[q.network].status !== 'ready') throw new Error('devnet is not ready');
+    const components = q.components || [], images = q.images || {};
+    if (q.action === 'upgrade') {
+      const allowed = ['drive', 'dapi', 'gateway', 'helper', 'tenderdash'];
+      if (!components.length || components.some((c) => !allowed.includes(c)) || new Set(components).size !== components.length) throw new Error(`select from ${allowed.join(', ')}; Core upgrades are not supported by dash-network-go yet`);
+      for (const c of components) if (!IMAGE(c).test(images[c] || '')) throw new Error(`${c}: image must be ${COMPONENT_REPOS[c]}:<tag> or @sha256:<digest>`);
+      if (Object.keys(images).some((c) => !components.includes(c))) throw new Error('image for an unselected component');
+    } else if (components.length) throw new Error('components apply to upgrade only');
+    return { network, native: true, components, images };
+  }
   if (!network?.deployable) throw new Error('network is not deployable');
   if (!ACTIONS.has(q.action)) throw new Error('unsupported action');
   if (!Array.isArray(q.nodes) || !q.nodes.length || q.nodes.length > 200 || new Set(q.nodes).size !== q.nodes.length || !q.nodes.every((n) => /^[a-z][a-z0-9-]{0,62}$/.test(n))) throw new Error('select one or more nodes');
@@ -66,10 +100,13 @@ export function validateRequest(settings, q) {
   return { network, window, timeout, components, images };
 }
 
-export function createOps({ settings: getSettings, dirs, key, pool, binary, onChange = () => {}, log = console.log, spawnImpl = spawn }) {
+export function createOps({ settings: getSettings, dirs, key, pool, binary, onChange = () => {}, log = console.log, spawnImpl = spawn, devnetsImpl }) {
   const { requests, ops, work } = dirs;
   for (const d of [requests, ops, work]) mkdirSync(d, { recursive: true });
   const running = new Map();
+  const live = new Map(); // id -> record object owned by a running run()
+  let shuttingDown = false; // set by shutdown(): stopped operations are interrupted, not failed
+  const seen = new Map(); // op file -> { mtime, status } so tick() skips unchanged records
   const recordPath = (id) => join(ops, `${id}.json`);
   const logPath = (id) => join(ops, `${id}.log`);
   const load = (id) => readJSON(recordPath(id));
@@ -85,10 +122,18 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     }
   }
 
-  function dashnet(r, args, { timeoutMs, onLine } = {}) {
+  // Plans bind dashnet's node recipes, so every operation keeps using the exact
+  // binary it was planned with, even after the agent image is upgraded.
+  function pinBinary(dir) {
+    const pinned = join(dir, 'dashnet');
+    if (!existsSync(pinned) && existsSync(binary)) { copyFileSync(binary, pinned); chmodSync(pinned, 0o700); }
+    return existsSync(pinned) ? pinned : binary;
+  }
+
+  function dashnet(r, args, { timeoutMs, onLine, bin } = {}) {
     return new Promise((resolve) => {
       write(r.id, `$ dashnet ${args.map((a) => a.startsWith(work) ? a.slice(work.length + 1) : a).join(' ')}`);
-      const child = spawnImpl(binary, args, { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, AWS_REGION: getSettings().aws.region } });
+      const child = spawnImpl(bin || r.binary || binary, args, { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, AWS_REGION: getSettings().aws.region } });
       const slot = running.get(r.network);
       if (slot?.id === r.id) slot.child = child; else running.set(r.network, { id: r.id, child });
       let buffer = '';
@@ -118,6 +163,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
   }
 
   function step(r, name) {
+    if (r.cancelRequested) throw new Error('cancelled by operator');
     const s = { name, status: 'running', startedAt: new Date().toISOString() };
     r.steps.push(s); save(r);
     return (status, detail) => { s.status = status; s.finishedAt = new Date().toISOString(); if (detail) s.detail = detail; save(r); };
@@ -133,6 +179,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     // Each preparation gets fresh artifacts; dashnet never overwrites outputs.
     r.attempt = (r.attempt || 0) + 1;
     const dir = join(work, r.id, String(r.attempt)); mkdirSync(dir, { recursive: true, mode: 0o700 });
+    r.binary = pinBinary(dir);
     r.status = 'preparing'; save(r);
     let done = step(r, 'Build manifest from discovery');
     const state = await readState(network.name);
@@ -189,7 +236,8 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     const out = join(dir, `journal-${randomUUID()}.json`);
     const code = await new Promise((resolve) => {
       const child = spawnImpl(binary, ['managed-operation', '--manifest', join(dir, 'manifest.json'), '--timeout', '1m', '--out', out], { stdio: 'ignore' });
-      child.on('close', (c) => resolve(c ?? 1)); child.on('error', () => resolve(1));
+      const timer = setTimeout(() => child.kill('SIGKILL'), 90_000);
+      child.on('close', (c) => { clearTimeout(timer); resolve(c ?? 1); }); child.on('error', () => { clearTimeout(timer); resolve(1); });
     });
     const v = code === 0 ? readJSON(out) : null;
     rmSync(out, { force: true });
@@ -250,8 +298,18 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
   }
 
   async function run(r) {
+    live.set(r.id, r);
     try {
-      if (r.status === 'queued') {
+      if (LIFECYCLE.has(r.request.action)) {
+        const impl = { 'create-devnet': ['prepareCreate', 'executeCreate'], 'delete-devnet': ['prepareDelete', 'executeDelete'], 'devnet-services': ['prepareServices', 'executeServices'], 'platform-reset': ['prepareReset', 'executeReset'] }[r.request.action];
+        const mod = r.request.action === 'platform-reset' ? reset : devnets;
+        if (r.status === 'queued') { await mod[impl[0]](r); r.status = 'review'; }
+        else if (r.status === 'confirmed') { await mod[impl[1]](r); r.status = 'succeeded'; r.finishedAt = new Date().toISOString(); }
+      } else if (getSettings().networks.find((n) => n.name === r.network)?.kind === 'dashnet') {
+        if (r.request.action === 'doctor') { await devnets.doctor(r); r.status = r.result.healthy ? 'succeeded' : 'failed'; }
+        else if (r.status === 'queued') { await devnets.prepareUpgrade(r); r.status = 'review'; }
+        else if (r.status === 'confirmed') { await devnets.executeUpgrade(r); r.status = 'succeeded'; r.finishedAt = new Date().toISOString(); }
+      } else if (r.status === 'queued') {
         const { dir } = await prepare(r);
         if (r.request.action === 'doctor') { await doctor(r, dir); r.status = r.result.healthy ? 'succeeded' : 'failed'; }
         else if (r.request.action === 'enroll') r.status = 'succeeded';
@@ -261,14 +319,20 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
         r.status = 'succeeded'; r.finishedAt = new Date().toISOString();
       }
     } catch (e) {
-      r.status = r.cancelRequested ? 'cancelled' : 'failed';
+      r.status = r.cancelRequested ? 'cancelled' : shuttingDown ? 'interrupted' : 'failed';
       r.error = e.message.slice(0, 500);
+      for (const st of r.steps) if (st.status === 'running') { st.status = 'failed'; st.finishedAt = new Date().toISOString(); st.detail ??= r.error.slice(0, 200); }
       write(r.id, `error: ${r.error}`);
+      if (r.request.action === 'create-devnet' && r.confirmedAt && !shuttingDown) devnets.markFailed?.(r.network);
     }
     r.cancelRequested = undefined;
+    live.delete(r.id);
     save(r);
     if (['succeeded', 'failed', 'cancelled'].includes(r.status)) onChange(r, true);
   }
+
+  const reset = createReset({ ctx: { step, save, write }, dirs, pool, getSettings });
+  const devnets = devnetsImpl || createDevnets({ ctx: { dashnet, step, save, write, pinBinary }, dirs, key, pool, getSettings, region: getSettings().aws.region, log });
 
   // Poll the request directory: create, confirm, cancel, resume.
   function tick() {
@@ -280,7 +344,12 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
       try { handle(s, q); } catch (e) { log(`request ${f}: ${e.message}`); }
     }
     for (const f of readdirSync(ops).filter((f) => f.endsWith('.json'))) {
-      const r = readJSON(join(ops, f));
+      const path = join(ops, f);
+      let mtime; try { mtime = statSync(path).mtimeMs; } catch { continue; }
+      const hit = seen.get(f);
+      if (hit && hit.mtime === mtime && !['queued', 'confirmed'].includes(hit.status)) continue;
+      const r = readJSON(path);
+      seen.set(f, { mtime, status: r?.status });
       if (!r || running.has(r.network) || !['queued', 'confirmed'].includes(r.status)) continue;
       if ([...running.keys()].includes(r.network)) continue;
       running.set(r.network, { id: r.id, child: null });
@@ -290,17 +359,19 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
 
   function handle(s, q) {
     const actor = q.actor && Number.isInteger(q.actor.id) ? { id: q.actor.id, login: String(q.actor.login).slice(0, 39) } : null;
-    if (!actor || !s.operators.some((o) => o.id === actor.id && (o.networks.includes('*') || o.networks.includes(q.network)))) throw new Error('actor is not an operator for this network');
+    const lifecycle = LIFECYCLE.has(q.action) || LIFECYCLE.has(load(q.id)?.request?.action);
+    if (!actor || !(lifecycle ? adminFor(s, actor) : operatorFor(s, actor, q.network))) throw new Error(lifecycle ? 'only admins create or delete devnets' : 'actor is not an operator for this network');
     if (q.type === 'create') {
-      const request = { id: q.id, network: q.network, action: q.action, nodes: q.nodes, components: q.components || [], images: q.images || {}, options: q.options || {} };
+      const request = { id: q.id, network: q.network, action: q.action, nodes: q.nodes || [], components: q.components || [], images: q.images || {}, options: q.options || {}, ...(q.devnet ? { devnet: q.devnet } : {}), ...(q.services ? { services: q.services } : {}), ...(q.confirmName ? { confirmName: q.confirmName } : {}) };
       let r = { id: q.id, network: q.network, actor, createdAt: new Date().toISOString(), request, status: 'queued', steps: [] };
       if (existsSync(recordPath(q.id))) throw new Error('duplicate request id');
-      try { validateRequest(s, request); } catch (e) { r = { ...r, status: 'rejected', error: e.message }; }
+      try { validateRequest(s, request, devnets.registry()); } catch (e) { r = { ...r, status: 'rejected', error: e.message }; }
       save(r); write(r.id, `requested by ${actor.login}: ${request.action} ${request.nodes.join(',')} ${request.components.join(',')} ${Object.values(request.images).join(' ')}`);
       return;
     }
     const r = UUID.test(q.id || '') ? load(q.id) : null;
     if (!r || r.network !== q.network) throw new Error('unknown operation');
+    if (live.has(r.id) && q.type !== 'cancel') throw new Error('operation is running; cancel it first');
     if (q.type === 'confirm') {
       if (r.status !== 'review' || q.planId !== r.review?.planId) throw new Error('plan changed or not awaiting review');
       if (Date.now() - Date.parse(r.review.preparedAt) > 60 * 60_000) { r.status = 'failed'; r.error = 'review expired after 60 minutes; prepare again'; save(r); return; }
@@ -308,18 +379,33 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
       write(r.id, `confirmed by ${actor.login}: plan ${r.review.planId}`);
     } else if (q.type === 'cancel') {
       const active = running.get(r.network);
-      if (active?.id === r.id && active.child) { r.cancelRequested = true; save(r); write(r.id, `cancel requested by ${actor.login}`); active.child.kill('SIGTERM'); }
-      else if (['queued', 'review', 'confirmed'].includes(r.status)) { r.status = 'cancelled'; save(r); write(r.id, `cancelled by ${actor.login}`); }
+      const mine = live.get(r.id);
+      if (active?.id === r.id && mine) {
+        // The running copy owns the record: flag it there so the next save keeps it.
+        mine.cancelRequested = true; save(mine); write(r.id, `cancel requested by ${actor.login}`);
+        active.child?.kill('SIGTERM');
+      } else if (['queued', 'review', 'confirmed'].includes(r.status)) { r.status = 'cancelled'; save(r); write(r.id, `cancelled by ${actor.login}`); }
     } else if (q.type === 'resume') {
       if (!['failed', 'interrupted', 'cancelled'].includes(r.status)) throw new Error('only a stopped operation can be resumed');
       // Never confirmed: prepare a fresh plan. Confirmed: continue the exact reviewed plan.
-      if (!r.confirmedAt) { r.status = 'queued'; r.steps = []; r.review = undefined; }
+      if (!r.confirmedAt) {
+        // Nothing reviewed survives: stage results, anchors and targets are retaken.
+        Object.assign(r, { status: 'queued', steps: [], review: undefined, stages: undefined, anchor: undefined, targets: undefined, execId: `${r.id}.${Date.now()}` });
+      }
       else r.status = 'confirmed';
       r.error = undefined; save(r); write(r.id, `resume requested by ${actor.login}`);
     }
   }
 
-  return { tick, running, isTerminal: (s) => TERMINAL.has(s), manifestFor };
+  // SIGTERM each running dashnet and wait, so it journals its state and
+  // releases its claim instead of being killed mid-step.
+  async function shutdown(ms = 25_000) {
+    shuttingDown = true;
+    const children = [...running.values()].map((x) => x.child).filter(Boolean);
+    for (const c of children) c.kill('SIGTERM');
+    await Promise.race([Promise.all(children.map((c) => new Promise((res) => (c.exitCode !== null ? res() : c.once('close', res))))), new Promise((res) => setTimeout(res, ms))]);
+  }
+  return { tick, running, isTerminal: (s) => TERMINAL.has(s), manifestFor, devnets, shutdown };
 }
 
 export function toMs(d) {

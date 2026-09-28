@@ -15,7 +15,7 @@ const ROLE_COMPONENTS = { validator: COMPONENTS, masternode: ['core'], seed: ['c
 
 export default function Deploy({ name }) {
   const session = useSession();
-  const { data: n, error } = useResource(`/api/networks/${name}`, (t, d) => t === 'network' && d.name === name);
+  const { data: n, error } = useResource(`/api/networks/${name}`, (t, d) => t === 'network' && (d.name === name || d.name === '*'));
   const params = new URLSearchParams(location.search);
   const [action, setAction] = useState(params.get('action') || 'upgrade');
   const [selected, setSelected] = useState(new Set((params.get('nodes') || '').split(',').filter(Boolean)));
@@ -27,9 +27,11 @@ export default function Deploy({ name }) {
   const [submitError, setSubmitError] = useState(null);
   const [roleFilter, setRoleFilter] = useState('all');
 
+  const native = n?.kind === 'dashnet';
   const hosts = useMemo(() => (n?.hosts || []).filter((h) => OPERABLE.includes(h.role) && !h.duplicate), [n]);
-  const chosen = hosts.filter((h) => selected.has(h.name));
-  const available = new Set(chosen.flatMap((h) => ROLE_COMPONENTS[h.role].filter((c) => h.containers.some((k) => k.component === c))));
+  // dash-network-go upgrades every validator, one at a time; there is no node selection.
+  const chosen = native ? hosts.filter((h) => h.role === 'validator') : hosts.filter((h) => selected.has(h.name));
+  const available = new Set(chosen.flatMap((h) => ROLE_COMPONENTS[h.role].filter((c) => (!native || c !== 'core') && h.containers.some((k) => k.component === c))));
   const archs = [...new Set(chosen.map((h) => h.arch))];
   const needsComponents = action === 'upgrade' || action === 'deploy';
   const activeComponents = [...components].filter((c) => available.has(c));
@@ -55,7 +57,7 @@ export default function Deploy({ name }) {
   async function submit() {
     setBusy(true); setSubmitError(null);
     try {
-      const body = { action, nodes: chosen.map((h) => h.name), components: needsComponents ? activeComponents : [], images: action === 'upgrade' ? Object.fromEntries(activeComponents.map((c) => [c, images[c]])) : {}, options: { ...(window ? { observationWindow: window } : {}), ...(timeout ? { timeout } : {}) } };
+      const body = { action, nodes: native ? [] : chosen.map((h) => h.name), components: needsComponents ? activeComponents : [], images: action === 'upgrade' ? Object.fromEntries(activeComponents.map((c) => [c, images[c]])) : {}, options: { ...(window ? { observationWindow: window } : {}), ...(timeout ? { timeout } : {}) } };
       const r = await api(`/api/networks/${name}/ops`, { method: 'POST', body });
       navigate(`/n/${name}/ops/${r.id}`);
     } catch (e) { setSubmitError(e); setBusy(false); }
@@ -66,12 +68,12 @@ export default function Deploy({ name }) {
       <div className="mt-4 flex items-center gap-3">
         <Link to={`/n/${name}`} className="text-dim hover:text-fg">← {n.displayName}</Link>
         <h1 className="text-[18px] font-semibold">Deploy</h1>
-        <span className="text-dim text-[12px]">executed by the status agent with dashnet {action === 'upgrade' ? 'managed-plan → managed-upgrade' : action === 'deploy' ? 'managed-plan → managed-deploy' : `managed-${action}`}</span>
+        <span className="text-dim text-[12px]">executed by the status agent with dashnet {native ? (action === 'upgrade' ? 'resolve → upgrade-plan → upgrade' : 'doctor') : action === 'upgrade' ? 'managed-plan → managed-upgrade' : action === 'deploy' ? 'managed-plan → managed-deploy' : `managed-${action}`}</span>
       </div>
 
       <Section title="1 · Action">
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-          {ACTIONS.map((a) => (
+          {ACTIONS.filter((a) => !native || ['upgrade', 'doctor'].includes(a.id)).map((a) => (
             <button key={a.id} onClick={() => setAction(a.id)} className={`panel text-left px-3 py-2.5 ${action === a.id ? '!border-accent bg-[#0f1a28]' : 'hover:border-line-2'}`}>
               <div className="font-medium">{a.title}</div>
               <div className="text-dim text-[11.5px] mt-0.5">{a.text}</div>
@@ -80,6 +82,11 @@ export default function Deploy({ name }) {
         </div>
       </Section>
 
+      {native ? (
+        <Section title={`2 · Nodes · all ${chosen.length} validators`}>
+          <div className="panel p-3 text-[12px] text-dim">dash-network-go withdraws one validator at a time and requires the whole fleet (advancing consensus, common block hashes, DAPI, membership) to be healthy before the next. Core is never restarted by an upgrade.</div>
+        </Section>
+      ) : (
       <Section title={`2 · Nodes · ${chosen.length} selected`} right={
         <div className="flex gap-1.5 flex-wrap">
           {['all', ...OPERABLE].map((r) => <span key={r} className={`chip ${roleFilter === r ? 'on' : ''}`} onClick={() => setRoleFilter(r)}>{r === 'all' ? 'all' : ROLE_LABEL[r].toLowerCase()} <span className="mono">{r === 'all' ? hosts.length : hosts.filter((h) => h.role === r).length}</span></span>)}
@@ -105,6 +112,7 @@ export default function Deploy({ name }) {
           </table>
         </div>
       </Section>
+      )}
 
       {needsComponents && (
         <Section title="3 · Components">
