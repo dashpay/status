@@ -283,7 +283,7 @@ function HostDetail({ h, now, member, operator, network }) {
         {h.dapi && <><div className="label mt-3 mb-1">DAPI (local getStatus)</div><KV rows={[
           ['result', h.dapi.ok ? `ok · ${h.dapi.latencyMs} ms · height ${num(h.dapi.height)}` : `failed${h.dapi.error ? `: ${h.dapi.error}` : ''}`],
           ['versions', h.dapi.ok ? `dapi ${h.dapi.dapiVersion} · drive ${h.dapi.driveVersion}` : null],
-          h.dapi.tls && ['certificate', `${h.dapi.tls.trusted ? 'publicly trusted' : 'not publicly trusted'} · ${h.dapi.tls.issuer || 'unknown issuer'}${h.dapi.tls.expiresAt ? ` · expires in ${duration(Math.max(0, (Date.parse(h.dapi.tls.expiresAt) - Date.now()) / 1000))}` : ''}`],
+          h.dapi.tls && ['certificate', `${h.dapi.tls.trusted ? 'publicly trusted' : 'not publicly trusted'} · ${h.dapi.tls.issuer || 'unknown issuer'}${h.dapi.tls.expiresAt ? ` · expires in ${duration(Math.max(0, (Date.parse(h.dapi.tls.expiresAt) - now) / 1000))}` : ''}`],
           h.dapiPublic && ['from status host', h.dapiPublic.ok ? `reachable ${h.dapiPublic.ms} ms` : 'not reachable'],
         ]} /></>}
         <div className="label mt-3 mb-1">Containers</div>
