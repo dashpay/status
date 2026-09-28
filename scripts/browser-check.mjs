@@ -33,11 +33,12 @@ mkdirSync(join(dataDir, 'state'), { recursive: true });
 writeFileSync(join(dataDir, 'state', 'testnet.json'), JSON.stringify(state('testnet', 'test', 'dash-testnet-51')));
 writeFileSync(join(dataDir, 'state', 'devnet-moutai.json'), JSON.stringify(state('devnet-moutai', 'devnet-moutai', 'dash-devnet-moutai')));
 const settings = structuredClone(DEFAULT_SETTINGS);
-settings.operators.push({ id: 42, login: 'fixture-operator', networks: ['*'] });
+settings.operators.push({ id: 42, login: 'fixture-operator', role: 'admin', networks: ['*'] });
 writeFileSync(join(dataDir, 'settings.json'), JSON.stringify(settings));
 
 const fetcher = async (url) => {
   if (url.includes('access_token')) return Response.json({ access_token: 'fixture-token' });
+  if (url.includes('api.github.com/users/octocat')) return Response.json({ id: 583231, login: 'octocat', name: 'The Octocat', type: 'User', avatar_url: 'data:,' });
   if (url.includes('hub.docker.com')) return Response.json({ results: [{ name: '4.2.0-beta.5', last_updated: at, images: [{ architecture: 'amd64' }, { architecture: 'arm64' }] }] });
   return Response.json({ id: 42, login: 'fixture-operator' });
 };
@@ -81,9 +82,18 @@ try {
   const q = JSON.parse(readFileSync(join(dataDir, 'requests', file), 'utf8'));
   assert.deepEqual([q.action, q.nodes, q.components, q.images], ['upgrade', ['hp-masternode-1'], ['helper'], { helper: 'dashpay/dashmate-helper:4.2.0-beta.5' }]);
   await page.goto(origin + '/settings');
-  await page.getByText('Operators (GitHub accounts)').waitFor();
+  await page.getByPlaceholder('GitHub login, e.g. octocat').fill('octocat');
+  await page.getByRole('button', { name: 'Look up' }).click();
+  await page.getByText('The Octocat').waitFor();
+  await page.locator('form select').selectOption('viewer');
+  await page.locator('form .chip', { hasText: 'devnet-moutai' }).click();
+  await page.getByRole('button', { name: 'Add @octocat' }).click();
+  await page.getByRole('button', { name: 'Save settings' }).click();
+  await page.getByText('saved').waitFor();
+  const saved = JSON.parse(readFileSync(join(dataDir, 'settings.json'), 'utf8'));
+  assert.deepEqual(saved.operators.find((o) => o.login === 'octocat'), { id: 583231, login: 'octocat', role: 'viewer', networks: ['devnet-moutai'] });
   await page.screenshot({ path: 'artifacts/settings.png', fullPage: true });
-  console.log(JSON.stringify({ public: 'passed', deployRequest: q.id, settings: 'rendered' }));
+  console.log(JSON.stringify({ public: 'passed', deployRequest: q.id, settings: 'user added' }));
 } finally {
   await browser.close();
   app.close(); server.close();

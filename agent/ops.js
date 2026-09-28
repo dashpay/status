@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { COMPONENTS, COMPONENT_REPOS, readJSON, writeAtomic } from '../shared/settings.js';
+import { COMPONENTS, COMPONENT_REPOS, operatorFor, readJSON, writeAtomic } from '../shared/settings.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ACTIONS = new Set(['upgrade', 'deploy', 'enroll', 'doctor']);
@@ -290,7 +290,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
 
   function handle(s, q) {
     const actor = q.actor && Number.isInteger(q.actor.id) ? { id: q.actor.id, login: String(q.actor.login).slice(0, 39) } : null;
-    if (!actor || !s.operators.some((o) => o.id === actor.id && (o.networks.includes('*') || o.networks.includes(q.network)))) throw new Error('actor is not an operator for this network');
+    if (!actor || !operatorFor(s, actor, q.network)) throw new Error('actor is not an operator for this network');
     if (q.type === 'create') {
       const request = { id: q.id, network: q.network, action: q.action, nodes: q.nodes, components: q.components || [], images: q.images || {}, options: q.options || {} };
       let r = { id: q.id, network: q.network, actor, createdAt: new Date().toISOString(), request, status: 'queued', steps: [] };

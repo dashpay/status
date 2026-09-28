@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch, open
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createAuth } from './auth.js';
-import { COMPONENTS, COMPONENT_REPOS, loadSettings, operatorFor, readJSON, saveSettings, validateSettings, writeAtomic } from '../shared/settings.js';
+import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, loadSettings, memberOf, operatorFor, readJSON, saveSettings, validateSettings, writeAtomic } from '../shared/settings.js';
 import { evaluateNetwork, projectNetwork } from '../shared/evaluate.js';
 import { validateRequest } from '../agent/ops.js';
 
@@ -34,8 +34,9 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
 
   const user = (req) => auth.session(req)?.user || null;
   const isOperator = (req, network) => operatorFor(settings, user(req), network);
-  const isAdmin = (req) => { const u = user(req); return !!u && settings.operators.some((o) => o.id === u.id && o.networks.includes('*')); };
-  const visible = (req) => settings.networks.filter((n) => n.public || isOperator(req, n.name));
+  const isMember = (req, network) => memberOf(settings, user(req), network);
+  const isAdmin = (req) => adminFor(settings, user(req));
+  const visible = (req) => settings.networks.filter((n) => n.public || isMember(req, n.name));
   const stateOf = (name) => readJSON(join(dirs.state, `${name}.json`));
 
   function view(network, operator) {
@@ -52,16 +53,17 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   app.get('/api/health', (req, res) => res.json({ service: 'dash-status', status: 'ok' }));
   app.get('/api/me', (req, res) => {
     const u = user(req);
-    res.json({ user: u, operatorOf: u ? settings.networks.filter((n) => isOperator(req, n.name)).map((n) => n.name) : [], admin: isAdmin(req) });
+    res.json({ user: u, role: accessFor(settings, u)?.role || null, operatorOf: u ? settings.networks.filter((n) => isOperator(req, n.name)).map((n) => n.name) : [],
+      memberOf: u ? settings.networks.filter((n) => isMember(req, n.name)).map((n) => n.name) : [], admin: isAdmin(req) });
   });
   app.get('/api/overview', (req, res) => {
     reloadSettings();
-    res.json({ networks: visible(req).map((n) => brief(view(n, isOperator(req, n.name)))), at: new Date(clock()).toISOString() });
+    res.json({ networks: visible(req).map((n) => brief(view(n, isMember(req, n.name)))), at: new Date(clock()).toISOString() });
   });
   app.get('/api/networks/:name', (req, res) => {
     const n = visible(req).find((x) => x.name === req.params.name);
     if (!n) return res.status(404).json({ error: 'Network not found' });
-    res.json(view(n, isOperator(req, n.name)));
+    res.json(view(n, isMember(req, n.name)));
   });
 
   // Live updates: agent state rewrites and operation changes are pushed.
@@ -86,7 +88,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
       reloadSettings();
       const n = settings.networks.find((x) => x.name === name);
       if (!n) return;
-      push('network', { name, at: new Date(clock()).toISOString() }, (c) => n.public || operatorFor(settings, c.user, name));
+      push('network', { name, at: new Date(clock()).toISOString() }, (c) => n.public || memberOf(settings, c.user, name));
     }, 300));
   }
   function onOpFile(file) {
@@ -95,7 +97,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     clearTimeout(debounce.get(id));
     debounce.set(id, setTimeout(() => {
       const r = readJSON(join(dirs.ops, `${id}.json`));
-      if (r) push('op', { id, network: r.network, status: r.status, updatedAt: r.updatedAt }, (c) => operatorFor(settings, c.user, r.network));
+      if (r) push('op', { id, network: r.network, status: r.status, updatedAt: r.updatedAt }, (c) => memberOf(settings, c.user, r.network));
     }, 250));
   }
   const watchers = [];
@@ -104,21 +106,23 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   }
 
   // Operator API.
-  const requireOperator = (req, res, next) => {
+  const requireAccess = (check, message) => (req, res, next) => {
     const s = auth.session(req);
     if (!s) return res.status(401).json({ error: 'Sign in required' });
     req.session = s;
     const network = req.params.name || readJSON(join(dirs.ops, `${req.params.id}.json`))?.network;
-    if (!network || !operatorFor(settings, s.user, network)) return res.status(403).json({ error: 'Operator access required' });
+    if (!network || !check(settings, s.user, network)) return res.status(403).json({ error: message });
     req.network = network;
     next();
   };
+  const requireMember = requireAccess(memberOf, 'Access to this network required');
+  const requireOperator = requireAccess(operatorFor, 'Operator access required');
   const listOps = (network) => (existsSync(dirs.ops) ? readdirSync(dirs.ops) : []).filter((f) => f.endsWith('.json'))
     .map((f) => readJSON(join(dirs.ops, f))).filter((r) => r && (!network || r.network === network))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const request = (payload) => writeAtomic(join(dirs.requests, `${payload.id}${payload.type === 'create' ? '' : '.' + payload.type + '-' + randomUUID().slice(0, 8)}.json`), JSON.stringify(payload));
 
-  app.get('/api/networks/:name/ops', requireOperator, (req, res) => res.json({ ops: listOps(req.params.name).slice(0, 100) }));
+  app.get('/api/networks/:name/ops', requireMember, (req, res) => res.json({ ops: listOps(req.params.name).slice(0, 100) }));
   app.post('/api/networks/:name/ops', requireOperator, auth.csrf, (req, res) => {
     const n = settings.networks.find((x) => x.name === req.params.name);
     const body = req.body || {};
@@ -129,12 +133,12 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     request({ type: 'create', ...q, actor: req.session.user });
     res.status(202).json({ id: q.id });
   });
-  app.get('/api/ops/:id', requireOperator, (req, res) => {
+  app.get('/api/ops/:id', requireMember, (req, res) => {
     const r = readJSON(join(dirs.ops, `${req.params.id}.json`));
     if (!r) return res.status(404).json({ error: 'Operation not found' });
     res.json({ ...r, log: tail(join(dirs.ops, `${req.params.id}.log`), 256 * 1024) });
   });
-  app.get('/api/ops/:id/log', requireOperator, (req, res) => {
+  app.get('/api/ops/:id/log', requireMember, (req, res) => {
     const path = join(dirs.ops, `${req.params.id}.log`);
     let offset = Number(req.query.offset) || 0;
     res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
@@ -164,18 +168,32 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
 
   // Settings (admins edit everything; any operator may read).
   app.get('/api/settings', (req, res) => {
-    if (!operatorFor(settings, user(req))) return res.status(403).json({ error: 'Operator access required' });
+    if (!memberOf(settings, user(req))) return res.status(403).json({ error: 'Sign in with an account that has access' });
     res.json({ settings: reloadSettings(), admin: isAdmin(req) });
   });
   app.put('/api/settings', (req, res, next) => { const s = auth.session(req); if (!s) return res.status(401).json({ error: 'Sign in required' }); req.session = s; next(); }, auth.csrf, (req, res) => {
-    if (!isAdmin(req)) return res.status(403).json({ error: 'Only operators with access to all networks can change settings' });
+    if (!isAdmin(req)) return res.status(403).json({ error: 'Only admins can change settings' });
     try {
       const next = validateSettings(req.body?.settings);
-      if (!next.operators.some((o) => o.id === req.session.user.id && o.networks.includes('*'))) throw new Error('You cannot remove your own full access');
+      if (!next.operators.some((o) => o.id === req.session.user.id && o.role === 'admin')) throw new Error('You cannot remove your own admin access');
       settings = saveSettings(settingsPath, next);
       push('settings', { at: new Date(clock()).toISOString() });
       res.json({ settings });
     } catch (e) { res.status(400).json({ error: e.message }); }
+  });
+
+  // GitHub account lookup so admins can grant access by login.
+  app.get('/api/github/users/:login', async (req, res) => {
+    if (!isAdmin(req)) return res.status(403).json({ error: 'Only admins can add users' });
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/.test(req.params.login)) return res.status(400).json({ error: 'Not a valid GitHub login' });
+    try {
+      const r = await fetcher(`https://api.github.com/users/${req.params.login}`, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'dash-status' }, signal: AbortSignal.timeout(10_000) });
+      if (r.status === 404) return res.status(404).json({ error: `GitHub user ${req.params.login} not found` });
+      if (!r.ok) throw new Error(`GitHub ${r.status}`);
+      const u = await r.json();
+      if (!Number.isSafeInteger(u.id) || typeof u.login !== 'string') throw new Error('Unexpected GitHub response');
+      res.json({ id: u.id, login: u.login, name: u.name || null, type: u.type, avatar: u.avatar_url });
+    } catch (e) { res.status(502).json({ error: e.message }); }
   });
 
   // Image tags from Docker Hub for the upgrade form.

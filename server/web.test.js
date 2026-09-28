@@ -4,16 +4,20 @@ import { mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createWeb } from './web.js';
+import { DEFAULT_SETTINGS } from '../shared/settings.js';
 
-async function start(userId = 9920871) {
+async function start(userId = 9920871, extraUsers = []) {
   const dataDir = mkdtempSync(join(tmpdir(), 'web-'));
   mkdirSync(join(dataDir, 'state'), { recursive: true });
   writeFileSync(join(dataDir, 'state', 'testnet.json'), JSON.stringify({ generatedAt: new Date().toISOString(), hosts: [
     { name: 'seed-2', role: 'seed', state: 'running', publicIp: '192.0.2.2', instanceId: 'i-0eb19958115adb5d0', probe: { ok: true, at: new Date().toISOString(), data: { core: { chain: 'test', blocks: 10 }, containers: [] } } },
   ] }));
-  const github = async (url) => url.includes('access_token') ? Response.json({ access_token: 't' }) : Response.json({ id: userId, login: 'someone' });
+  if (extraUsers.length) writeFileSync(join(dataDir, 'settings.json'), JSON.stringify({ ...structuredClone(DEFAULT_SETTINGS), operators: [...DEFAULT_SETTINGS.operators, ...extraUsers] }));
+  const github = async (url) => url.includes('access_token') ? Response.json({ access_token: 't' })
+    : url.includes('/users/octocat') ? Response.json({ id: 583231, login: 'octocat', name: 'The Octocat', type: 'User', avatar_url: 'https://avatars.githubusercontent.com/u/583231' })
+      : url.includes('/users/') ? new Response('{}', { status: 404 }) : Response.json({ id: userId, login: 'someone' });
   const origin = 'http://127.0.0.1';
-  const app = createWeb({ dataDir, origin, auth: { clientId: 'c', clientSecret: 's', fetcher: github } });
+  const app = createWeb({ dataDir, origin, auth: { clientId: 'c', clientSecret: 's', fetcher: github }, fetcher: github });
   const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   const base = `http://127.0.0.1:${server.address().port}`;
   let cookie = '';
@@ -79,4 +83,28 @@ test('signed-in non-operators get the public view only', async () => {
     assert.equal((await w.req('/api/networks/testnet/ops')).status, 403);
     assert.equal((await w.req('/api/settings')).status, 403);
   } finally { w.close(); }
+});
+
+test('viewers read granted networks and operations but cannot deploy; admins look up GitHub users', async () => {
+  const w = await start(77, [{ id: 77, login: 'viewer', role: 'viewer', networks: ['testnet'] }]);
+  try {
+    const csrf = await w.login();
+    assert.equal((await w.req('/api/networks/testnet/ops')).status, 200);
+    const n = await (await w.req('/api/networks/testnet')).json();
+    assert.equal(n.hosts[0].instanceId, 'i-0eb19958115adb5d0');
+    const post = await w.req('/api/networks/testnet/ops', { method: 'POST', body: JSON.stringify({ action: 'doctor', nodes: ['seed-2'] }), headers: { 'content-type': 'application/json', 'x-csrf-token': csrf } });
+    assert.equal(post.status, 403);
+    assert.equal((await w.req('/api/github/users/octocat')).status, 403);
+    const me = await (await w.req('/api/me')).json();
+    assert.equal(me.role, 'viewer');
+    assert.deepEqual(me.operatorOf, []);
+  } finally { w.close(); }
+  const a = await start();
+  try {
+    await a.login();
+    const u = await (await a.req('/api/github/users/octocat')).json();
+    assert.deepEqual([u.id, u.login], [583231, 'octocat']);
+    assert.equal((await a.req('/api/github/users/nobody-here')).status, 404);
+    assert.equal((await a.req('/api/github/users/bad..name')).status, 400);
+  } finally { a.close(); }
 });

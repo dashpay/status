@@ -9,6 +9,7 @@ export default function Network({ name, tab }) {
   const now = useNow(1000);
   const session = useSession();
   const { data: n, error } = useResource(`/api/networks/${name}`, (t, d) => (t === 'network' && d.name === name) || t === 'settings');
+  const member = session.memberOf?.includes(name);
   const operator = session.operatorOf?.includes(name);
   if (error) return <div className="mt-6"><Err error={error} /></div>;
   if (!n) return <div className="mt-6 text-dim">Loading…</div>;
@@ -21,17 +22,17 @@ export default function Network({ name, tab }) {
         <h1 className="text-[18px] font-semibold flex items-center gap-2"><Dot level={n.level} />{n.displayName}</h1>
         <span className="text-dim mono text-[12px]">{n.name} · {n.chainType} · core chain {s.core?.chain || n.coreNetwork}{s.platform?.chainId ? ` · ${s.platform.chainId}` : ''}</span>
         <span className="text-dim mono text-[12px]" title={n.generatedAt}>state {ago(n.generatedAt, now)} old · every {n.pollSeconds || '—'}s · discovery {ago(n.discovery?.at, now)} ago{n.discovery?.error ? ` (${n.discovery.error})` : ''}</span>
-        {operator && (
+        {member && (
           <div className="ml-auto flex gap-1">
             <Link to={`/n/${name}`} className={`btn ${tab === 'hosts' ? '!border-accent' : ''}`}>Hosts</Link>
             <Link to={`/n/${name}/ops`} className={`btn ${tab === 'ops' ? '!border-accent' : ''}`}>Operations</Link>
-            {n.deployable && <Link to={`/n/${name}/deploy`} className="btn btn-primary">Deploy…</Link>}
+            {operator && n.deployable && <Link to={`/n/${name}/deploy`} className="btn btn-primary">Deploy…</Link>}
           </div>
         )}
       </div>
       {n.description && <p className="text-dim mt-1 text-[12px]">{n.description}</p>}
 
-      {tab === 'ops' && operator ? <Operations network={n} /> : (
+      {tab === 'ops' && member ? <Operations network={n} operator={operator} /> : (
         <>
           <div className="mt-3 grid gap-2 grid-cols-2 sm:grid-cols-4 lg:grid-cols-8">
             <Stat label="Core height" value={num(s.core?.height)} sub={coreAge != null ? `last block ${ago(s.core.blockTime, now)}` : '—'} level={coreAge > 1800 ? 'warn' : undefined} />
@@ -67,8 +68,8 @@ export default function Network({ name, tab }) {
               </div>
             </div>
           )}
-          {operator && n.journal && <Journal j={n.journal} now={now} />}
-          <Hosts n={n} now={now} operator={operator} />
+          {member && n.journal && <Journal j={n.journal} now={now} />}
+          <Hosts n={n} now={now} member={member} operator={operator} />
         </>
       )}
     </div>
@@ -93,7 +94,7 @@ function Journal({ j, now }) {
   );
 }
 
-function Hosts({ n, now, operator }) {
+function Hosts({ n, now, member, operator }) {
   const [q, setQ] = useState('');
   const [levels, setLevels] = useState(new Set());
   const [open, setOpen] = useState(null);
@@ -121,7 +122,7 @@ function Hosts({ n, now, operator }) {
       {groups.map(([role, hosts]) => (
         <Section key={role} title={`${ROLE_LABEL[role] || role} · ${hosts.length}`}>
           <div className="panel scroll-x">
-            <RoleTable role={role} hosts={hosts} tips={tips} now={now} open={open} setOpen={setOpen} operator={operator} network={n} />
+            <RoleTable role={role} hosts={hosts} tips={tips} now={now} open={open} setOpen={setOpen} member={member} operator={operator} network={n} />
           </div>
         </Section>
       ))}
@@ -200,7 +201,7 @@ function MnState({ h }) {
   return <span className={m.state === 'READY' ? '' : 'lv-down'}>{m.state}</span>;
 }
 
-function RoleTable({ role, hosts, tips, now, open, setOpen, operator, network }) {
+function RoleTable({ role, hosts, tips, now, open, setOpen, member, operator, network }) {
   const cols = columns(role, tips, now);
   return (
     <table className="grid">
@@ -211,7 +212,7 @@ function RoleTable({ role, hosts, tips, now, open, setOpen, operator, network })
             <tr className={`${open === h.name ? 'open' : ''} ${h.duplicate ? 'opacity-50' : ''}`} onClick={() => setOpen(open === h.name ? null : h.name)}>
               {cols.map((c, i) => <td key={i} className={c.n ? 'num' : ''}>{c.c(h)}</td>)}
             </tr>
-            {open === h.name && <tr className="detail"><td colSpan={cols.length}><HostDetail h={h} now={now} operator={operator} network={network} /></td></tr>}
+            {open === h.name && <tr className="detail"><td colSpan={cols.length}><HostDetail h={h} now={now} member={member} operator={operator} network={network} /></td></tr>}
           </Fragment>
         ))}
       </tbody>
@@ -227,7 +228,7 @@ function KV({ rows }) {
   );
 }
 
-function HostDetail({ h, now, operator, network }) {
+function HostDetail({ h, now, member, operator, network }) {
   return (
     <div className="py-2 grid gap-4 xl:grid-cols-3 lg:grid-cols-2">
       <div>
@@ -235,17 +236,17 @@ function HostDetail({ h, now, operator, network }) {
         {h.reasons.length ? h.reasons.map((r, i) => <div key={i} className="flex gap-2 text-[12px]"><Level level={r.level} /><span className="mono break-all">{r.text}</span></div>) : <div className="lv-ok text-[12px]">all checks passed</div>}
         <div className="label mt-3 mb-1">Host</div>
         <KV rows={[
-          ['instance', operator ? `${h.instanceId} · ${h.instanceType} · ${h.arch} · ${h.az}` : `${h.instanceType} · ${h.arch} · ${h.az}`],
-          ['addresses', operator ? `${h.publicIp || '—'} / ${h.privateIp || '—'}` : h.publicIp],
-          operator && ['EC2 Name', h.nameTag],
-          operator && ['launched', clock(h.launchTime)],
+          ['instance', member ? `${h.instanceId} · ${h.instanceType} · ${h.arch} · ${h.az}` : `${h.instanceType} · ${h.arch} · ${h.az}`],
+          ['addresses', member ? `${h.publicIp || '—'} / ${h.privateIp || '—'}` : h.publicIp],
+          member && ['EC2 Name', h.nameTag],
+          member && ['launched', clock(h.launchTime)],
           ['os', h.system ? `${h.system.os} · ${h.system.kernel}` : null],
           ['memory', h.system ? `${h.system.memPercent}% of ${bytes(h.system.memTotal)}${h.system.swapPercent != null ? ` · swap ${h.system.swapPercent}%` : ''}` : null],
           ['disks', h.system?.disks?.map((d) => `${d.mount} ${d.percent}% of ${bytes(d.size)} (${bytes(d.avail)} free)`).join(' · ')],
           ['probe', h.probedAt ? `${clock(h.probedAt)} · ${h.probeMs} ms` : null],
-          operator && h.probeError && ['probe error', h.probeError],
-          operator && h.probeErrors?.length > 0 && ['source errors', h.probeErrors.join(' | ')],
-          operator && h.lastGood && ['last good probe', `${ago(h.lastGood.at, now)} ago`],
+          member && h.probeError && ['probe error', h.probeError],
+          member && h.probeErrors?.length > 0 && ['source errors', h.probeErrors.join(' | ')],
+          member && h.lastGood && ['last good probe', `${ago(h.lastGood.at, now)} ago`],
         ]} />
       </div>
       <div>

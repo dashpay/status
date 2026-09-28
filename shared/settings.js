@@ -4,6 +4,9 @@ import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
+// admin: every network, settings and user management; operator: deploy on the
+// granted networks; viewer: see granted (including private) networks read-only.
+export const ROLES = ['admin', 'operator', 'viewer'];
 export const COMPONENTS = ['core', 'drive', 'tenderdash', 'dapi', 'gateway', 'helper'];
 export const COMPONENT_REPOS = {
   core: 'dashpay/dashd', drive: 'dashpay/drive', tenderdash: 'dashpay/tenderdash',
@@ -19,7 +22,7 @@ export const DEFAULT_SETTINGS = {
   pollSeconds: 30,
   discoverySeconds: 300,
   aws: { accountId: '854439639386', region: 'us-west-2', tagKey: 'DashNetwork', stateTable: 'dashnet-managed-state' },
-  operators: [{ id: 9920871, login: 'ktechmidas', networks: ['*'] }],
+  operators: [{ id: 9920871, login: 'ktechmidas', role: 'admin', networks: ['*'] }],
   thresholds: { coreLagBlocks: 3, platformLagBlocks: 10, diskWarnPercent: 85, memWarnPercent: 92, balanceWarn: 100 },
   networks: [
     {
@@ -68,12 +71,20 @@ export function validateSettings(input) {
   int(s.pollSeconds, 10, 3600, 'pollSeconds');
   int(s.discoverySeconds, 60, 86400, 'discoverySeconds');
   if (!s.aws || !/^\d{12}$/.test(s.aws.accountId) || !/^[a-z]{2}(-[a-z]+)+-\d$/.test(s.aws.region) || !s.aws.tagKey || !s.aws.stateTable) throw new Error('aws account/region/tagKey/stateTable required');
-  if (!Array.isArray(s.operators) || !s.operators.length) throw new Error('At least one operator is required');
+  if (!Array.isArray(s.operators) || !s.operators.length) throw new Error('At least one user is required');
+  const ids = new Set();
   for (const o of s.operators) {
-    int(o.id, 1, 2 ** 40, 'operator id');
-    if (typeof o.login !== 'string' || !/^[A-Za-z0-9-]{1,39}$/.test(o.login)) throw new Error('operator login invalid');
-    if (!Array.isArray(o.networks) || !o.networks.every((n) => n === '*' || slug.test(n))) throw new Error('operator networks invalid');
+    int(o.id, 1, 2 ** 40, 'GitHub user id');
+    if (ids.has(o.id)) throw new Error(`${o.login}: listed twice`);
+    ids.add(o.id);
+    if (typeof o.login !== 'string' || !/^[A-Za-z0-9-]{1,39}$/.test(o.login)) throw new Error('GitHub login invalid');
+    if (!Array.isArray(o.networks) || !o.networks.every((n) => n === '*' || slug.test(n))) throw new Error(`${o.login}: networks invalid`);
+    o.role ??= o.networks.includes('*') ? 'admin' : 'operator';
+    if (!ROLES.includes(o.role)) throw new Error(`${o.login}: role must be ${ROLES.join(', ')}`);
+    if (o.role === 'admin') o.networks = ['*'];
+    if (!o.networks.length) throw new Error(`${o.login}: grant at least one network`);
   }
+  if (!s.operators.some((o) => o.role === 'admin')) throw new Error('At least one admin is required');
   const t = s.thresholds || {};
   int(t.coreLagBlocks, 0, 1000, 'coreLagBlocks'); int(t.platformLagBlocks, 0, 10000, 'platformLagBlocks');
   int(t.diskWarnPercent, 1, 100, 'diskWarnPercent'); int(t.memWarnPercent, 1, 100, 'memWarnPercent');
@@ -128,8 +139,20 @@ export function readJSON(path, fallback = null) {
   try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return fallback; }
 }
 
+export function accessFor(settings, user) {
+  const o = user ? settings.operators.find((x) => x.id === user.id) : null;
+  return o ? { ...o, role: o.role || (o.networks.includes('*') ? 'admin' : 'operator') } : null;
+}
+const covers = (a, network) => network === undefined || a.networks.includes('*') || a.networks.includes(network);
+// Members (any role) see granted networks in full detail, including private ones.
+export function memberOf(settings, user, network) {
+  const a = accessFor(settings, user);
+  return !!a && covers(a, network);
+}
 export function operatorFor(settings, user, network) {
-  if (!user) return false;
-  const o = settings.operators.find((x) => x.id === user.id);
-  return !!o && (network === undefined || o.networks.includes('*') || o.networks.includes(network));
+  const a = accessFor(settings, user);
+  return !!a && a.role !== 'viewer' && covers(a, network);
+}
+export function adminFor(settings, user) {
+  return accessFor(settings, user)?.role === 'admin';
 }

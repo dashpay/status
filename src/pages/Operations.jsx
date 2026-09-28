@@ -1,13 +1,13 @@
 import { ago, navigate, useNow, useResource } from '../lib.js';
 import { Empty, Err, Link, OpBadge, Section } from '../ui.jsx';
 
-export default function Operations({ network }) {
+export default function Operations({ network, operator }) {
   const now = useNow(1000);
   const { data, error } = useResource(`/api/networks/${network.name}/ops`, (t, d) => t === 'op' && d.network === network.name);
   if (error) return <div className="mt-4"><Err error={error} /></div>;
   if (!data) return <div className="mt-4 text-dim">Loading…</div>;
   return (
-    <Section title={`Operations · ${data.ops.length}`} right={network.deployable && <Link className="btn btn-primary" to={`/n/${network.name}/deploy`}>New deployment…</Link>}>
+    <Section title={`Operations · ${data.ops.length}`} right={operator && network.deployable && <Link className="btn btn-primary" to={`/n/${network.name}/deploy`}>New deployment…</Link>}>
       {!data.ops.length ? <Empty>No operations yet.</Empty> : (
         <div className="panel scroll-x">
           <table className="grid">

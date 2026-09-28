@@ -51,3 +51,20 @@ test('evaluation gives a level with concrete reasons, and orphan containers are 
   assert.equal(op.hosts[0].instanceId, 'i-1');
   assert.match(op.hosts[3].reasons[0].text, /ETIMEDOUT/);
 });
+
+test('roles: admins cover everything, viewers never operate, one admin must remain', async () => {
+  const { memberOf, adminFor } = await import('./settings.js');
+  const s = structuredClone(settings);
+  s.operators.push({ id: 5, login: 'v', role: 'viewer', networks: ['devnet-moutai'] }, { id: 6, login: 'o', role: 'operator', networks: ['testnet'] });
+  const v = validateSettings(s);
+  assert.equal(memberOf(v, { id: 5 }, 'devnet-moutai'), true);
+  assert.equal(operatorFor(v, { id: 5 }, 'devnet-moutai'), false);
+  assert.equal(operatorFor(v, { id: 6 }, 'testnet'), true);
+  assert.equal(operatorFor(v, { id: 6 }, 'devnet-moutai'), false);
+  assert.equal(adminFor(v, { id: 9920871 }), true);
+  assert.equal(adminFor(v, { id: 6 }), false);
+  s.operators = [{ id: 5, login: 'v', role: 'viewer', networks: ['testnet'] }];
+  assert.throws(() => validateSettings(s), /At least one admin/);
+  s.operators = [{ id: 1, login: 'a', networks: ['*'] }, { id: 1, login: 'a', networks: ['*'] }];
+  assert.throws(() => validateSettings(s), /listed twice/);
+});

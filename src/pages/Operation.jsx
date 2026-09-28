@@ -11,7 +11,8 @@ export default function Operation({ name, id }) {
   const [actionError, setActionError] = useState(null);
   const [pending, setPending] = useState(false);
   if (!session.loaded) return null;
-  if (!session.operatorOf?.includes(name)) return <div className="mt-6"><Empty>Operator access required.</Empty></div>;
+  if (!session.memberOf?.includes(name)) return <div className="mt-6"><Empty>Access to this network required.</Empty></div>;
+  const operator = session.operatorOf?.includes(name);
   if (error) return <div className="mt-6"><Err error={error} /></div>;
   if (!op) return <div className="mt-6 text-dim">Loading…</div>;
   const q = op.request;
@@ -30,11 +31,11 @@ export default function Operation({ name, id }) {
         <h1 className="text-[18px] font-semibold">{q.action}</h1>
         <OpBadge status={op.status} />
         <span className="text-dim mono text-[12px]">{op.id}</span>
-        <div className="ml-auto flex gap-2">
+        {operator && <div className="ml-auto flex gap-2">
           {['queued', 'review', 'confirmed', 'preparing', 'running'].includes(op.status) && <button className="btn btn-danger" disabled={pending} onClick={() => act('cancel')}>{op.status === 'running' ? 'Stop (SIGTERM dashnet)' : 'Cancel'}</button>}
           {['failed', 'interrupted', 'cancelled'].includes(op.status) && <button className="btn" disabled={pending} onClick={() => act('resume')}>{op.confirmedAt ? 'Resume same plan' : 'Prepare again'}</button>}
           {['succeeded', 'failed', 'cancelled', 'interrupted', 'rejected'].includes(op.status) && <Link className="btn" to={`/n/${name}/deploy?action=${q.action}&nodes=${q.nodes.join(',')}&components=${(q.components || []).join(',')}`}>New from this</Link>}
-        </div>
+        </div>}
       </div>
       <div className="mt-2 panel px-3 py-2 grid gap-x-6 gap-y-1 text-[12px] sm:grid-cols-2 lg:grid-cols-4">
         <div><span className="text-dim">network </span><span className="mono">{op.network}</span></div>
@@ -91,7 +92,7 @@ export default function Operation({ name, id }) {
               </tbody>
             </table>
           </div>
-          {op.status === 'review' && (
+          {op.status === 'review' && operator && (
             <div className="mt-3 flex items-center gap-3">
               <button className="btn btn-primary" disabled={pending || !review.changes.length} onClick={() => act('confirm', { planId: review.planId })}>Confirm and {q.action === 'upgrade' ? 'upgrade' : 'restore'} {review.targets.length} node(s)</button>
               <span className="text-dim text-[12px]">Executes exactly this plan. One host at a time; stops at the first failed health gate. No automatic rollback.</span>
