@@ -5,7 +5,8 @@
 // once through EC2 Instance Connect (authenticated by the instance IAM role)
 // and appended to the ubuntu user's authorized_keys, so new hosts need no
 // manual key distribution.
-import { Client, utils } from 'ssh2';
+import ssh2 from 'ssh2';
+const { Client, utils } = ssh2;
 import { EC2InstanceConnectClient, SendSSHPublicKeyCommand } from '@aws-sdk/client-ec2-instance-connect';
 import { existsSync, readFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
@@ -42,7 +43,7 @@ export function createPool({ key, stateDir, region, accountId, log = console.log
   const ic = new EC2InstanceConnectClient({ region });
   const savePins = () => writeAtomic(pinsPath, JSON.stringify(pins, null, 1), 0o600);
 
-  function open(host, extraAuth = false) {
+  function open(host) {
     return new Promise((resolve, reject) => {
       let mismatch = null;
       const client = connect({
@@ -62,9 +63,9 @@ export function createPool({ key, stateDir, region, accountId, log = console.log
           return false;
         },
       });
+      client.on('error', () => {}); // late socket errors must never crash the agent
       client.once('ready', () => resolve(client));
       client.once('error', (e) => reject(mismatch ? Object.assign(new Error(mismatch), { hostKey: true }) : e));
-      void extraAuth;
     });
   }
 
@@ -92,7 +93,7 @@ export function createPool({ key, stateDir, region, accountId, log = console.log
     sessions.set(host.instanceId, entry);
     promise.then((c) => {
       const drop = () => { if (sessions.get(host.instanceId) === entry) sessions.delete(host.instanceId); };
-      c.once('close', drop); c.once('end', drop); c.once('error', drop);
+      c.once('close', drop); c.once('end', drop); c.on('error', drop);
     }, () => { if (sessions.get(host.instanceId) === entry) sessions.delete(host.instanceId); });
     return promise;
   }
