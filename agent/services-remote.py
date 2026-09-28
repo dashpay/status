@@ -157,10 +157,12 @@ def patch_explorer_api(image):
 def compose(faucet_image, frontend_image):
     pg = secret('postgres')
     ev = cfg['explorerVersion']
-    write('qls.toml', '\n'.join([
-        'network = "devnet"', '', '[server]', 'port = 8080', 'host = "127.0.0.1"', '',
-        '[rpc]', f'url = "http://127.0.0.1:{RPC_PORT}"', 'username = "dashnet"', f'password = "{PASSWORD}"', '',
-        '[quorum]', 'previous_blocks_offset = 8', '']))
+    # quorum-list-server reads either a complete config.toml or, when none
+    # parses, only environment variables; use the environment (0600 env file).
+    (ROOT / 'qls.toml').unlink(missing_ok=True)
+    write('qls.env', '\n'.join([
+        'API_HOST=127.0.0.1', 'API_PORT=8080', 'DASH_NETWORK=devnet', 'QUORUM_PREVIOUS_BLOCKS_OFFSET=8',
+        f'DASH_RPC_URL=http://127.0.0.1:{RPC_PORT}', 'DASH_RPC_USER=dashnet', f'DASH_RPC_PASSWORD={PASSWORD}', '']))
     write('faucet.env', '\n'.join([
         f'DASH_RPC_HOST=127.0.0.1:{RPC_PORT}/wallet/faucet#', f'DASH_RPC_PORT={RPC_PORT}', 'DASH_RPC_USER=dashnet', f'DASH_RPC_PASSWORD={PASSWORD}',
         f"CORE_FAUCET_AMOUNT={cfg['faucetAmount']}", f"RATE_LIMIT_PER_HOUR={cfg['faucetRateLimit']}", 'ISLOCK_TIMEOUT=60', 'CAP_SITE_KEY=', 'CAP_SECRET=', '']))
@@ -184,8 +186,7 @@ def compose(faucet_image, frontend_image):
     svc = lambda image, **kw: dict(image=image, network_mode='host', restart='unless-stopped', logging=dict(driver='local'), labels=AUX, **kw)
     idx = f'ghcr.io/pshenmic/platform-explorer-indexer:{ev}'
     spec = dict(name='devnet-services', services=dict(
-        # The image sets API_HOST/API_PORT, which override config.toml.
-        quorums=svc(cfg['quorumServerImage'], volumes=[f'{ROOT}/qls.toml:/app/config.toml:ro'], environment=dict(API_HOST='127.0.0.1', API_PORT='8080', DASH_NETWORK='devnet')),
+        quorums=svc(cfg['quorumServerImage'], env_file=[f'{ROOT}/qls.env']),
         faucet=svc(faucet_image, env_file=[f'{ROOT}/faucet.env'], healthcheck=dict(test=['CMD', 'curl', '-fsS', 'http://127.0.0.1:8000/health'], interval='30s', retries=3), command=['uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', '8000']),
         postgres=svc('postgres:17', env_file=[f'{ROOT}/postgres.env'], command=['postgres', '-c', 'listen_addresses=127.0.0.1', '-c', 'port=5433'], volumes=['explorer-db:/var/lib/postgresql/data'],
                      healthcheck=dict(test=['CMD-SHELL', 'pg_isready -h 127.0.0.1 -p 5433 -U explorer -d explorer'], interval='5s', retries=30)),
@@ -206,6 +207,22 @@ def topup_cron():
     cron = Path('/etc/cron.d/devnet-faucet-topup')
     cron.write_text(f'*/15 * * * * root /usr/bin/python3 {ROOT}/services.py @{ROOT}/topup.json >> /var/log/devnet-faucet-topup.log 2>&1\n')
     os.chmod(cron, 0o644)
+
+
+def wait_quorums(seconds=240):
+    # The quorum list must come from Core, not only the health route answering.
+    end, last = time.time() + seconds, None
+    while time.time() < end:
+        try:
+            with opener.open('http://127.0.0.1:8080/quorums', timeout=10) as r:
+                v = json.loads(r.read())
+            if v.get('success') and v.get('data'):
+                return len(v['data'])
+            last = v.get('message')
+        except Exception as e:
+            last = type(e).__name__
+        time.sleep(10)
+    return f'not populated: {last}'
 
 
 def wait(url, seconds=180):
@@ -243,7 +260,7 @@ frontend_image = build_explorer_frontend()
 compose(faucet_image, frontend_image)
 topup_cron()
 result = dict(faucetBalance=balance, faucetImage=faucet_image, frontendImage=frontend_image,
-              quorums=wait('http://127.0.0.1:8080/health'), faucet=wait('http://127.0.0.1:8000/health'),
+              quorums=wait('http://127.0.0.1:8080/health'), quorumList=wait_quorums(), faucet=wait('http://127.0.0.1:8000/health'),
               explorerApi=wait('http://127.0.0.1:3005/status', 300), explorerFrontend=wait('http://127.0.0.1:3000/', 300),
               walletAddress=rpc('getnewaddress', wallet='faucet'))
 print(json.dumps(result))

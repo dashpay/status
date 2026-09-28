@@ -73,5 +73,6 @@ export async function deployServices({ r, write, dplan, d, name, pool, r53 }) {
   write(r.id, `services: ${JSON.stringify(result)}`);
   const bad = ['quorums', 'faucet', 'explorerApi', 'explorerFrontend'].filter((k) => !result[k] || result[k] >= 500);
   if (bad.length) throw new Error(`services not answering locally: ${bad.join(', ')}`);
-  return { dns: names, walletAddress: result.walletAddress, summary: `faucet balance ${result.faucetBalance}, ${Object.values(names).map((x) => x.host).join(', ')}` };
+  if (!Number.isInteger(result.quorumList) || result.quorumList < 1) throw new Error(`quorum server has no quorums from Core: ${result.quorumList}`);
+  return { dns: names, walletAddress: result.walletAddress, summary: `faucet balance ${result.faucetBalance}, ${result.quorumList} quorums listed, ${Object.values(names).map((x) => x.host).join(', ')}` };
 }
