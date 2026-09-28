@@ -190,3 +190,39 @@ test('cancel during a running operation ends it as cancelled', async () => {
   for (let i = 0; i < 200 && !['cancelled', 'failed', 'succeeded'].includes(read().status); i++) await new Promise((r) => setTimeout(r, 10));
   assert.equal(read().status, 'cancelled');
 });
+
+test('platform reset: review from non-destructive stages; a failed wipe stops before apply', async () => {
+  const { createReset } = await import('./reset.js');
+  const root = mkdtempSync(join(tmpdir(), 'reset-'));
+  const dirs = { private: join(root, 'p'), state: join(root, 'state') };
+  mkdirSync(dirs.state, { recursive: true });
+  const mk = (name, role) => ({ name, role, state: 'running', publicIp: `192.0.2.${name.length}`, instanceId: `i-${name}`, probe: { ok: true } });
+  writeFileSync(join(dirs.state, 'devnet-moutai.json'), JSON.stringify({ hosts: [mk('hp-masternode-1', 'validator'), mk('hp-masternode-2', 'validator'), mk('seed-1', 'seed'), mk('web-1', 'web')] }));
+  const calls = [];
+  let failWipeOn = 'hp-masternode-2';
+  const pool = { exec: async (h, cmd) => {
+    const stage = cmd.split(' ')[4];
+    calls.push(`${stage}:${h.name}`);
+    const result = { baseline: { images: { drive: 'dashpay/drive:1' }, anchor: 10, epochTime: 3600, dashmate: 'dm', configFormatVersion: '4.2.0', tor: { enabled: false }, height: 100, tenderdashImage: 'dashpay/tenderdash:1' },
+      anchor: { height: 99, hash: 'ab' }, canary: { checks: { epochTime: 3600, epochEnv: '3600', coreSectionUnchanged: true, anchor: 99 }, rendered: ['dynamic-compose.yml'] } }[stage] || {};
+    const ok = !(stage === 'wipe' && h.name === failWipeOn);
+    return JSON.stringify({ ok, stage, result, error: ok ? undefined : 'boom' });
+  } };
+  const records = [];
+  const r = { id: 'x1', network: 'devnet-moutai', steps: [], request: { network: 'devnet-moutai', images: { drive: 'dashpay/drive:2', dapi: 'dashpay/rs-dapi:2', tenderdash: 'dashpay/tenderdash:2' }, options: {} } };
+  const ctx = { step: () => () => {}, save: (x) => records.push(x.status), write: () => {} };
+  const reset = createReset({ ctx, dirs, pool, getSettings: () => settings });
+  await reset.prepareReset(r);
+  assert.equal(r.review.hpmns, 2);
+  assert.equal(r.review.seeds, 1);
+  assert.equal(r.review.anchor.height, 99);
+  assert.ok(!calls.some((c) => c.includes('web-1')), 'web hosts are never targets');
+  assert.ok(calls.includes('canary:hp-masternode-1') && !calls.some((c) => /^(wipe|apply|start)/.test(c)), 'prepare is non-destructive');
+  await assert.rejects(reset.executeReset(r), /wipe failed on hp-masternode-2/);
+  assert.ok(!calls.some((c) => /^(apply|start)/.test(c)), 'nothing applied after a failed wipe');
+  assert.ok(!calls.includes('wipe:seed-1'), 'seed is reset only after every HPMN wiped');
+  failWipeOn = null;
+  await reset.executeReset(r);
+  assert.equal(calls.filter((c) => c === 'wipe:hp-masternode-1').length, 1, 'successful targets are not wiped twice on resume');
+  assert.ok(calls.includes('verify:seed-1') && r.result.healthy === true);
+});
