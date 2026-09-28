@@ -70,9 +70,12 @@ test('operator sign-in queues a validated deployment request; CSRF and non-opera
     settings.pollSeconds = 20;
     const saved = await w.req('/api/settings', { method: 'PUT', body: JSON.stringify({ settings }), headers: { 'content-type': 'application/json', 'x-csrf-token': csrf } });
     assert.equal(saved.status, 200);
+    // A page-wide save never changes access (it has its own endpoints), so a
+    // stale or edited operator list cannot lock admins out or revert a grant.
     settings.operators = [{ id: 1, login: 'x', networks: ['*'] }];
-    const lockout = await w.req('/api/settings', { method: 'PUT', body: JSON.stringify({ settings }), headers: { 'content-type': 'application/json', 'x-csrf-token': csrf } });
-    assert.equal(lockout.status, 400);
+    const stale = await w.req('/api/settings', { method: 'PUT', body: JSON.stringify({ settings }), headers: { 'content-type': 'application/json', 'x-csrf-token': csrf } });
+    assert.equal(stale.status, 200);
+    assert.ok((await stale.json()).settings.operators.some((o) => o.id === 9920871), 'operators kept from disk');
   } finally { w.close(); }
 });
 
@@ -161,5 +164,22 @@ test('faucet promo codes reach network members only', async () => {
     await w.login();
     assert.deepEqual((await (await w.req('/api/networks/devnet-bonsai/faucet-codes')).json()).codes, { 'EVONODE-ABCD1234': 4005 });
     assert.equal((await w.req('/api/networks/testnet/faucet-codes')).status, 403);
+  } finally { w.close(); }
+});
+
+test('access changes save at once and survive a reload; admins cannot lock themselves out', async () => {
+  const w = await start();
+  try {
+    const csrf = await w.login();
+    const put = (id, body) => w.req(`/api/access/${id}`, { method: 'PUT', body: JSON.stringify(body), headers: { 'content-type': 'application/json', 'x-csrf-token': csrf } });
+    assert.equal((await put(583231, { login: 'octocat', role: 'admin' })).status, 200);
+    const onDisk = JSON.parse(readFileSync(join(w.dataDir, 'settings.json'), 'utf8'));
+    assert.deepEqual(onDisk.operators.find((o) => o.id === 583231), { id: 583231, login: 'octocat', role: 'admin', networks: ['*'] });
+    assert.ok((await (await w.req('/api/settings')).json()).settings.operators.some((o) => o.id === 583231), 'visible after reload');
+    assert.equal((await put(583231, { login: 'octocat', role: 'viewer', networks: ['testnet'] })).status, 200);
+    assert.equal((await put(9920871, { login: 'someone', role: 'viewer', networks: ['testnet'] })).status, 400, 'own access is not changeable');
+    assert.equal((await w.req('/api/access/583231', { method: 'DELETE', headers: { 'x-csrf-token': csrf } })).status, 200);
+    assert.ok(!JSON.parse(readFileSync(join(w.dataDir, 'settings.json'), 'utf8')).operators.some((o) => o.id === 583231));
+    assert.equal((await w.req('/api/access/583231', { method: 'PUT', body: '{}', headers: { 'content-type': 'application/json' } })).status, 403, 'CSRF required');
   } finally { w.close(); }
 });
