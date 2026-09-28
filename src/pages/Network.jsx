@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useState } from 'react';
 import { ago, api, bytes, clock, dash, duration, navigate, num, short, useNow, useResource, useSession, ROLE_LABEL } from '../lib.js';
 import { Delta, Dot, Empty, Err, Level, Link, Meter, Section, Stat } from '../ui.jsx';
 import Operations from './Operations.jsx';
+import { COMPONENTS, OPERABLE, REPOS, cmp, newestRelease, reported } from '../releases.js';
 
 const ROLE_ORDER = ['validator', 'masternode', 'seed', 'fullnode', 'web', 'wallet', 'miner', 'mixer', 'quorums', 'metrics', 'logs', 'vpn', 'other'];
 
@@ -33,6 +34,7 @@ export default function Network({ name, tab }) {
       </div>
       {n.description && <p className="text-dim mt-1 text-[12px]">{n.description}</p>}
       {n.lifecycle && <Lifecycle n={n} member={member} admin={session.admin} />}
+      {operator && n.deployable && <Updates n={n} />}
 
       {tab === 'ops' && member ? <Operations network={n} operator={operator} /> : (
         <>
@@ -355,6 +357,48 @@ function Lifecycle({ n, member, admin }) {
         <button className="btn btn-danger !py-0.5" disabled={confirm !== n.name} onClick={remove}>Prepare deletion</button>
         <button className="btn !py-0.5" onClick={() => setOpen(false)}>cancel</button></span>}
       {member && Object.keys(codes).length > 0 && <span className="w-full text-dim">faucet promo codes (members only; once per IP per hour): {Object.entries(codes).map(([c, a]) => <span key={c} className="mr-3"><span className="mono text-fg">{c}</span> {a} DASH</span>)}</span>}
+      {error && <span className="lv-down w-full">{error.message}</span>}
+    </div>
+  );
+}
+
+// Newer releases in each component's running line, with a one-click rollout
+// across every healthy node that runs them (planned, then run at once).
+function Updates({ n }) {
+  const [state, setState] = useState({ network: null, updates: [] });
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const native = n.kind === 'dashnet';
+  const hosts = n.hosts.filter((h) => OPERABLE.includes(h.role) && !h.duplicate && h.state === 'running' && h.level !== 'unreachable');
+  const key = hosts.map((h) => h.name + COMPONENTS.map((c) => reported(h, c)).join()).join('|');
+  useEffect(() => {
+    let current = true;
+    const components = COMPONENTS.filter((c) => (!native || c !== 'core' || (n.upgradeScopes || []).includes('core')) && hosts.some((h) => h.containers.some((k) => k.component === c)));
+    Promise.all(components.map(async (c) => {
+      const running = [...new Set(hosts.filter((h) => h.containers.some((k) => k.component === c)).map((h) => reported(h, c)).filter(Boolean))].sort(cmp)[0];
+      try { const next = newestRelease((await api(`/api/images/${c}/tags`)).tags, running); return next ? { c, from: running, to: next } : null; } catch { return null; }
+    })).then((list) => current && setState({ network: n.name, updates: list.filter(Boolean) }));
+    return () => { current = false; };
+  }, [n.name, key]); // eslint-disable-line react-hooks/exhaustive-deps
+  const updates = state.network === n.name ? state.updates : [];
+  if (!updates.length) return null;
+  const nodes = native ? [] : hosts.filter((h) => updates.some((u) => h.containers.some((k) => k.component === u.c))).map((h) => h.name);
+  const upgrade = async () => {
+    setBusy(true); setError(null);
+    try {
+      const r = await api(`/api/networks/${n.name}/ops`, { method: 'POST', body: { action: 'upgrade', nodes, components: updates.map((u) => u.c), images: Object.fromEntries(updates.map((u) => [u.c, `${REPOS[u.c]}:${u.to}`])), options: { autoRun: true } } });
+      navigate(`/n/${n.name}/ops/${r.id}`);
+    } catch (e) { setError(e); setBusy(false); }
+  };
+  return (
+    <div className="panel mt-3 px-3 py-2 text-[12px] flex flex-wrap items-center gap-x-4 gap-y-2">
+      <span className="label">updates available</span>
+      {updates.map((u) => <span key={u.c}><span className="font-medium">{u.c}</span> <span className="mono text-dim">{u.from}</span> → <span className="mono">{u.to}</span></span>)}
+      <span className="text-dim">{native ? 'every node, Core first, then Platform' : `${nodes.length} healthy node(s), one at a time`}</span>
+      <span className="ml-auto flex gap-2">
+        <Link to={`/n/${n.name}/deploy`} className="btn !py-0.5">Review first…</Link>
+        <button className="btn btn-primary !py-0.5" disabled={busy} onClick={upgrade}>{busy ? 'Starting…' : 'Upgrade now'}</button>
+      </span>
       {error && <span className="lv-down w-full">{error.message}</span>}
     </div>
   );
