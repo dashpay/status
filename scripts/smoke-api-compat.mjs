@@ -14,7 +14,7 @@ import { checkLegacyAPI } from './check-legacy-api.mjs';
 import { chromium } from 'playwright';
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'status-api-'));
-let collector, proxy, consoleServer, browser;
+let collector, proxy, consoleServer, consoleApp, browser;
 const stop = async (child) => {
   if (!child || child.exitCode !== null) return;
   const exited = once(child, 'exit'); child.kill('SIGTERM'); await exited;
@@ -34,7 +34,8 @@ async function ready(url, child) {
 try {
   const [legacyPort, consolePort, publicPort] = await Promise.all([port(), port(), port()]);
   const config = { origin: `http://127.0.0.1:${publicPort}` };
-  consoleServer = createWeb({ dataDir: path.join(temp, 'data'), origin: config.origin, auth: { clientId: 'fixture-client', clientSecret: 'fixture-secret' } }).listen(consolePort, '127.0.0.1'); await once(consoleServer, 'listening');
+  consoleApp = createWeb({ dataDir: path.join(temp, 'data'), origin: config.origin, auth: { clientId: 'fixture-client', clientSecret: 'fixture-secret' } });
+  consoleServer = consoleApp.listen(consolePort, '127.0.0.1'); await once(consoleServer, 'listening');
   const key = path.join(temp, 'fixture-key');
   execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', key]);
   const inventory = path.join(temp, 'inventory');
@@ -100,6 +101,7 @@ http {
 } finally {
   await stop(collector); await stop(proxy);
   if (browser) await browser.close();
-  if (consoleServer) await new Promise((resolve) => consoleServer.close(resolve));
+  consoleApp?.close();
+  if (consoleServer) { consoleServer.closeAllConnections(); await new Promise((resolve) => consoleServer.close(resolve)); }
   fs.rmSync(temp, { recursive: true, force: true });
 }
