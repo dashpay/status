@@ -4,10 +4,11 @@
 // records, logs and every dashnet artifact. One operation runs per network.
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { COMPONENTS, COMPONENT_REPOS, adminFor, operatorFor, readJSON, validateDevnetDefaults, writeAtomic } from '../shared/settings.js';
 import { createDevnets, validateDevnetRequest } from './devnets.js';
+import { createReset, validateReset } from './reset.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ACTIONS = new Set(['upgrade', 'deploy', 'enroll', 'doctor']);
@@ -46,11 +47,12 @@ export function manifestFor(settings, network, state) {
   };
 }
 
-export const LIFECYCLE = new Set(['create-devnet', 'delete-devnet', 'devnet-services']);
+export const LIFECYCLE = new Set(['create-devnet', 'delete-devnet', 'devnet-services', 'platform-reset']);
 
 export function validateRequest(settings, q, registry = {}) {
   if (!q || !UUID.test(q.id)) throw new Error('invalid request id');
   if (q.action === 'create-devnet') { validateDevnetRequest(settings, q, registry); return { lifecycle: true }; }
+  if (q.action === 'platform-reset') { validateReset(settings, q); return { lifecycle: true }; }
   if (q.action === 'devnet-services') {
     const reg = registry[q.network];
     if (!reg || reg.status === 'deleted') throw new Error('services are managed only for console devnets');
@@ -102,6 +104,8 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
   const { requests, ops, work } = dirs;
   for (const d of [requests, ops, work]) mkdirSync(d, { recursive: true });
   const running = new Map();
+  const live = new Map(); // id -> record object owned by a running run()
+  const seen = new Map(); // op file -> { mtime, status } so tick() skips unchanged records
   const recordPath = (id) => join(ops, `${id}.json`);
   const logPath = (id) => join(ops, `${id}.log`);
   const load = (id) => readJSON(recordPath(id));
@@ -158,6 +162,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
   }
 
   function step(r, name) {
+    if (r.cancelRequested) throw new Error('cancelled by operator');
     const s = { name, status: 'running', startedAt: new Date().toISOString() };
     r.steps.push(s); save(r);
     return (status, detail) => { s.status = status; s.finishedAt = new Date().toISOString(); if (detail) s.detail = detail; save(r); };
@@ -230,7 +235,8 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     const out = join(dir, `journal-${randomUUID()}.json`);
     const code = await new Promise((resolve) => {
       const child = spawnImpl(binary, ['managed-operation', '--manifest', join(dir, 'manifest.json'), '--timeout', '1m', '--out', out], { stdio: 'ignore' });
-      child.on('close', (c) => resolve(c ?? 1)); child.on('error', () => resolve(1));
+      const timer = setTimeout(() => child.kill('SIGKILL'), 90_000);
+      child.on('close', (c) => { clearTimeout(timer); resolve(c ?? 1); }); child.on('error', () => { clearTimeout(timer); resolve(1); });
     });
     const v = code === 0 ? readJSON(out) : null;
     rmSync(out, { force: true });
@@ -291,11 +297,13 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
   }
 
   async function run(r) {
+    live.set(r.id, r);
     try {
       if (LIFECYCLE.has(r.request.action)) {
-        const impl = { 'create-devnet': ['prepareCreate', 'executeCreate'], 'delete-devnet': ['prepareDelete', 'executeDelete'], 'devnet-services': ['prepareServices', 'executeServices'] }[r.request.action];
-        if (r.status === 'queued') { await devnets[impl[0]](r); r.status = 'review'; }
-        else if (r.status === 'confirmed') { await devnets[impl[1]](r); r.status = 'succeeded'; r.finishedAt = new Date().toISOString(); }
+        const impl = { 'create-devnet': ['prepareCreate', 'executeCreate'], 'delete-devnet': ['prepareDelete', 'executeDelete'], 'devnet-services': ['prepareServices', 'executeServices'], 'platform-reset': ['prepareReset', 'executeReset'] }[r.request.action];
+        const mod = r.request.action === 'platform-reset' ? reset : devnets;
+        if (r.status === 'queued') { await mod[impl[0]](r); r.status = 'review'; }
+        else if (r.status === 'confirmed') { await mod[impl[1]](r); r.status = 'succeeded'; r.finishedAt = new Date().toISOString(); }
       } else if (getSettings().networks.find((n) => n.name === r.network)?.kind === 'dashnet') {
         if (r.request.action === 'doctor') { await devnets.doctor(r); r.status = r.result.healthy ? 'succeeded' : 'failed'; }
         else if (r.status === 'queued') { await devnets.prepareUpgrade(r); r.status = 'review'; }
@@ -316,10 +324,12 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
       write(r.id, `error: ${r.error}`);
     }
     r.cancelRequested = undefined;
+    live.delete(r.id);
     save(r);
     if (['succeeded', 'failed', 'cancelled'].includes(r.status)) onChange(r, true);
   }
 
+  const reset = createReset({ ctx: { step, save, write }, dirs, pool, getSettings });
   const devnets = devnetsImpl || createDevnets({ ctx: { dashnet, step, save, write, pinBinary }, dirs, key, pool, getSettings, region: getSettings().aws.region, log });
 
   // Poll the request directory: create, confirm, cancel, resume.
@@ -332,7 +342,12 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
       try { handle(s, q); } catch (e) { log(`request ${f}: ${e.message}`); }
     }
     for (const f of readdirSync(ops).filter((f) => f.endsWith('.json'))) {
-      const r = readJSON(join(ops, f));
+      const path = join(ops, f);
+      let mtime; try { mtime = statSync(path).mtimeMs; } catch { continue; }
+      const hit = seen.get(f);
+      if (hit && hit.mtime === mtime && !['queued', 'confirmed'].includes(hit.status)) continue;
+      const r = readJSON(path);
+      seen.set(f, { mtime, status: r?.status });
       if (!r || running.has(r.network) || !['queued', 'confirmed'].includes(r.status)) continue;
       if ([...running.keys()].includes(r.network)) continue;
       running.set(r.network, { id: r.id, child: null });
@@ -354,6 +369,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     }
     const r = UUID.test(q.id || '') ? load(q.id) : null;
     if (!r || r.network !== q.network) throw new Error('unknown operation');
+    if (live.has(r.id) && q.type !== 'cancel') throw new Error('operation is running; cancel it first');
     if (q.type === 'confirm') {
       if (r.status !== 'review' || q.planId !== r.review?.planId) throw new Error('plan changed or not awaiting review');
       if (Date.now() - Date.parse(r.review.preparedAt) > 60 * 60_000) { r.status = 'failed'; r.error = 'review expired after 60 minutes; prepare again'; save(r); return; }
@@ -361,8 +377,12 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
       write(r.id, `confirmed by ${actor.login}: plan ${r.review.planId}`);
     } else if (q.type === 'cancel') {
       const active = running.get(r.network);
-      if (active?.id === r.id && active.child) { r.cancelRequested = true; save(r); write(r.id, `cancel requested by ${actor.login}`); active.child.kill('SIGTERM'); }
-      else if (['queued', 'review', 'confirmed'].includes(r.status)) { r.status = 'cancelled'; save(r); write(r.id, `cancelled by ${actor.login}`); }
+      const mine = live.get(r.id);
+      if (active?.id === r.id && mine) {
+        // The running copy owns the record: flag it there so the next save keeps it.
+        mine.cancelRequested = true; save(mine); write(r.id, `cancel requested by ${actor.login}`);
+        active.child?.kill('SIGTERM');
+      } else if (['queued', 'review', 'confirmed'].includes(r.status)) { r.status = 'cancelled'; save(r); write(r.id, `cancelled by ${actor.login}`); }
     } else if (q.type === 'resume') {
       if (!['failed', 'interrupted', 'cancelled'].includes(r.status)) throw new Error('only a stopped operation can be resumed');
       // Never confirmed: prepare a fresh plan. Confirmed: continue the exact reviewed plan.
@@ -372,7 +392,14 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     }
   }
 
-  return { tick, running, isTerminal: (s) => TERMINAL.has(s), manifestFor, devnets };
+  // SIGTERM each running dashnet and wait, so it journals its state and
+  // releases its claim instead of being killed mid-step.
+  async function shutdown(ms = 25_000) {
+    const children = [...running.values()].map((x) => x.child).filter(Boolean);
+    for (const c of children) c.kill('SIGTERM');
+    await Promise.race([Promise.all(children.map((c) => new Promise((res) => (c.exitCode !== null ? res() : c.once('close', res))))), new Promise((res) => setTimeout(res, ms))]);
+  }
+  return { tick, running, isTerminal: (s) => TERMINAL.has(s), manifestFor, devnets, shutdown };
 }
 
 export function toMs(d) {

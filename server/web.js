@@ -25,9 +25,12 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   const clients = new Set();
   const cache = new Map();
 
-  app.set('trust proxy', 'loopback');
+  // nginx on the host reaches the container through the Docker bridge gateway.
+  app.set('trust proxy', ['loopback', 'uniquelocal']);
   app.use(helmet({ contentSecurityPolicy: { directives: { 'style-src': ["'self'", "'unsafe-inline'"], 'img-src': ["'self'", 'data:', 'https://avatars.githubusercontent.com'] } } }));
   app.use('/api', rateLimit({ windowMs: 60_000, limit: 600, standardHeaders: true, legacyHeaders: false }));
+  app.use('/api/auth/github', rateLimit({ windowMs: 10 * 60_000, limit: 20, standardHeaders: true, legacyHeaders: false }));
+  app.use(['/api/ops/:id', '/api/ops/:id/*rest'], (req, res, next) => (UUID.test(req.params.id) ? next() : res.status(404).json({ error: 'Operation not found' })));
   app.use(express.json({ limit: '64kb' }));
   app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
   auth.install(app);
@@ -92,7 +95,8 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     }, 300));
   }
   function onOpFile(file) {
-    const id = file.replace(/\.(json|log)$/, '');
+    if (!file.endsWith('.json')) return; // log growth is streamed separately
+    const id = file.replace(/\.json$/, '');
     if (!UUID.test(id)) return;
     clearTimeout(debounce.get(id));
     debounce.set(id, setTimeout(() => {
@@ -117,8 +121,16 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   };
   const requireMember = requireAccess(memberOf, 'Access to this network required');
   const requireOperator = requireAccess(operatorFor, 'Operator access required');
-  const listOps = (network) => (existsSync(dirs.ops) ? readdirSync(dirs.ops) : []).filter((f) => f.endsWith('.json'))
-    .map((f) => readJSON(join(dirs.ops, f))).filter((r) => r && (!network || r.network === network))
+  const opCache = new Map();
+  const listOps = (network) => (existsSync(dirs.ops) ? readdirSync(dirs.ops) : []).filter((f) => f.endsWith('.json') && UUID.test(f.slice(0, -5)))
+    .map((f) => {
+      let mtime; try { mtime = statSync(join(dirs.ops, f)).mtimeMs; } catch { return null; }
+      const hit = opCache.get(f);
+      if (hit?.mtime === mtime) return hit.r;
+      const r = readJSON(join(dirs.ops, f));
+      opCache.set(f, { mtime, r });
+      return r;
+    }).filter((r) => r && (!network || r.network === network))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const request = (payload) => writeAtomic(join(dirs.requests, `${payload.id}${payload.type === 'create' ? '' : '.' + payload.type + '-' + randomUUID().slice(0, 8)}.json`), JSON.stringify(payload));
 
@@ -128,7 +140,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     const n = settings.networks.find((x) => x.name === req.params.name);
     if (!n) return res.status(404).json({ error: 'Network not found' });
     const body = req.body || {};
-    if (['delete-devnet', 'devnet-services'].includes(body.action) && !isAdmin(req)) return res.status(403).json({ error: 'Only admins manage devnet lifecycle and services' });
+    if (['delete-devnet', 'devnet-services', 'platform-reset'].includes(body.action) && !isAdmin(req)) return res.status(403).json({ error: 'Only admins manage devnet lifecycle, services and Platform resets' });
     const q = { id: randomUUID(), network: n.name, action: body.action, nodes: body.nodes || [], components: body.components || [], images: body.images || {}, options: body.options || {}, ...(body.confirmName ? { confirmName: body.confirmName } : {}), ...(body.services ? { services: body.services } : {}) };
     try { validateRequest(settings, q, registry()); } catch (e) { return res.status(400).json({ error: e.message }); }
     const busy = listOps(n.name).find((r) => ['queued', 'preparing', 'confirmed', 'running'].includes(r.status));
@@ -158,17 +170,21 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   });
   app.get('/api/ops/:id/log', requireMember, (req, res) => {
     const path = join(dirs.ops, `${req.params.id}.log`);
-    let offset = Number(req.query.offset) || 0;
+    let offset = Number(req.query.offset);
+    if (!Number.isSafeInteger(offset) || offset < 0) offset = 0;
     res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
     res.flushHeaders();
     const send = () => {
-      if (!existsSync(path)) return;
-      const size = statSync(path).size;
-      if (size <= offset) return;
-      const fd = openSync(path, 'r'), buf = Buffer.alloc(Math.min(size - offset, 1 << 20));
-      readSync(fd, buf, 0, buf.length, offset); closeSync(fd);
-      offset += buf.length;
-      res.write(`event: log\ndata: ${JSON.stringify({ text: buf.toString(), offset })}\n\n`);
+      try {
+        if (!existsSync(path)) return;
+        const size = statSync(path).size;
+        if (size < offset) offset = 0;
+        if (size === offset) return;
+        const fd = openSync(path, 'r'), buf = Buffer.alloc(Math.min(size - offset, 1 << 20));
+        try { readSync(fd, buf, 0, buf.length, offset); } finally { closeSync(fd); }
+        offset += buf.length;
+        res.write(`event: log\ndata: ${JSON.stringify({ text: buf.toString(), offset })}\n\n`);
+      } catch (e) { res.write(`event: error\ndata: ${JSON.stringify({ error: e.message })}\n\n`); }
     };
     send();
     const timer = setInterval(send, 1000);

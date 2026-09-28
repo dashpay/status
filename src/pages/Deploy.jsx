@@ -15,7 +15,7 @@ const ROLE_COMPONENTS = { validator: COMPONENTS, masternode: ['core'], seed: ['c
 
 export default function Deploy({ name }) {
   const session = useSession();
-  const { data: n, error } = useResource(`/api/networks/${name}`, (t, d) => t === 'network' && d.name === name);
+  const { data: n, error } = useResource(`/api/networks/${name}`, (t, d) => t === 'network' && (d.name === name || d.name === '*'));
   const params = new URLSearchParams(location.search);
   const [action, setAction] = useState(params.get('action') || 'upgrade');
   const [selected, setSelected] = useState(new Set((params.get('nodes') || '').split(',').filter(Boolean)));

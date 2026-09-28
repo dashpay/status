@@ -34,7 +34,7 @@ def parse(raw):
         return raw.decode(errors='replace').strip()
 
 
-def http_json(url, timeout=8):
+def http_json(url, timeout=6):
     with OPENER.open(url, timeout=timeout) as r:
         return json.loads(r.read(4 * 1024 * 1024))
 
@@ -219,6 +219,8 @@ def tenderdash(raw):
             st = fetch('status', candidate); port = candidate; break
         except Exception:
             continue
+    if port is None and ROLE == 'validator':
+        raise RuntimeError('rpc unreachable on %s' % ports)
     if port is None:
         # Seed-mode nodes expose no RPC: count established P2P sessions and read
         # the chain ID from the metrics endpoint instead.
@@ -380,7 +382,7 @@ def explorer(raw):
     c = find(raw, ['ghcr.io/pshenmic/platform-explorer-api'])
     if not c:
         return None
-    code, v, ms = get_json('http://127.0.0.1:3005/status', 15)
+    code, v, ms = get_json('http://127.0.0.1:3005/status', 10)
     v = v if isinstance(v, dict) else {}
     idx = find(raw, ['ghcr.io/pshenmic/platform-explorer-indexer'])
     return dict(status=code, latencyMs=ms, apiVersion=(v.get('api') or {}).get('version'), indexedHeight=((v.get('api') or {}).get('block') or {}).get('height'),
@@ -392,7 +394,7 @@ def new_faucet(raw):
     c = next((c for n, c in sorted(raw.items()) if c['State']['Running'] and (repo(c['Config']['Image']) in ('dashpay/dash-faucet', 'devnet-faucet'))), None)
     if not c:
         return None
-    code, v, ms = get_json('http://127.0.0.1:8000/api/status', 15)
+    code, v, ms = get_json('http://127.0.0.1:8000/api/status', 10)
     v = v if isinstance(v, dict) else {}
     return dict(status=code, latencyMs=ms, state=v.get('status'), balance=v.get('balance'), blockHeight=v.get('block_height') or v.get('blockHeight'),
                 utxos=v.get('available_utxos') or v.get('availableUtxos'), kind='dash-faucet')

@@ -81,3 +81,19 @@ test('console devnets merge into settings and deleted ones drop out', async () =
   const gone = mergeDevnets(structuredClone(merged), { 'devnet-bonsai': { status: 'deleted' } });
   assert.equal(gone.networks.some((x) => x.name === 'devnet-bonsai'), false);
 });
+
+test('hidden balances never reach the public projection', () => {
+  const s = structuredClone(settings);
+  const n = { ...s.networks[2], showBalances: false };
+  const host = { name: 'wallet-1', role: 'wallet', state: 'running', publicIp: '192.0.2.9', probe: { ok: true, at: new Date().toISOString(), data: {
+    core: { chain: 'main', blocks: 10, wallets: [{ name: 'dashd-wallet-1-faucet', trusted: 12.34 }] }, faucet: { kind: 'dash-faucet', status: 503, state: 'low_balance', balance: 12.34, utxos: 3 }, containers: [] } } };
+  const e = evaluateNetwork(n, { hosts: [host] }, s);
+  const pub = JSON.stringify(projectNetwork(n, e, { hosts: [host] }, false));
+  assert.ok(!pub.includes('12.34'), pub);
+  assert.ok(pub.includes('balance below threshold'));
+});
+
+test('a validator without Tenderdash RPC is down, not merely behind', () => {
+  const e = evaluateNetwork(network, { hosts: [evo('a'), evo('b', { tenderdash: null })] }, settings);
+  assert.equal(e.rows[1].level, 'down');
+});

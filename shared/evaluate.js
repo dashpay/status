@@ -154,14 +154,14 @@ export function projectNetwork(network, evaluation, state, operator) {
   const hosts = evaluation.rows.map(({ host: h, data: d, level, reasons }) => {
     const c = d.core || {}, td = d.tenderdash || {}, s = d.system || {};
     const row = {
-      name: h.name, role: h.role, level, reasons: reasons.map((r) => ({ level: r.level, text: operator ? r.text : publicReason(r.text) })),
+      name: h.name, role: h.role, level, reasons: reasons.map((r) => ({ level: r.level, text: operator ? r.text : publicReason(r.text, network) })),
       publicIp: h.publicIp, instanceType: h.instanceType, arch: h.arch, state: h.state, az: h.az, duplicate: !!h.duplicate,
       probedAt: h.probe?.at || null, probeMs: h.probe?.ms ?? null,
       core: d.core ? { height: c.blocks, headers: c.headers, chainLock: c.chainLockHeight, version: c.subversion, protocol: c.protocol, peers: c.connections, peersIn: c.connectionsIn, ibd: c.ibd, synced: c.synced, sizeOnDisk: c.sizeOnDisk, mempool: c.mempool, bestBlock: c.bestBlockHash, blockTime: c.blockTime } : null,
       masternode: c.masternode ? { state: c.masternode.state, type: c.masternode.type, proTxHash: c.masternode.proTxHash, pose: c.masternode.posePenalty, lastPaid: c.masternode.lastPaidHeight, registered: c.masternode.registeredHeight, service: c.masternode.service } : null,
       platform: d.tenderdash ? { height: td.height, blockTime: td.blockTime, peers: td.peers, catchingUp: td.catchingUp, network: td.network, protocol: td.protocolApp, version: td.version, votingPower: td.votingPower, inValidatorSet: td.inValidatorSet, nodeId: td.nodeId } : null,
       dapi: d.dapi ? { ok: d.dapi.ok, latencyMs: d.dapi.latencyMs, height: d.dapi.height, dapiVersion: d.dapi.dapiVersion, driveVersion: d.dapi.driveVersion, error: operator ? d.dapi.error : undefined } : null,
-      insight: d.insight || null, faucet: d.faucet || null, quorumServer: d.quorumServer || null, explorer: d.explorer || null,
+      insight: d.insight || null, faucet: d.faucet ? (operator || network.showBalances ? d.faucet : { ...d.faucet, balance: undefined, utxos: undefined }) : null, quorumServer: d.quorumServer || null, explorer: d.explorer || null,
       wallets: c.wallets && (network.showBalances || operator) ? c.wallets.filter((w) => w.name).map((w) => ({ name: w.name, trusted: w.trusted, pending: w.pending, immature: w.immature, coinjoin: w.coinjoin })) : c.wallets ? { count: c.wallets.filter((w) => w.name).length } : null,
       system: d.system ? { load: s.load, cpus: s.cpus, memPercent: pct(s.memTotal - s.memAvailable, s.memTotal), memTotal: s.memTotal, swapPercent: s.swapTotal ? pct(s.swapTotal - s.swapFree, s.swapTotal) : null, disks: (s.disks || []).map((x) => ({ mount: x.mount, percent: pct(x.used, x.size), size: x.size, avail: x.avail })), uptime: s.uptime, os: s.os, kernel: s.kernel } : null,
       containers: (d.containers || []).map((k) => ({ name: k.name, component: COMPONENT_OF[k.repo] || null, image: k.image, version: COMPONENT_OF[k.repo] ? versionOf(COMPONENT_OF[k.repo], k, d, evaluation.tags) : tagOf(k.image), digest: k.digest, state: k.state, running: k.running, restarts: k.restarts, startedAt: k.startedAt, health: k.health })),
@@ -180,7 +180,8 @@ export function projectNetwork(network, evaluation, state, operator) {
   };
 }
 
-function publicReason(text) {
+function publicReason(text, network) {
   if (text.startsWith('probe failed')) return 'host not reachable by status agent';
+  if (!network.showBalances && /balance/i.test(text)) return /faucet/i.test(text) ? 'faucet balance below threshold' : 'wallet balance below threshold';
   return text.replace(/: .*$/, '');
 }

@@ -8,7 +8,7 @@ const ROLE_ORDER = ['validator', 'masternode', 'seed', 'fullnode', 'web', 'walle
 export default function Network({ name, tab }) {
   const now = useNow(1000);
   const session = useSession();
-  const { data: n, error } = useResource(`/api/networks/${name}`, (t, d) => (t === 'network' && d.name === name) || t === 'settings');
+  const { data: n, error } = useResource(`/api/networks/${name}`, (t, d) => (t === 'network' && (d.name === name || d.name === '*')) || t === 'settings');
   const member = session.memberOf?.includes(name);
   const operator = session.operatorOf?.includes(name);
   if (error) return <div className="mt-6"><Err error={error} /></div>;
@@ -26,6 +26,7 @@ export default function Network({ name, tab }) {
           <div className="ml-auto flex gap-1">
             <Link to={`/n/${name}`} className={`btn ${tab === 'hosts' ? '!border-accent' : ''}`}>Hosts</Link>
             <Link to={`/n/${name}/ops`} className={`btn ${tab === 'ops' ? '!border-accent' : ''}`}>Operations</Link>
+            {session.admin && n.chainType === 'devnet' && n.kind !== 'dashnet' && <Link to={`/n/${name}/reset`} className="btn btn-danger">Platform reset…</Link>}
             {operator && n.deployable && <Link to={`/n/${name}/deploy`} className="btn btn-primary">Deploy…</Link>}
           </div>
         )}
@@ -37,7 +38,7 @@ export default function Network({ name, tab }) {
         <>
           <div className="mt-3 grid gap-2 grid-cols-2 sm:grid-cols-4 lg:grid-cols-8">
             <Stat label="Core height" value={num(s.core?.height)} sub={coreAge != null ? `last block ${ago(s.core.blockTime, now)}` : '—'} level={coreAge > 1800 ? 'warn' : undefined} />
-            <Stat label="ChainLock" value={num(s.core?.chainLock)} sub={s.core ? `tip − ${s.core.height - (s.core.chainLock || 0)}` : '—'} />
+            <Stat label="ChainLock" value={num(s.core?.chainLock)} sub={s.core?.chainLock ? `tip − ${s.core.height - s.core.chainLock}` : 'no ChainLock yet'} />
             <Stat label="Platform height" value={num(s.platform?.height)} sub={platAge != null ? `last block ${ago(s.platform.blockTime, now)}` : 'no platform'} level={platAge > 600 ? 'warn' : undefined} />
             <Stat label="Protocol" value={s.platform?.protocol != null ? `v${s.platform.protocol}` : '—'} sub={`core p2p ${s.core?.protocol ?? '—'}`} />
             <Stat label="Validator set" value={s.platform?.validatorSet ?? '—'} sub="tenderdash /validators" />

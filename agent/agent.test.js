@@ -153,3 +153,40 @@ test('discovery classifies dash-network-go instances by tag', async () => {
   const found = await createDiscovery({ region: 'us-west-2', tagKey: 'DashNetwork' }, client)([{ name: 'devnet-bonsai', tag: 'devnet-bonsai' }]);
   assert.deepEqual(found['devnet-bonsai'].map((h) => [h.name, h.role, h.arch]), [['validators-001', 'validator', 'arm64'], ['wallet-001', 'wallet', 'amd64']]);
 });
+
+test('a truncated DAPI gRPC-web reply fails fast instead of hanging', async () => {
+  const { dapiCheck } = await import('./collector.js');
+  const http = await import('node:http');
+  const server = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/grpc-web+proto' }); res.end(Buffer.from([0, 0, 0, 0, 10, 0x0a, 8, 8])); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    const started = Date.now();
+    const r = await dapiCheck(`http://127.0.0.1:${server.address().port}/`, 2000);
+    assert.equal(r.ok, false);
+    assert.ok(Date.now() - started < 2000);
+  } finally { server.close(); }
+});
+
+test('cancel during a running operation ends it as cancelled', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ops-'));
+  const dirs = { data: root, private: join(root, 'private'), requests: join(root, 'req'), ops: join(root, 'ops'), work: join(root, 'work'), state: join(root, 'state') };
+  const slow = (binary, args) => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+    const t = setTimeout(() => { writeFileSync(args[args.indexOf('--out') + 1], JSON.stringify({ id: 'a'.repeat(64), nodes: { 'seed-2': {} } })); child.emit('close', 0); }, 300);
+    child.kill = () => { clearTimeout(t); setImmediate(() => child.emit('close', null, 'SIGTERM')); };
+    return child;
+  };
+  const ops = createOps({ settings: () => settings, dirs, key: { path: '/key' }, pool: { knownHosts: () => 'x\n', pins: new Proxy({}, { get: () => ({ type: 'ssh-ed25519', key: 'k' }) }) }, binary: 'dashnet', log: () => {}, spawnImpl: slow });
+  mkdirSync(dirs.state, { recursive: true });
+  writeFileSync(join(dirs.state, 'testnet.json'), JSON.stringify({ hosts: [host('seed-2', 'seed', [['dashd', 'dashpay/dashd'], ['tenderdash', 'dashpay/tenderdash']])] }));
+  const id = '8c8139ad-e92f-40da-943d-1e001efaccb5', actor = { id: 9920871, login: 'ktechmidas' };
+  writeFileSync(join(dirs.requests, `${id}.json`), JSON.stringify({ type: 'create', id, network: 'testnet', action: 'doctor', nodes: ['seed-2'], actor }));
+  const read = () => JSON.parse(readFileSync(join(dirs.ops, `${id}.json`), 'utf8'));
+  ops.tick();
+  for (let i = 0; i < 100 && read().status !== 'preparing'; i++) { ops.tick(); await new Promise((r) => setTimeout(r, 5)); }
+  writeFileSync(join(dirs.requests, `${id}.cancel-a.json`), JSON.stringify({ type: 'cancel', id, network: 'testnet', actor }));
+  ops.tick();
+  for (let i = 0; i < 200 && !['cancelled', 'failed', 'succeeded'].includes(read().status); i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(read().status, 'cancelled');
+});

@@ -7,7 +7,7 @@ const ACTIVE = new Set(['queued', 'preparing', 'confirmed', 'running']);
 export default function Operation({ name, id }) {
   const session = useSession();
   const now = useNow(1000);
-  const { data: op, error, reload } = useResource(`/api/ops/${id}`, (t, d) => t === 'op' && d.id === id);
+  const { data: op, error, reload } = useResource(`/api/ops/${id}`, (t, d) => t === 'op' && (d.id === id || d.id === '*'));
   const [actionError, setActionError] = useState(null);
   const [pending, setPending] = useState(false);
   if (!session.loaded) return null;
@@ -76,6 +76,8 @@ export default function Operation({ name, id }) {
       )}
 
       {review?.kind === 'create-devnet' && <CreateReview op={op} review={review} operator={operator} pending={pending} act={act} expiresIn={expiresIn} />}
+      {review?.kind === 'platform-reset' && <ResetReview op={op} review={review} operator={operator} pending={pending} act={act} />}
+      {op.stages && <Stages op={op} />}
       {review?.kind === 'devnet-services' && <ServicesReview op={op} review={review} operator={operator} pending={pending} act={act} />}
       {review?.kind === 'delete-devnet' && <DeleteReview op={op} review={review} operator={operator} pending={pending} act={act} />}
       {review && !review.kind && (
@@ -123,11 +125,18 @@ function LiveLog({ id, initial, active }) {
   const [text, setText] = useState(initial?.text || '');
   const ref = useRef(null);
   const stick = useRef(true);
+  // Opened once per operation from the first loaded offset; op refreshes do not reconnect it.
+  const offset = useRef(initial?.offset || 0);
   useEffect(() => {
-    const es = new EventSource(`/api/ops/${id}/log?offset=${initial?.offset || 0}`);
-    es.addEventListener('log', (e) => { const d = JSON.parse(e.data); setText((t) => (t + d.text).slice(-400_000)); });
-    return () => es.close();
-  }, [id, initial?.offset]);
+    let es, timer, closed = false;
+    const open = () => {
+      es = new EventSource(`/api/ops/${id}/log?offset=${offset.current}`);
+      es.addEventListener('log', (e) => { const d = JSON.parse(e.data); offset.current = d.offset; setText((t) => (t + d.text).slice(-400_000)); });
+      es.onerror = () => { if (es.readyState === EventSource.CLOSED && !closed) timer = setTimeout(open, 3000); };
+    };
+    open();
+    return () => { closed = true; clearTimeout(timer); es?.close(); };
+  }, [id]);
   useEffect(() => { if (stick.current && ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [text]);
   return (
     <div ref={ref} className="log h-[440px]" onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
@@ -219,5 +228,52 @@ function ServicesReview({ op, review, operator, pending, act }) {
         </div>
       )}
     </>
+  );
+}
+
+function ResetReview({ op, review, operator, pending, act }) {
+  const [typed, setTyped] = useState('');
+  const img = (x) => Object.entries(x || {}).map(([k, v]) => `${k} ${v}`).join(' · ');
+  return (
+    <>
+      <Section title={`Platform wipe/redeploy · ${review.hpmns} HPMNs + ${review.seeds} seed(s)`}>
+        <div className="panel px-3 py-2 text-[12px] space-y-1">
+          <div><span className="text-dim">Core chain </span><span className="mono">{review.coreChain}</span> · <span className="text-dim">Core height </span><span className="mono">{review.coreHeight}</span></div>
+          <div><span className="text-dim">Genesis ChainLock anchor </span><span className="mono lv-warn">{review.anchor.height}</span> <span className="mono text-dim">{review.anchor.hash}</span> <span className="text-dim">(previous {review.previousAnchor.join(', ')})</span></div>
+          <div><span className="text-dim">Images now </span><span className="mono">{review.current.map(img).join(' | ')}</span></div>
+          <div><span className="text-dim">Images after </span><span className="mono">{img(review.next)}</span> · <span className="text-dim">seed Tenderdash now </span><span className="mono">{review.seedImages.join(', ')}</span></div>
+          <div><span className="text-dim">Epoch </span><span className="mono">{review.epoch.current.join(', ')} → {review.epoch.next} s</span> · <span className="text-dim">dashmate </span><span className="mono">{review.dashmate.join(', ')}</span> · <span className="text-dim">config format </span><span className="mono">{review.configFormat.join(', ')}</span> · <span className="text-dim">Tor enabled </span><span className="mono">{review.tor.map(String).join(', ')}</span></div>
+          <div className="pt-1"><span className="text-dim">Canary </span><span className="mono">{`epochTime ${review.canary.epochTime}, env ${review.canary.epochEnv}, Core config unchanged ${review.canary.coreSectionUnchanged}, anchor ${review.canary.anchor}`}</span></div>
+          <div className="text-dim">Renders only: <span className="mono">{review.rendered.join(', ')}</span></div>
+        </div>
+      </Section>
+      {op.status === 'review' && operator && (
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <span className="text-[12px] text-dim">type <span className="mono">{op.network}</span> to confirm</span>
+          <input className="input mono w-56" value={typed} onChange={(e) => setTyped(e.target.value.trim())} />
+          <button className="btn btn-danger" disabled={pending || typed !== op.network} onClick={() => act('confirm', { planId: review.planId })}>Wipe Platform and redeploy</button>
+          <span className="text-dim text-[12px]">Stops at the first stage that fails on any target; backups and logs stay on each host.</span>
+        </div>
+      )}
+    </>
+  );
+}
+
+function Stages({ op }) {
+  const names = Object.keys(op.stages);
+  const hosts = [...new Set(names.flatMap((n) => Object.keys(op.stages[n])))];
+  return (
+    <Section title="Per-target results">
+      <div className="panel scroll-x">
+        <table className="grid"><thead><tr><th>target</th>{names.map((n) => <th key={n}>{n}</th>)}</tr></thead><tbody className="[&_tr]:!cursor-default">
+          {hosts.map((h) => (
+            <tr key={h}><td className="mono">{h}</td>{names.map((n) => {
+              const v = op.stages[n][h];
+              return <td key={n} title={v?.error || (v?.result?.problems || []).join('; ')}>{v ? (v.ok ? <span className="lv-ok">ok</span> : <span className="lv-down">fail</span>) : <span className="text-faint">—</span>}</td>;
+            })}</tr>
+          ))}
+        </tbody></table>
+      </div>
+    </Section>
   );
 }

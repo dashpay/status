@@ -54,11 +54,19 @@ export function gatewayPublicPort(data) {
 function protobuf(buf) {
   const fields = {};
   let i = 0;
-  const varint = () => { let shift = 0n, v = 0n; for (;;) { const b = buf[i++]; v |= BigInt(b & 0x7f) << shift; if (b < 0x80) return v; shift += 7n; } };
+  const varint = () => {
+    let shift = 0n, v = 0n;
+    for (;;) {
+      if (i >= buf.length || shift > 63n) throw new Error('truncated protobuf');
+      const b = buf[i++]; v |= BigInt(b & 0x7f) << shift;
+      if (b < 0x80) return v;
+      shift += 7n;
+    }
+  };
   while (i < buf.length) {
     const key = Number(varint()), n = key >> 3, wire = key & 7;
     if (wire === 0) fields[n] = varint();
-    else if (wire === 2) { const len = Number(varint()); fields[n] = buf.subarray(i, i + len); i += len; }
+    else if (wire === 2) { const len = Number(varint()); if (i + len > buf.length) throw new Error('truncated protobuf'); fields[n] = buf.subarray(i, i + len); i += len; }
     else if (wire === 1) { fields[n] = buf.subarray(i, i + 8); i += 8; }
     else if (wire === 5) { fields[n] = buf.subarray(i, i + 4); i += 4; }
     else throw new Error('protobuf wire type');
@@ -95,7 +103,8 @@ export function createCollector({ pool, stateDir, log = console.log }) {
     if (host.state !== 'running' || !host.publicIp) return { ...result, skipped: host.state || 'no address' };
     if (SKIP_PROBE.has(host.role)) return { ...result, skipped: 'not probed' };
     try {
-      const raw = await pool.exec(host, `sudo -n python3 - ${host.role} ${host.publicIp}`, PROBE, 45_000);
+      // The remote timeout kills a stuck probe so cycles never pile up on a host.
+      const raw = await pool.exec(host, `timeout -k 5 75 sudo -n python3 - ${host.role} ${host.publicIp}`, PROBE, 85_000);
       result.data = JSON.parse(raw.trim().split('\n').pop());
       result.ok = true;
     } catch (e) {

@@ -3,7 +3,7 @@ import { Empty, Err, Link, OpBadge, Section } from '../ui.jsx';
 
 export default function Operations({ network, operator }) {
   const now = useNow(1000);
-  const { data, error } = useResource(`/api/networks/${network.name}/ops`, (t, d) => t === 'op' && d.network === network.name);
+  const { data, error } = useResource(`/api/networks/${network.name}/ops`, (t, d) => t === 'op' && (d.network === network.name || d.id === '*'));
   if (error) return <div className="mt-4"><Err error={error} /></div>;
   if (!data) return <div className="mt-4 text-dim">Loading…</div>;
   return (

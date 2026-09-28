@@ -7,6 +7,7 @@ import Deploy from './pages/Deploy.jsx';
 import Operation from './pages/Operation.jsx';
 import Settings from './pages/Settings.jsx';
 import NewDevnet from './pages/NewDevnet.jsx';
+import ResetPlatform from './pages/ResetPlatform.jsx';
 
 export default function App() {
   const route = useRoute();
@@ -17,6 +18,7 @@ export default function App() {
   const parts = path.split('/').filter(Boolean);
   let page;
   if (parts[0] === 'n' && parts[1] && parts[2] === 'deploy') page = <Deploy name={parts[1]} />;
+  else if (parts[0] === 'n' && parts[1] && parts[2] === 'reset') page = <ResetPlatform name={parts[1]} />;
   else if (parts[0] === 'n' && parts[1] && parts[2] === 'ops' && parts[3]) page = <Operation name={parts[1]} id={parts[3]} />;
   else if (parts[0] === 'n' && parts[1]) page = <Network name={parts[1]} tab={parts[2] || 'hosts'} />;
   else if (parts[0] === 'settings') page = <Settings />;

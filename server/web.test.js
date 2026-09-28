@@ -126,3 +126,12 @@ test('sessions survive a web restart', async () => {
     assert.equal(me.role, 'admin');
   } finally { again.close(); server.close(); }
 });
+
+test('operation ids are validated before touching the filesystem', async () => {
+  const w = await start();
+  try {
+    await w.login();
+    assert.equal((await w.req('/api/ops/..%2Fstate%2Ftestnet')).status, 404);
+    assert.equal((await w.req('/api/ops/not-a-uuid/log')).status, 404);
+  } finally { w.close(); }
+});

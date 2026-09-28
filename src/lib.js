@@ -32,6 +32,9 @@ export async function logout() {
 // ---- live updates --------------------------------------------------------
 const listeners = new Set();
 let source;
+// EventSource gives up for good after a non-200 reconnect (e.g. a 502 while the
+// web container restarts); recreate it with backoff and resync everything.
+let backoff = 1000;
 function ensureStream() {
   if (source) return;
   source = new EventSource('/api/stream');
@@ -39,7 +42,16 @@ function ensureStream() {
     const data = JSON.parse(e.data);
     listeners.forEach((l) => l(type, data));
   });
-  source.onerror = () => {};
+  source.onopen = () => {
+    if (backoff > 1000) listeners.forEach((l) => { l('network', { name: '*' }); l('op', { id: '*' }); });
+    backoff = 1000;
+  };
+  source.onerror = () => {
+    if (source.readyState !== EventSource.CLOSED) return;
+    source = null;
+    setTimeout(ensureStream, backoff);
+    backoff = Math.min(backoff * 2, 30_000);
+  };
 }
 export function useStream(fn) {
   const ref = useRef(fn);
