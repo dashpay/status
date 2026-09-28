@@ -165,7 +165,9 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     if (r.request.action === 'enroll') return { dir, snapshot, manifest };
 
     done = step(r, 'Resolve images and plan (managed-plan)');
-    writeFileSync(join(dir, 'images.json'), JSON.stringify(images), { mode: 0o600 });
+    // dashnet parses references strictly: the registry must be explicit.
+    const explicit = Object.fromEntries(Object.entries(images).map(([c, ref]) => [c, ref.startsWith('docker.io/') ? ref : `docker.io/${ref}`]));
+    writeFileSync(join(dir, 'images.json'), JSON.stringify(explicit), { mode: 0o600 });
     const planArgs = ['managed-plan', '--snapshot', join(dir, 'snapshot.json'), '--operation', r.request.action, '--scope', components.join(','), '--nodes', r.request.nodes.join(','), '--timeout', '5m', '--out', join(dir, 'plan.json')];
     if (r.request.action === 'upgrade') planArgs.push('--images', join(dir, 'images.json'));
     const pc = await dashnet(r, planArgs, { timeoutMs: 6 * 60_000 });
