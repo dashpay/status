@@ -20,7 +20,8 @@ export default function Deploy({ name }) {
   const { data: n, error } = useResource(`/api/networks/${name}`, (t, d) => t === 'network' && (d.name === name || d.name === '*'));
   const params = new URLSearchParams(location.search);
   const [action, setAction] = useState(params.get('action') || 'upgrade');
-  const [selected, setSelected] = useState(new Set((params.get('nodes') || '').split(',').filter(Boolean)));
+  // No explicit choice yet means every healthy node (a link may preselect others).
+  const [picked, setPicked] = useState(params.get('nodes') ? new Set(params.get('nodes').split(',').filter(Boolean)) : null);
   const [components, setComponents] = useState(new Set(params.get('components')?.split(',').filter(Boolean) || []));
   const [images, setImages] = useState({});
   const [window, setWindow] = useState('');
@@ -30,6 +31,9 @@ export default function Deploy({ name }) {
   const [roleFilter, setRoleFilter] = useState('all');
 
   const native = n?.kind === 'dashnet';
+  const healthy = useMemo(() => new Set((n?.hosts || []).filter((h) => OPERABLE.includes(h.role) && !h.duplicate && h.state === 'running' && h.level !== 'unreachable').map((h) => h.name)), [n]);
+  const selected = picked ?? healthy;
+  const setSelected = (next) => setPicked((p) => (typeof next === 'function' ? next(p ?? healthy) : next));
   const hosts = useMemo(() => (n?.hosts || []).filter((h) => OPERABLE.includes(h.role) && !h.duplicate), [n]);
   // dash-network-go upgrades every validator, one at a time; there is no node selection.
   const chosen = native ? hosts.filter((h) => h.role === 'validator') : hosts.filter((h) => selected.has(h.name));

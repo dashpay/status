@@ -72,6 +72,9 @@ try {
   await page.goto(`${origin}/api/auth/callback?state=${state}&code=fixture`);
   await page.goto(origin + '/n/devnet-moutai/deploy');
   await page.getByText('Upgrade images').click();
+  // Every healthy node starts selected; the unreachable one does not.
+  await page.getByText('2 · Nodes · 6 selected').waitFor();
+  await page.getByRole('button', { name: 'clear' }).click();
   await page.getByRole('row', { name: /hp-masternode-1/ }).click();
   await page.getByLabel(/^helper/).check();
   await page.getByRole('button', { name: '4.2.0-beta.5' }).click();
