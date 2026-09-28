@@ -201,7 +201,8 @@ def insight_files():
                          capture_output=True, check=True, timeout=120).stdout.decode()
     patched = web.replace('self.server.listen(self.port);', "self.server.listen(self.port, '127.0.0.1');")
     if patched == web:
-        log('insight: web listener code changed upstream; it will listen on all interfaces (security group limits it to the fleet)')
+        # Host networking: never fall back to listening on every interface.
+        raise RuntimeError('insight: web listener code changed upstream; refusing to start it unpatched')
     write('insight-web.js', patched, 0o644)
     return [f'{ROOT}/insight.json:/insight/dashcore-node.json:ro', f'{ROOT}/insight-web.js:/insight/lib/services/web.js:ro']
 
@@ -209,17 +210,16 @@ def insight_files():
 def insight_blocks(seconds=300):
     # Insight is useful once it follows the chain tip, not just when it answers.
     end, last = time.time() + seconds, None
-    tip = rpc('getblockcount')
     while time.time() < end:
         try:
             with opener.open('http://127.0.0.1:3001/insight-api/status?q=getInfo', timeout=10) as r:
                 last = json.loads(r.read()).get('info', {}).get('blocks')
-            if isinstance(last, int) and last >= tip - 2:
+            if isinstance(last, int) and last >= rpc('getblockcount') - 2:
                 return last
         except Exception:
             pass
         time.sleep(5)
-    return last
+    return f'behind at {last}'
 
 
 # ---- compose --------------------------------------------------------------

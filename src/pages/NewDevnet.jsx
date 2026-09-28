@@ -38,8 +38,9 @@ export default function NewDevnet() {
   async function submit() {
     setBusy(true); setError(null);
     try {
-      const { vpcId, subnetId, securityGroupIds, keyName, ipamPoolId, dnsZoneId, dnsSuffix, ...devnet } = form;
-      void vpcId; void subnetId; void securityGroupIds; void keyName; void ipamPoolId; void dnsZoneId; void dnsSuffix;
+      // Placement and the ACME contact always come from Settings.
+      const { vpcId, subnetId, securityGroupIds, keyName, ipamPoolId, dnsZoneId, dnsSuffix, acmeEmail, ...devnet } = form;
+      void vpcId; void subnetId; void securityGroupIds; void keyName; void ipamPoolId; void dnsZoneId; void dnsSuffix; void acmeEmail;
       const r = await api('/api/devnets', { method: 'POST', body: { name: full, devnet } });
       navigate(`/n/${r.network}/ops/${r.id}`);
     } catch (e) { setError(e); setBusy(false); }

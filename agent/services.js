@@ -82,5 +82,6 @@ export async function deployServices({ r, write, dplan, d, name, pool, r53 }) {
   const bad = ['quorums', 'insight', 'faucet', 'explorerApi', 'explorerFrontend'].filter((k) => !result[k] || result[k] >= 500);
   if (bad.length) throw new Error(`services not answering locally: ${bad.join(', ')}`);
   if (!Number.isInteger(result.quorumList) || result.quorumList < 1) throw new Error(`quorum server has no quorums from Core: ${result.quorumList}`);
+  if (result.insight !== 200 || !Number.isInteger(result.insightBlocks)) throw new Error(`Insight is not following the chain: HTTP ${result.insight}, ${result.insightBlocks}`);
   return { dns: names, walletAddress: result.walletAddress, promoCodes, summary: `faucet balance ${result.faucetBalance}, ${result.quorumList} quorums listed, explorer validators ${result.explorerValidators}, insight at block ${result.insightBlocks}, ${Object.values(names).map((x) => x.host).join(', ')}` };
 }

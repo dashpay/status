@@ -336,16 +336,19 @@ def gateway_tls(address, port):
         with socket.create_connection(('127.0.0.1', port), timeout=5) as raw:
             with ctx.wrap_socket(raw, server_hostname=address) as conn:
                 return conn.getpeercert(binary_form=True)
+    expired = False
     try:
         der, trusted = fetch(ssl.create_default_context()), True
-    except ssl.SSLCertVerificationError:
+    except ssl.SSLCertVerificationError as e:
+        # An expired publicly issued certificate fails verification too.
+        expired = e.verify_code == 10  # X509_V_ERR_CERT_HAS_EXPIRED
         der, trusted = fetch(ssl._create_unverified_context()), False
     text = subprocess.run(['openssl', 'x509', '-inform', 'DER', '-noout', '-issuer', '-enddate'], input=der, capture_output=True, timeout=10).stdout.decode()
     line = next((l for l in text.splitlines() if l.startswith('issuer=')), '')
     field = lambda k: (re.search(r'(?:^|[,/=\s])' + k + r'\s*=\s*([^,/\n]+)', line[7:]) or [None, None])[1]
     end = re.search(r'notAfter=(.+)', text)
     expires = calendar.timegm(time.strptime(end.group(1).strip(), '%b %d %H:%M:%S %Y %Z')) if end else None
-    return dict(trusted=trusted, issuer=' '.join(x.strip() for x in [field('O'), field('CN')] if x) or None,
+    return dict(trusted=trusted, expired=expired, issuer=' '.join(x.strip() for x in [field('O'), field('CN')] if x) or None,
                 expiresAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(expires)) if expires else None)
 
 

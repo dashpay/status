@@ -324,8 +324,15 @@ function Lifecycle({ n, member, admin }) {
   const [open, setOpen] = useState(false);
   const [error, setError] = useState(null);
   const level = { ready: 'ok', creating: 'info', services: 'info', deleting: 'warn', failed: 'down' }[l.status] || 'stopped';
-  const [codes, setCodes] = useState({});
-  useEffect(() => { if (member) api(`/api/networks/${n.name}/faucet-codes`).then((r) => setCodes(r.codes || {}), () => setCodes({})); }, [member, n.name]);
+  // Keyed by network: a slower response for a previous network is ignored.
+  const [faucet, setFaucet] = useState({ network: null, codes: {} });
+  useEffect(() => {
+    if (!member) return undefined;
+    let current = true;
+    api(`/api/networks/${n.name}/faucet-codes`).then((r) => current && setFaucet({ network: n.name, codes: r.codes || {} }), () => current && setFaucet({ network: n.name, codes: {} }));
+    return () => { current = false; };
+  }, [member, n.name]);
+  const codes = faucet.network === n.name ? faucet.codes : {};
   const remove = async () => {
     setError(null);
     try { const r = await api(`/api/networks/${n.name}/ops`, { method: 'POST', body: { action: 'delete-devnet', confirmName: confirm } }); navigate(`/n/${n.name}/ops/${r.id}`); }

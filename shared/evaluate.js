@@ -79,7 +79,7 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
         }
         if (d.dapi && !d.dapi.ok) flag('down', `DAPI getStatus failed${d.dapi.error ? `: ${d.dapi.error}` : ''}`);
         // Short-lived (about 6 day) IP certificates renew with 3 days left.
-        const tlsLeft = d.dapi?.tls?.trusted && d.dapi.tls.expiresAt ? Date.parse(d.dapi.tls.expiresAt) - now : null;
+        const tlsLeft = d.dapi?.tls?.expired ? 0 : d.dapi?.tls?.trusted && d.dapi.tls.expiresAt ? Date.parse(d.dapi.tls.expiresAt) - now : null;
         if (tlsLeft !== null && tlsLeft < 36 * 3600_000) flag(tlsLeft <= 0 ? 'down' : 'warn', tlsLeft <= 0 ? 'gateway certificate expired' : `gateway certificate expires in ${Math.max(1, Math.round(tlsLeft / 3600_000))} h; renewal is not succeeding`);
         if (h.dapiPublic && !h.dapiPublic.ok) flag('warn', `DAPI :443 not reachable from status host (${h.dapiPublic.error})`);
       }

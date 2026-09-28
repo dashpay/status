@@ -120,4 +120,7 @@ test('a trusted gateway certificate close to expiry means renewal is failing', (
   assert.ok(reasons([evo('a', tls(true, soon))]).some((t) => /expires in 10 h/.test(t)));
   assert.ok(!reasons([evo('a', tls(true, later))]).some((t) => /certificate/.test(t)));
   assert.ok(!reasons([evo('a', tls(false, soon))]).some((t) => /certificate/.test(t)), 'self-signed certificates are not judged');
+  const lapsed = tls(false, new Date(Date.now() - 3600_000).toISOString());
+  lapsed.dapi.tls.expired = true;
+  assert.ok(reasons([evo('a', lapsed)]).includes('gateway certificate expired'), 'an expired issued certificate fails verification yet is reported');
 });
