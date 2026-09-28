@@ -67,6 +67,19 @@ export function validateRequest(settings, q, registry = {}) {
     return { lifecycle: true };
   }
   const network = settings.networks.find((n) => n.name === q.network);
+  if (network?.kind === 'dashnet') {
+    // Console devnets: dash-network-go native upgrade (all validators) and doctor.
+    if (!['upgrade', 'doctor'].includes(q.action)) throw new Error('console devnets support upgrade and health gate');
+    if (!registry[q.network] || registry[q.network].status !== 'ready') throw new Error('devnet is not ready');
+    const components = q.components || [], images = q.images || {};
+    if (q.action === 'upgrade') {
+      const allowed = ['drive', 'dapi', 'gateway', 'helper', 'tenderdash'];
+      if (!components.length || components.some((c) => !allowed.includes(c)) || new Set(components).size !== components.length) throw new Error(`select from ${allowed.join(', ')}; Core upgrades are not supported by dash-network-go yet`);
+      for (const c of components) if (!IMAGE(c).test(images[c] || '')) throw new Error(`${c}: image must be ${COMPONENT_REPOS[c]}:<tag> or @sha256:<digest>`);
+      if (Object.keys(images).some((c) => !components.includes(c))) throw new Error('image for an unselected component');
+    } else if (components.length) throw new Error('components apply to upgrade only');
+    return { network, native: true, components, images };
+  }
   if (!network?.deployable) throw new Error('network is not deployable');
   if (!ACTIONS.has(q.action)) throw new Error('unsupported action');
   if (!Array.isArray(q.nodes) || !q.nodes.length || q.nodes.length > 200 || new Set(q.nodes).size !== q.nodes.length || !q.nodes.every((n) => /^[a-z][a-z0-9-]{0,62}$/.test(n))) throw new Error('select one or more nodes');
@@ -283,6 +296,10 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
         const impl = { 'create-devnet': ['prepareCreate', 'executeCreate'], 'delete-devnet': ['prepareDelete', 'executeDelete'], 'devnet-services': ['prepareServices', 'executeServices'] }[r.request.action];
         if (r.status === 'queued') { await devnets[impl[0]](r); r.status = 'review'; }
         else if (r.status === 'confirmed') { await devnets[impl[1]](r); r.status = 'succeeded'; r.finishedAt = new Date().toISOString(); }
+      } else if (getSettings().networks.find((n) => n.name === r.network)?.kind === 'dashnet') {
+        if (r.request.action === 'doctor') { await devnets.doctor(r); r.status = r.result.healthy ? 'succeeded' : 'failed'; }
+        else if (r.status === 'queued') { await devnets.prepareUpgrade(r); r.status = 'review'; }
+        else if (r.status === 'confirmed') { await devnets.executeUpgrade(r); r.status = 'succeeded'; r.finishedAt = new Date().toISOString(); }
       } else if (r.status === 'queued') {
         const { dir } = await prepare(r);
         if (r.request.action === 'doctor') { await doctor(r, dir); r.status = r.result.healthy ? 'succeeded' : 'failed'; }

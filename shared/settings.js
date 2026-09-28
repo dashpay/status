@@ -189,7 +189,7 @@ export function devnetEntry(name, reg) {
   const dns = reg.dns || {};
   return {
     name, displayName: reg.displayName || name, tag: name, chainType: 'devnet', coreNetwork: reg.coreNetwork || `devnet-${name.replace(/^devnet-/, '')}-g1`,
-    p2pPort: 20001, public: reg.public !== false, deployable: false, showBalances: true, kind: 'dashnet',
+    p2pPort: 20001, public: reg.public !== false, deployable: reg.status === 'ready', showBalances: true, kind: 'dashnet',
     description: '',
     endpoints: [
       dns.quorums && { label: 'Quorums', url: `https://${dns.quorums.host}/health` },

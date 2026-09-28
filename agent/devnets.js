@@ -208,6 +208,71 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     pool.savePins();
   }
 
+  // ---- native image upgrades (dash-network-go upgrade-plan / upgrade) -------
+  const currentYaml = (dir) => (existsSync(join(dir, 'network-current.yaml')) ? join(dir, 'network-current.yaml') : join(dir, 'network.yaml'));
+
+  async function prepareUpgrade(r) {
+    const name = r.network, dir = workDir(name);
+    if (!existsSync(join(dir, 'deployment.json'))) throw new Error('devnet is not deployed yet');
+    const { components, images } = r.request;
+    const ts = stamp();
+    r.status = 'preparing'; r.artifacts = { candidate: `candidate-${ts}.yaml`, lock: `candidate-${ts}.lock.json`, plan: `upgrade-${ts}.json` }; save(r);
+    let done = step(r, 'Candidate network (only the selected images change)');
+    let yaml = readFileSync(currentYaml(dir), 'utf8');
+    for (const c of components) {
+      const ref = images[c].startsWith('docker.io/') ? images[c] : `docker.io/${images[c]}`;
+      const re = new RegExp(`^(  ${c}: ).*$`, 'm');
+      if (!re.test(yaml)) throw new Error(`network definition has no ${c} image`);
+      yaml = yaml.replace(re, `$1${ref}`);
+    }
+    writeFileSync(join(dir, r.artifacts.candidate), yaml, { mode: 0o600 });
+    done('ok', components.map((c) => `${c} ${images[c]}`).join(', '));
+    done = step(r, 'Resolve candidate images (dashnet resolve)');
+    await run(r, 'resolve', ['resolve', '--network', join(dir, r.artifacts.candidate), '--out', join(dir, r.artifacts.lock)], { timeoutMs: 5 * 60_000 });
+    done('ok');
+    const scope = components.length === 1 && components[0] === 'tenderdash' ? 'tenderdash' : 'platform';
+    done = step(r, `Upgrade plan, scope ${scope} (dashnet upgrade-plan)`);
+    await run(r, 'upgrade-plan', ['upgrade-plan', '--deployment-plan', join(dir, 'deployment.json'), '--network', join(dir, r.artifacts.candidate), '--lock', join(dir, r.artifacts.lock), '--scope', scope, '--out', join(dir, r.artifacts.plan)], { timeoutMs: 5 * 60_000 });
+    const plan = readJSON(join(dir, r.artifacts.plan));
+    const changes = [];
+    for (const [node, to] of Object.entries(plan.to || {})) for (const [component, pin] of Object.entries(to)) {
+      const from = plan.from?.[node]?.[component];
+      if (from !== pin) changes.push({ node, component, from, to: pin, requested: images[component] || null, dependency: !components.includes(component) });
+    }
+    done('ok', `${changes.length} container change(s)`);
+    r.review = { planId: plan.id, operation: 'upgrade', scope, changes, targets: [...new Set(changes.map((c) => c.node))], preparedAt: new Date().toISOString() };
+  }
+
+  async function executeUpgrade(r) {
+    const name = r.network, dir = workDir(name);
+    const plan = readJSON(join(dir, r.artifacts.plan));
+    if (!plan || plan.id !== r.review?.planId) throw new Error('reviewed upgrade plan missing');
+    r.status = 'running'; r.progress = { phase: 'upgrading', completed: [], current: null }; save(r);
+    const done = step(r, `Upgrade validators one at a time (dashnet upgrade, scope ${plan.scope})`);
+    await run(r, 'upgrade', ['upgrade', '--plan', join(dir, r.artifacts.plan), '--confirm', plan.id, ...access(dir), '--observation-window', '90s', '--timeout', '110m', '--out', join(dir, `upgrade-result.${stamp()}.json`)], {
+      timeoutMs: 111 * 60_000,
+      onLine: (line) => {
+        const m = /(validators-\d+)/.exec(line);
+        if (m && /appl|withdraw|replac|upgrad/i.test(line)) { r.progress.current = m[1]; if (/complete|done|verified|upgraded/i.test(line) && !r.progress.completed.includes(m[1])) r.progress.completed.push(m[1]); save(r); }
+      },
+    });
+    writeFileSync(join(dir, 'network-current.yaml'), readFileSync(join(dir, r.artifacts.candidate)), { mode: 0o600 });
+    done('ok');
+  }
+
+  async function doctor(r) {
+    const name = r.network, dir = workDir(name);
+    r.status = 'running'; save(r);
+    const done = step(r, 'Independent health gate (dashnet doctor)');
+    const out = join(dir, `health.${stamp()}.json`);
+    const code = await run(r, 'doctor', ['doctor', '--plan', join(dir, 'deployment.json'), ...access(dir), '--timeout', '6m', '--observation-window', '90s', '--out', out], { allowFail: true, timeoutMs: 7 * 60_000 });
+    const h = readJSON(out) || {};
+    const nodes = {};
+    for (const [n, v] of Object.entries(h.nodes || h.targets || {})) nodes[n] = { healthy: !!v.healthy, status: v.status || (v.healthy ? 'healthy' : 'unhealthy'), problems: v.problems || [] };
+    r.result = { healthy: code === 0, nodes };
+    done(code === 0 ? 'ok' : 'failed', code === 0 ? 'all targets healthy' : 'see node results and log');
+  }
+
   // ---- services only (re-install / change service versions) ---------------
   async function prepareServices(r) {
     const name = r.network, dir = workDir(name);
@@ -289,7 +354,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     log(`devnet ${name} deleted by ${r.actor.login}`);
   }
 
-  return { prepareCreate, executeCreate, prepareServices, executeServices, prepareDelete, executeDelete, registry };
+  return { prepareCreate, executeCreate, prepareServices, executeServices, prepareUpgrade, executeUpgrade, doctor, prepareDelete, executeDelete, registry };
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
