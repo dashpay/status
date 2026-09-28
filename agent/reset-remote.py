@@ -260,6 +260,15 @@ def _render(base, apply_back):
     need(checks['coreSectionUnchanged'], 'Core configuration changed during render')
     need(str(checks['epochTime']) == str(Q['epochSeconds']) and str(checks['epochEnv']) == str(Q['epochSeconds']), f"epoch config/env mismatch: {checks['epochTime']} / {checks['epochEnv']}")
     need(int(checks['anchor']) == int(Q['anchorHeight']), 'anchor not applied')
+    # Node identity and chain identity are preserved: the rendered node key must
+    # equal the live one and genesis may differ only in the anchor.
+    td = Path(CFG) / 'platform' / 'drive' / 'tenderdash'
+    live_key, new_key = [json.loads((root / td / 'node_key.json').read_text()) for root in (DM_HOME, home)]
+    need(live_key == new_key, 'rendered Tenderdash node key differs from the live node key')
+    live_g, new_g = [json.loads((root / td / 'genesis.json').read_text()) for root in (DM_HOME, home)]
+    changed = sorted(k for k in set(live_g) | set(new_g) if k != 'initial_core_chain_locked_height' and live_g.get(k) != new_g.get(k))
+    need(not changed, f'rendered genesis changes more than the anchor: {changed}')
+    checks.update(nodeKeyUnchanged=True, genesisChainId=new_g.get('chain_id'), genesisOnlyAnchorChanged=True)
     rendered = []
     for tpl in sorted(Path('/usr/lib/dashmate/templates/platform').rglob('*.dot')):
         rel = Path('platform') / tpl.relative_to('/usr/lib/dashmate/templates/platform').with_suffix('')

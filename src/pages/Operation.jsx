@@ -243,7 +243,7 @@ function ResetReview({ op, review, operator, pending, act }) {
           <div><span className="text-dim">Images now </span><span className="mono">{review.current.map(img).join(' | ')}</span></div>
           <div><span className="text-dim">Images after </span><span className="mono">{img(review.next)}</span> · <span className="text-dim">seed Tenderdash now </span><span className="mono">{review.seedImages.join(', ')}</span></div>
           <div><span className="text-dim">Epoch </span><span className="mono">{review.epoch.current.join(', ')} → {review.epoch.next} s</span> · <span className="text-dim">dashmate </span><span className="mono">{review.dashmate.join(', ')}</span> · <span className="text-dim">config format </span><span className="mono">{review.configFormat.join(', ')}</span> · <span className="text-dim">Tor enabled </span><span className="mono">{review.tor.map(String).join(', ')}</span></div>
-          <div className="pt-1"><span className="text-dim">Canary </span><span className="mono">{`epochTime ${review.canary.epochTime}, env ${review.canary.epochEnv}, Core config unchanged ${review.canary.coreSectionUnchanged}, anchor ${review.canary.anchor}`}</span></div>
+          <div className="pt-1"><span className="text-dim">Canary </span><span className="mono">{`epochTime ${review.canary.epochTime}, env ${review.canary.epochEnv}, Core config unchanged ${review.canary.coreSectionUnchanged}, anchor ${review.canary.anchor}${review.canary.nodeKeyUnchanged ? `, node key preserved, genesis ${review.canary.genesisChainId} (only anchor changes)` : ''}`}</span></div>
           <div className="text-dim">Renders only: <span className="mono">{review.rendered.join(', ')}</span></div>
         </div>
       </Section>
