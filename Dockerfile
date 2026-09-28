@@ -21,6 +21,7 @@ LABEL org.opencontainers.image.source="https://github.com/dashpay/status" \
 WORKDIR /app
 ENV NODE_ENV=production PORT=3001 BIND_ADDRESS=0.0.0.0 STATUS_REVISION=$RELEASE_REVISION
 COPY --from=dashnet /dashnet /usr/local/bin/dashnet
+COPY --from=dashnet /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /app/package.json /app/package-lock.json ./
 COPY --from=builder /app/node_modules ./node_modules/
 COPY --from=builder /app/dist ./dist/
