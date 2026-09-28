@@ -72,7 +72,7 @@ export default function Operation({ name, id }) {
             <span>phase <span className="mono">{op.progress.phase}</span></span>
             {op.progress.current && <span>withdrawn <span className="mono lv-warn">{op.progress.current}</span></span>}
             <span>applied <span className="mono">{op.progress.completed.length}/{review?.targets?.length ?? '?'}</span> {op.progress.completed.length ? <span className="text-dim mono">({op.progress.completed.join(', ')})</span> : null}</span>
-            {op.progress.waiting && <span className="lv-warn mono">health gate waiting: {op.progress.waiting}</span>}
+            {op.progress.waiting && <span className="lv-warn mono">waiting for fleet health: {op.progress.waiting}</span>}
           </div>
         </Section>
       )}
@@ -102,14 +102,14 @@ export default function Operation({ name, id }) {
           {op.status === 'review' && operator && (
             <div className="mt-3 flex items-center gap-3">
               <button className="btn btn-primary" disabled={pending || !review.changes.length} onClick={() => act('confirm', { planId: review.planId })}>Confirm and {q.action === 'upgrade' ? 'upgrade' : 'restore'} {review.targets.length} node(s)</button>
-              <span className="text-dim text-[12px]">Executes exactly this plan. One host at a time; stops at the first failed health gate. No automatic rollback.</span>
+              <span className="text-dim text-[12px]">Executes exactly this plan. One host at a time; stops at the first failed health check. No automatic rollback.</span>
             </div>
           )}
         </Section>
       )}
 
       {op.result?.nodes && (
-        <Section title={`Health gate · ${op.result.healthy ? 'healthy' : 'problems found'}`}>
+        <Section title={`Health check · ${op.result.healthy ? 'healthy' : 'problems found'}`}>
           <div className="panel scroll-x"><table className="grid"><tbody className="[&_tr]:!cursor-default">
             {Object.entries(op.result.nodes).map(([node, r]) => <tr key={node}><td className="mono w-48">{node}</td><td className={r?.healthy ? 'lv-ok' : 'lv-down'}>{r ? r.status || (r.healthy ? 'healthy' : 'unhealthy') : 'no result'}</td><td className="mono text-dim !whitespace-normal">{r?.problems?.join('; ')}</td></tr>)}
           </tbody></table></div>
@@ -169,7 +169,7 @@ function CreateReview({ op, review, operator, pending, act, expiresIn }) {
             <div><span className="text-dim">AMIs (Ubuntu 24.04) </span><span className="mono">{Object.entries(review.amis).map(([a, id]) => `${a} ${id}`).join(' · ')}</span></div>
             <div className="pt-1 text-dim">Services on the wallet host</div>
             {Object.entries(review.dns).map(([k, v]) => <div key={k} className="mono">{k}: https://{v.host}</div>)}
-            <div className="text-dim">quorum server <span className="mono text-fg">{review.services.quorumServer}</span> · explorer <span className="mono text-fg">{review.services.explorerVersion}</span> · faucet <span className="mono text-fg">{review.services.faucetRef.slice(0, 12)}</span>, {review.services.faucetAmount} per request, {review.services.faucetFunding} funded</div>
+            <div className="text-dim">insight <span className="mono text-fg">{review.services.insightImage}</span> · quorum server <span className="mono text-fg">{review.services.quorumServer}</span> · explorer <span className="mono text-fg">{review.services.explorerVersion}</span> · faucet <span className="mono text-fg">{review.services.faucetRef.slice(0, 12)}</span>, {review.services.faucetAmount} per request, {review.services.faucetFunding} funded</div>
           </div>
         </div>
         <div className="panel scroll-x mt-3">
@@ -181,7 +181,7 @@ function CreateReview({ op, review, operator, pending, act, expiresIn }) {
       {op.status === 'review' && operator && (
         <div className="mt-3 flex items-center gap-3">
           <button className="btn btn-primary" disabled={pending} onClick={() => act('confirm', { planId: review.planId })}>Create {op.network} (starts billable EC2)</button>
-          <span className="text-dim text-[12px]">Runs provision → bootstrap → deploy → services → health gate (typically 60–90 min). Each stage resumes if interrupted.</span>
+          <span className="text-dim text-[12px]">Runs provision → bootstrap → deploy → services → health check (typically 60–90 min). Each stage resumes if interrupted.</span>
         </div>
       )}
     </>
@@ -212,7 +212,7 @@ function DeleteReview({ op, review, operator, pending, act }) {
 
 function ServicesReview({ op, review, operator, pending, act }) {
   const to = review.to;
-  const keys = ['quorumServer', 'explorerVersion', 'faucetRef', 'faucetAmount', 'faucetRateLimit', 'faucetFunding'];
+  const keys = ['quorumServer', 'insightImage', 'explorerVersion', 'faucetRef', 'faucetAmount', 'faucetRateLimit', 'faucetFunding'];
   return (
     <>
       <Section title={`Services on ${op.network}`}>

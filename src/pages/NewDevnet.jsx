@@ -58,7 +58,7 @@ export default function NewDevnet() {
             <div className="flex items-center"><span className="mono text-dim pr-1">devnet-</span><input className="input mono flex-1" value={name} autoFocus onChange={(e) => setName(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))} placeholder="bonsai" /></div></label>
           <label className="text-[12px]"><div className="text-dim mb-1">Display name</div><input className="input w-full" value={form.displayName || ''} placeholder={name ? name.replace(/(^|-)([a-z])/g, (_, a, b) => (a ? ' ' : '') + b.toUpperCase()) : ''} onChange={(e) => set((f) => { f.displayName = e.target.value; })} /></label>
           <div className="text-[12px] text-dim self-end">Core chain <span className="mono text-fg">devnet-{name || '…'}-g1</span><br />Platform <span className="mono text-fg">dash-devnet-{name || '…'}-g1</span><br />
-            Services <span className="mono text-fg">{['quorums', 'explorer', 'faucet'].map((s) => `${s}.${name || '…'}.${form.dnsSuffix}`).join(', ')}</span></div>
+            Services <span className="mono text-fg">{['insight', 'quorums', 'explorer', 'faucet'].map((s) => `${s}.${name || '…'}.${form.dnsSuffix}`).join(', ')}</span></div>
         </div>
       </Section>
 
@@ -88,6 +88,7 @@ export default function NewDevnet() {
       <Section title="4 · Services (wallet host)">
         <div className="panel p-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Text label="Quorum list server image" value={form.services.quorumServer} onChange={(v) => set((f) => { f.services.quorumServer = v; })} />
+          <Text label="Insight (Core explorer) image" value={form.services.insightImage} onChange={(v) => set((f) => { f.services.insightImage = v; })} />
           <Text label="Platform Explorer release" value={form.services.explorerVersion} onChange={(v) => set((f) => { f.services.explorerVersion = v; })} />
           <Text label="dash-faucet commit" value={form.services.faucetRef} onChange={(v) => set((f) => { f.services.faucetRef = v; })} />
           <Num label="Faucet payout (DASH)" value={form.services.faucetAmount} onChange={(v) => set((f) => { f.services.faucetAmount = v; })} />

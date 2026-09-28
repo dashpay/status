@@ -19,7 +19,7 @@ import { deployServices, serviceNames, shortName } from './services.js';
 const NAME = /^devnet-[a-z][a-z0-9-]{1,30}$/;
 const PRICES = { 't4g.small': 0.0168, 't4g.medium': 0.0336, 't4g.large': 0.0672, 't4g.xlarge': 0.1344, 't3.medium': 0.0416, 't3.large': 0.0832, 't3.xlarge': 0.1664, 'm7g.medium': 0.0408, 'm7g.large': 0.0816, 'm6a.large': 0.0864, 'm7i.large': 0.1008, 'c7g.large': 0.0725 };
 const GP3_GIB_MONTH = 0.08;
-const SERVICE_KEYS = ['quorumServer', 'explorerVersion', 'faucetRef', 'faucetAmount', 'faucetRateLimit', 'faucetFunding', 'epochSeconds'];
+const SERVICE_KEYS = ['quorumServer', 'insightImage', 'explorerVersion', 'faucetRef', 'faucetAmount', 'faucetRateLimit', 'faucetFunding', 'epochSeconds'];
 const TEXT = /^[A-Za-z0-9 .,_()-]+$/;
 
 export { shortName };
@@ -224,7 +224,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       done('ok', services.summary);
     });
 
-    done = step(r, 'Independent health gate (dashnet doctor)');
+    done = step(r, 'Health check (dashnet doctor)');
     const code = await run(r, 'doctor', ['doctor', '--plan', join(dir, 'deployment.json'), ...access(dir), '--timeout', '5m', '--observation-window', '90s', '--out', join(dir, `health.${stamp()}.json`)], { allowFail: true, timeoutMs: 6 * 60_000 });
     done(code === 0 ? 'ok' : 'warn', code === 0 ? 'all targets healthy' : 'see log');
     register(name, { status: 'ready', readyAt: new Date().toISOString() });
@@ -331,7 +331,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
   async function doctor(r) {
     const name = r.network, dir = workDir(name);
     r.status = 'running'; save(r);
-    const done = step(r, 'Independent health gate (dashnet doctor)');
+    const done = step(r, 'Health check (dashnet doctor)');
     const out = join(dir, `health.${stamp()}.json`);
     const code = await run(r, 'doctor', ['doctor', '--plan', join(dir, 'deployment.json'), ...access(dir), '--timeout', '6m', '--observation-window', '90s', '--out', out], { allowFail: true, timeoutMs: 7 * 60_000 });
     const h = readJSON(out) || {};

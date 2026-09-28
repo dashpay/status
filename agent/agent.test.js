@@ -54,7 +54,8 @@ test('requests are validated against the network and component repositories', ()
   const id = '6c8139ad-e92f-40da-943d-1e001efaccb5';
   assert.ok(validateRequest(settings, { id, network: 'testnet', action: 'upgrade', nodes: ['seed-2'], components: ['tenderdash'], images: { tenderdash: 'dashpay/tenderdash:1.8.2' } }));
   assert.throws(() => validateRequest(settings, { id, network: 'testnet', action: 'upgrade', nodes: ['seed-2'], components: ['tenderdash'], images: { tenderdash: 'evil/tenderdash:1' } }), /tenderdash: image must be/);
-  assert.throws(() => validateRequest(settings, { id, network: 'mainnet', action: 'doctor', nodes: ['seed-1'] }), /not deployable/);
+  const withMainnet = { ...settings, networks: [...settings.networks, { name: 'mainnet', displayName: 'Mainnet', tag: 'mainnet-support', chainType: 'mainnet', coreNetwork: 'main', p2pPort: 9999, public: true, deployable: false, showBalances: false, endpoints: [], observationWindow: '4m', operationTimeout: '110m' }] };
+  assert.throws(() => validateRequest(withMainnet, { id, network: 'mainnet', action: 'doctor', nodes: ['seed-1'] }), /not deployable/);
   assert.throws(() => validateRequest(settings, { id, network: 'testnet', action: 'deploy', nodes: ['seed-1'], components: ['core'], images: { core: 'dashpay/dashd:23' } }), /only upgrades/);
   assert.throws(() => validateRequest(settings, { id, network: 'testnet', action: 'rm', nodes: ['x'] }), /unsupported/);
 });

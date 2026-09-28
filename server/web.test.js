@@ -39,7 +39,7 @@ test('public board needs no session and hides operator fields', async () => {
   const w = await start();
   try {
     const overview = await (await w.req('/api/overview')).json();
-    assert.deepEqual(overview.networks.map((n) => n.name), ['testnet', 'devnet-moutai', 'mainnet']);
+    assert.deepEqual(overview.networks.map((n) => n.name), ['testnet', 'devnet-moutai']);
     const n = await (await w.req('/api/networks/testnet')).json();
     assert.equal(n.hosts[0].name, 'seed-2');
     assert.equal(n.hosts[0].instanceId, undefined);

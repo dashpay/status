@@ -36,6 +36,7 @@ export const DEFAULT_SETTINGS = {
     },
     services: {
       quorumServer: 'dashpay/quorum-list-server:0.7.0',
+      insightImage: 'dashpay/insight:4.0.9',
       explorerVersion: '2.5.3',
       faucetRef: 'b927e6058845ebf3c0722e56eb0e89642e98c28b',
       faucetAmount: 10, faucetRateLimit: 20, faucetFunding: 5000, epochSeconds: 3600,
@@ -64,14 +65,8 @@ export const DEFAULT_SETTINGS = {
       ],
       observationWindow: '4m', operationTimeout: '110m',
     },
-    {
-      name: 'mainnet', displayName: 'Mainnet', tag: 'mainnet-support', chainType: 'mainnet', coreNetwork: 'main', p2pPort: 9999,
-      public: true, deployable: false, showBalances: false,
-      endpoints: [
-        { label: 'Quorums', url: 'https://quorums.mainnet.networks.dash.org/health' },
-      ],
-      observationWindow: '4m', operationTimeout: '110m',
-    },
+    // Mainnet (EC2 tag mainnet-support) is off the board for now; an admin can
+    // add it back in Settings as a monitor-only (non-deployable) network.
   ],
 };
 
@@ -151,6 +146,7 @@ export function validateDevnetDefaults(d) {
   for (const c of COMPONENTS) req(IMAGE_TAG.test(d.images?.[c] || '') && d.images[c].replace(/^docker\.io\//, '').split(/[@:]/)[0] === COMPONENT_REPOS[c], `images.${c} must be ${COMPONENT_REPOS[c]}:<tag>`);
   const sv = d.services || {};
   req(IMAGE_TAG.test(sv.quorumServer || '') && /^(docker\.io\/)?dashpay\/quorum-list-server[:@]/.test(sv.quorumServer), 'services.quorumServer must be dashpay/quorum-list-server:<tag>');
+  req(IMAGE_TAG.test(sv.insightImage || '') && /^(docker\.io\/)?dashpay\/insight[:@]/.test(sv.insightImage), 'services.insightImage must be dashpay/insight:<tag>');
   req(/^\d+\.\d+\.\d+$|^nightly$/.test(sv.explorerVersion || ''), 'services.explorerVersion like 2.5.3');
   req(/^[0-9a-f]{40}$/.test(sv.faucetRef || ''), 'services.faucetRef must be a full dash-faucet commit');
   req(typeof sv.faucetAmount === 'number' && sv.faucetAmount > 0 && sv.faucetAmount <= 1000, 'services.faucetAmount 0..1000');
@@ -195,6 +191,7 @@ export function devnetEntry(name, reg) {
     p2pPort: 20001, public: reg.public !== false, deployable: reg.status === 'ready', showBalances: true, kind: 'dashnet',
     description: '',
     endpoints: [
+      dns.insight && { label: 'Insight', url: `https://${dns.insight.host}/insight-api/status` },
       dns.quorums && { label: 'Quorums', url: `https://${dns.quorums.host}/health` },
       dns.explorer && { label: 'Explorer', url: `https://${dns.explorer.host}/` },
       dns.faucet && { label: 'Faucet', url: `https://${dns.faucet.host}/api/status` },

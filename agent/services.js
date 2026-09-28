@@ -11,6 +11,7 @@ const RELAY_PORT = 26667;
 export function serviceNames(name, d) {
   const short = shortName(name), suffix = d.dnsSuffix || 'networks.dash.org';
   return {
+    insight: { host: `insight.${short}.${suffix}`, url: `https://insight.${short}.${suffix}/insight/` },
     quorums: { host: `quorums.${short}.${suffix}`, url: `https://quorums.${short}.${suffix}/quorums` },
     explorer: { host: `explorer.${short}.${suffix}`, url: `https://explorer.${short}.${suffix}/` },
     faucet: { host: `faucet.${short}.${suffix}`, url: `https://faucet.${short}.${suffix}/` },
@@ -29,7 +30,7 @@ export function serviceEndpoints(name, d) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // dashnet devnets use fixed default ports (internal/node DefaultPorts).
-const PORTS = { coreRPC: 20002, platformRPC: 26657, gateway: 1443 };
+const PORTS = { coreRPC: 20002, coreZMQ: 29998, platformRPC: 26657, gateway: 1443 };
 
 export async function deployServices({ r, write, dplan, d, name, pool, r53 }) {
   const ports = { ...PORTS, ...(dplan.ports || {}) };
@@ -58,8 +59,9 @@ export async function deployServices({ r, write, dplan, d, name, pool, r53 }) {
 
   const cfg = {
     short: shortName(name), displayName: d.displayName, auxiliary: `${name}/${wallet.name}`, coreNetwork: dplan.coreNetwork, platformChainId: dplan.platformChainId,
-    coreRpcPort: ports.coreRPC, hosts: Object.fromEntries(Object.entries(names).map(([k, v]) => [k, v.host])),
+    coreRpcPort: ports.coreRPC, coreZmqPort: ports.coreZMQ, hosts: Object.fromEntries(Object.entries(names).map(([k, v]) => [k, v.host])),
     quorumServerImage: d.services.quorumServer.startsWith('docker.io/') ? d.services.quorumServer : `docker.io/${d.services.quorumServer}`,
+    insightImage: (d.services.insightImage || 'dashpay/insight:4.0.9').replace(/^(?!docker\.io\/)/, 'docker.io/'),
     explorerVersion: d.services.explorerVersion, faucetRef: d.services.faucetRef, faucetAmount: d.services.faucetAmount,
     faucetRateLimit: d.services.faucetRateLimit, faucetFunding: d.services.faucetFunding, epochSeconds: d.services.epochSeconds,
     tenderdashUrl: `http://${relay.peerAddress}:${RELAY_PORT}`,
@@ -71,8 +73,8 @@ export async function deployServices({ r, write, dplan, d, name, pool, r53 }) {
   const out = await pool.exec(host(wallet), `set -o pipefail; { sudo python3 /opt/devnet-services/services.py ${arg} 2>&1 1>&3 | tee /tmp/devnet-services.log >&2; } 3>&1`, null, 100 * 60_000, (line) => write(r.id, `  ${line}`));
   const result = JSON.parse(out.trim().split('\n').pop());
   write(r.id, `services: ${JSON.stringify(result)}`);
-  const bad = ['quorums', 'faucet', 'explorerApi', 'explorerFrontend'].filter((k) => !result[k] || result[k] >= 500);
+  const bad = ['quorums', 'insight', 'faucet', 'explorerApi', 'explorerFrontend'].filter((k) => !result[k] || result[k] >= 500);
   if (bad.length) throw new Error(`services not answering locally: ${bad.join(', ')}`);
   if (!Number.isInteger(result.quorumList) || result.quorumList < 1) throw new Error(`quorum server has no quorums from Core: ${result.quorumList}`);
-  return { dns: names, walletAddress: result.walletAddress, summary: `faucet balance ${result.faucetBalance}, ${result.quorumList} quorums listed, explorer validators ${result.explorerValidators}, ${Object.values(names).map((x) => x.host).join(', ')}` };
+  return { dns: names, walletAddress: result.walletAddress, summary: `faucet balance ${result.faucetBalance}, ${result.quorumList} quorums listed, explorer validators ${result.explorerValidators}, insight at block ${result.insightBlocks}, ${Object.values(names).map((x) => x.host).join(', ')}` };
 }

@@ -23,6 +23,7 @@ ROOT.mkdir(mode=0o700, exist_ok=True)
 log = lambda m: print(m, file=sys.stderr, flush=True)
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 RPC_PORT = int(cfg['coreRpcPort'])
+ZMQ_PORT = int(cfg.get('coreZmqPort', 29998))
 PASSWORD = json.loads(Path('/var/lib/dashnet/secrets.json').read_text())['rpcPassword']
 AUX = {'dashnet.auxiliary': cfg.get('auxiliary', '')}
 
@@ -171,6 +172,43 @@ def patch_explorer_api(image):
     return mounts
 
 
+def insight_files():
+    """dashcore-node config for the wallet host's Core (which dash-network-go runs
+    with txindex/addressindex/spentindex/timestampindex and loopback ZMQ), plus a
+    patch so the web service listens on loopback only, behind Caddy."""
+    image = cfg['insightImage']
+    sh('docker', 'pull', '--quiet', image, timeout=1200)
+    write('insight.json', json.dumps(dict(
+        network='testnet', port=3001,
+        services=['dashd', '@dashevo/insight-api', '@dashevo/insight-ui', 'web'],
+        servicesConfig={'dashd': {'connect': [dict(rpchost='127.0.0.1', rpcport=RPC_PORT, rpcuser='dashnet', rpcpassword=PASSWORD,
+                                                   zmqpubrawtx=f'tcp://127.0.0.1:{ZMQ_PORT}', zmqpubhashblock=f'tcp://127.0.0.1:{ZMQ_PORT}')]},
+                        '@dashevo/insight-api': {'disableRateLimiter': True}}), indent=1))
+    web = subprocess.run(['docker', 'run', '--rm', '--label', f"dashnet.auxiliary={AUX['dashnet.auxiliary']}", '--entrypoint', 'cat', image, '/insight/lib/services/web.js'],
+                         capture_output=True, check=True, timeout=120).stdout.decode()
+    patched = web.replace('self.server.listen(self.port);', "self.server.listen(self.port, '127.0.0.1');")
+    if patched == web:
+        log('insight: web listener code changed upstream; it will listen on all interfaces (security group limits it to the fleet)')
+    write('insight-web.js', patched, 0o644)
+    return [f'{ROOT}/insight.json:/insight/dashcore-node.json:ro', f'{ROOT}/insight-web.js:/insight/lib/services/web.js:ro']
+
+
+def insight_blocks(seconds=300):
+    # Insight is useful once it follows the chain tip, not just when it answers.
+    end, last = time.time() + seconds, None
+    tip = rpc('getblockcount')
+    while time.time() < end:
+        try:
+            with opener.open('http://127.0.0.1:3001/insight-api/status?q=getInfo', timeout=10) as r:
+                last = json.loads(r.read()).get('info', {}).get('blocks')
+            if isinstance(last, int) and last >= tip - 2:
+                return last
+        except Exception:
+            pass
+        time.sleep(5)
+    return last
+
+
 # ---- compose --------------------------------------------------------------
 def compose(faucet_image, frontend_image):
     pg = secret('postgres')
@@ -197,6 +235,7 @@ def compose(faucet_image, frontend_image):
     h = cfg['hosts']
     write('Caddyfile', '\n'.join([
         '{', '  email infrastructure@dash.org', '}',
+        f"{h['insight']} {{", '  redir / /insight/', '  reverse_proxy 127.0.0.1:3001', '}',
         f"{h['quorums']} {{", '  reverse_proxy 127.0.0.1:8080', '}',
         f"{h['explorer']} {{", '  handle_path /backend/* {', '    reverse_proxy 127.0.0.1:3005', '  }', '  reverse_proxy 127.0.0.1:3000', '}',
         f"{h['faucet']} {{", '  reverse_proxy 127.0.0.1:8000', '}', '']), 0o644)
@@ -205,6 +244,7 @@ def compose(faucet_image, frontend_image):
     idx = f'ghcr.io/pshenmic/platform-explorer-indexer:{ev}'
     spec = dict(name='devnet-services', services=dict(
         quorums=svc(cfg['quorumServerImage'], env_file=[f'{ROOT}/qls.env']),
+        insight=svc(cfg['insightImage'], volumes=insight_files()),
         faucet=svc(faucet_image, env_file=[f'{ROOT}/faucet.env'], healthcheck=dict(test=['CMD', 'curl', '-fsS', 'http://127.0.0.1:8000/health'], interval='30s', retries=3), command=['uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', '8000']),
         postgres=svc('postgres:17', env_file=[f'{ROOT}/postgres.env'], command=['postgres', '-c', 'listen_addresses=127.0.0.1', '-c', 'port=5433'], volumes=['explorer-db:/var/lib/postgresql/data'],
                      healthcheck=dict(test=['CMD-SHELL', 'pg_isready -h 127.0.0.1 -p 5433 -U explorer -d explorer'], interval='5s', retries=30)),
@@ -215,7 +255,7 @@ def compose(faucet_image, frontend_image):
         caddy=svc('caddy:2', volumes=[f'{ROOT}/Caddyfile:/etc/caddy/Caddyfile:ro', 'caddy-data:/data', 'caddy-config:/config']),
     ), volumes={'explorer-db': {}, 'caddy-data': {}, 'caddy-config': {}})
     write('compose.json', json.dumps(spec, indent=1))
-    sh('docker', 'compose', '-f', str(ROOT / 'compose.json'), 'pull', '--quiet', 'quorums', 'postgres', 'explorer-migrate', 'explorer-api', 'caddy', timeout=1200)
+    sh('docker', 'compose', '-f', str(ROOT / 'compose.json'), 'pull', '--quiet', 'quorums', 'insight', 'postgres', 'explorer-migrate', 'explorer-api', 'caddy', timeout=1200)
     sh('docker', 'compose', '-f', str(ROOT / 'compose.json'), 'up', '-d', '--remove-orphans', timeout=1200)
 
 
@@ -278,7 +318,8 @@ frontend_image = build_explorer_frontend()
 compose(faucet_image, frontend_image)
 topup_cron()
 result = dict(faucetBalance=balance, faucetImage=faucet_image, frontendImage=frontend_image,
-              quorums=wait('http://127.0.0.1:8080/health'), quorumList=wait_quorums(), faucet=wait('http://127.0.0.1:8000/health'),
+              quorums=wait('http://127.0.0.1:8080/health'), quorumList=wait_quorums(),
+              insight=wait('http://127.0.0.1:3001/insight-api/status'), insightBlocks=insight_blocks(), faucet=wait('http://127.0.0.1:8000/health'),
               explorerApi=wait('http://127.0.0.1:3005/status', 300), explorerValidators=wait('http://127.0.0.1:3005/validators?limit=1', 180), explorerFrontend=wait('http://127.0.0.1:3000/', 300),
               walletAddress=rpc('getnewaddress', wallet='faucet'))
 print(json.dumps(result))
