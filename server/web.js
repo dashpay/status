@@ -40,7 +40,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
 
   function view(network, operator) {
     const state = stateOf(network.name);
-    const evaluation = evaluateNetwork(network, state, settings, clock());
+    const evaluation = evaluateNetwork(network, state, settings, clock(), readJSON(join(dirs.state, 'image-tags.json'), {}));
     return projectNetwork(network, evaluation, state, operator);
   }
   function brief(v) {

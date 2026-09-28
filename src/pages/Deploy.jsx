@@ -124,8 +124,8 @@ export default function Deploy({ name }) {
 
       <Section title={`${needsComponents ? 4 : 3} · Options`}>
         <div className="panel p-3 flex flex-wrap gap-6 items-end">
-          <label className="text-[12px]"><div className="text-dim mb-1">Observation window (health gap between checks)</div><input className="input w-28 mono" placeholder={n.deployable ? 'network default' : ''} value={window} onChange={(e) => setWindow(e.target.value.trim())} /></label>
-          {(action === 'upgrade' || action === 'deploy') && <label className="text-[12px]"><div className="text-dim mb-1">Operation timeout</div><input className="input w-28 mono" placeholder="network default" value={timeout} onChange={(e) => setTimeoutValue(e.target.value.trim())} /></label>}
+          <label className="text-[12px]"><div className="text-dim mb-1">Observation window (health gap between checks)</div><input className="input w-28 mono" placeholder={n.observationWindow} value={window} onChange={(e) => setWindow(e.target.value.trim())} /></label>
+          {(action === 'upgrade' || action === 'deploy') && <label className="text-[12px]"><div className="text-dim mb-1">Operation timeout</div><input className="input w-28 mono" placeholder={n.operationTimeout} value={timeout} onChange={(e) => setTimeoutValue(e.target.value.trim())} /></label>}
           <div className="text-dim text-[11.5px] max-w-[520px]">Defaults come from Settings. Upgrades withdraw one host at a time; validators additionally require the remaining quorum to be healthy before each withdrawal.</div>
         </div>
       </Section>
@@ -150,7 +150,7 @@ function ComponentRow({ c, on, toggle, action, image, setImage, archs, current, 
   const match = tags?.find((t) => t.name === tag);
   const unsupported = match && match.arches.length ? archs.filter((a) => !match.arches.includes(a)) : [];
   return (
-    <div className={`grid gap-2 lg:grid-cols-[180px_minmax(0,1fr)] items-start border-b border-line pb-2 last:border-0 ${on ? '' : 'opacity-70'}`}>
+    <div className={`grid gap-2 lg:grid-cols-[260px_minmax(0,1fr)] items-start border-b border-line pb-2 last:border-0 ${on ? '' : 'opacity-70'}`}>
       <label className="flex items-center gap-2 cursor-pointer pt-1">
         <input type="checkbox" checked={on} onChange={toggle} />
         <span className="font-medium">{c}</span>

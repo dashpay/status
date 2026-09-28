@@ -20,7 +20,7 @@ for previously public routes, or reconstruct a reduced payload from console data
 ## Existing AWS host
 
 The original collector runs privately on `127.0.0.1:3002`; the console is on
-`127.0.0.1:3004`. Install [nginx-legacy-api.conf](nginx-legacy-api.conf) as
+`127.0.0.1:3006`. Install [nginx-legacy-api.conf](nginx-legacy-api.conf) as
 `/etc/nginx/snippets/dash-status-legacy-api.conf` and include it in **both** public
 HTTP/HTTPS application server blocks. Keep the normal `/api/` and `/` locations
 pointing at the console. Do not use a `^~ /api/` prefix that overrides the legacy

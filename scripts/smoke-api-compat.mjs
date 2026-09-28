@@ -1,4 +1,5 @@
-// Real collector + real console + the production nginx routing snippet.
+// Original Testnet API (legacy collector) + the new web console behind the
+// production nginx routing snippet.
 // Run with nginx installed; all listeners and synthetic SSH failures are local.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -8,7 +9,7 @@ import net from 'node:net';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createConsole } from '../server/console.js';
+import { createWeb } from '../server/web.js';
 import { checkLegacyAPI } from './check-legacy-api.mjs';
 import { chromium } from 'playwright';
 
@@ -32,10 +33,8 @@ async function ready(url, child) {
 }
 try {
   const [legacyPort, consolePort, publicPort] = await Promise.all([port(), port(), port()]);
-  const config = JSON.parse(fs.readFileSync('examples/networks.json'));
-  config.origin = `http://127.0.0.1:${publicPort}`; config.operationsDir = path.join(temp, 'operations');
-  for (const n of config.networks) for (const field of ['snapshot', 'health', 'collection', 'plan']) n[field] = path.join(temp, n.name + '-' + field + '.json');
-  consoleServer = createConsole(config, { auth: { clientId: 'fixture-client', clientSecret: 'fixture-secret' } }).listen(consolePort, '127.0.0.1'); await once(consoleServer, 'listening');
+  const config = { origin: `http://127.0.0.1:${publicPort}` };
+  consoleServer = createWeb({ dataDir: path.join(temp, 'data'), origin: config.origin, auth: { clientId: 'fixture-client', clientSecret: 'fixture-secret' } }).listen(consolePort, '127.0.0.1'); await once(consoleServer, 'listening');
   const key = path.join(temp, 'fixture-key');
   execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', key]);
   const inventory = path.join(temp, 'inventory');
@@ -76,7 +75,7 @@ http {
         await response.arrayBuffer();
       }
       assert.equal((await fetch(config.origin + '/api/config')).status, 200);
-      assert.equal((await fetch(config.origin + '/api/networks')).status, 200);
+      assert.equal((await fetch(config.origin + '/api/overview')).status, 200);
     }
     const result = await checkLegacyAPI(config.origin, { expectedNodes: 1, token });
     console.log(JSON.stringify({ authentication: token ? 'bearer' : 'public', ...result }));
@@ -88,8 +87,8 @@ http {
     page.on('pageerror', (error) => pageErrors.push(error.message));
     await page.goto(config.origin);
     await page.getByRole('link', { name: 'Sign in with GitHub' }).waitFor();
-    await page.getByRole('navigation', { name: 'Networks' }).getByRole('link', { name: /Moutai/ }).click();
-    await page.waitForURL('**/networks/devnet-moutai');
+    await page.getByRole('navigation').getByRole('link', { name: /Moutai/ }).click();
+    await page.waitForURL('**/n/devnet-moutai');
     assert.ok((await page.locator('body').innerText()).includes('Moutai'));
     const health = await page.evaluate(() => fetch('/api/health').then((r) => r.json()));
     assert.equal(health.totalNodes, 1);

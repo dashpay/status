@@ -5,7 +5,9 @@ import { COMPONENT_REPOS } from './settings.js';
 export const LEVELS = ['ok', 'warn', 'down', 'unreachable', 'stopped'];
 // `info` facts are shown with the host but never change its status.
 const RANK = { info: 0, ok: 0, stopped: 1, warn: 2, down: 3, unreachable: 3 };
-const COMPONENT_OF = Object.fromEntries(Object.entries(COMPONENT_REPOS).map(([c, r]) => [r, c]));
+const BY_REPO = Object.fromEntries(Object.entries(COMPONENT_REPOS).map(([c, r]) => [r, c]));
+// Older agents reported index.docker.io/ prefixes for digest-pulled images.
+const COMPONENT_OF = new Proxy(BY_REPO, { get: (t, k) => (typeof k === 'string' ? t[k.replace(/^(index\.)?docker\.io\//, '')] : undefined) });
 const CORE_ROLES = new Set(['validator', 'masternode', 'seed', 'web', 'wallet', 'miner', 'mixer']);
 
 export function tagOf(image) {
@@ -17,19 +19,21 @@ export function tagOf(image) {
 
 // Human version of a container: the tag when there is one, else the version the
 // service reports about itself (e.g. DAPI getStatus), else the short digest.
-function versionOf(component, container, data) {
+function versionOf(component, container, data, tags = {}) {
   const tag = tagOf(container.image);
   if (!tag?.startsWith('@')) return tag;
+  const known = tags[container.image.split('@')[1]];
+  if (known) return tagOf(known);
   const reported = { dapi: data.dapi?.dapiVersion, drive: data.dapi?.driveVersion, tenderdash: data.tenderdash?.version || data.dapi?.tenderdashVersion }[component];
   return reported ? `${reported.replace(/^unreleased-/, '').slice(0, 24)} ${tag}` : tag;
 }
 
 const pct = (used, total) => (total ? Math.round((used / total) * 1000) / 10 : null);
 
-export function evaluateNetwork(network, state, settings, now = Date.now()) {
+export function evaluateNetwork(network, state, settings, now = Date.now(), tags = {}) {
   const t = settings.thresholds;
   const hosts = state?.hosts || [];
-  const live = (h) => (h.probe?.ok ? h.probe.data : null);
+  const live = (h) => (h?.probe?.ok ? h.probe.data : null);
   const coreTip = Math.max(0, ...hosts.map((h) => live(h)?.core?.blocks || 0));
   const platformTip = Math.max(0, ...hosts.map((h) => live(h)?.tenderdash?.height || live(h)?.dapi?.height || 0));
   const tipHost = hosts.find((h) => live(h)?.core?.blocks === coreTip);
@@ -100,7 +104,7 @@ export function evaluateNetwork(network, state, settings, now = Date.now()) {
   for (const r of rows) for (const k of r.data.containers || []) {
     const component = COMPONENT_OF[k.repo];
     if (!component) continue;
-    const v = versionOf(component, k, r.data);
+    const v = versionOf(component, k, r.data, tags);
     versions[component] ??= {};
     versions[component][v] = (versions[component][v] || 0) + 1;
   }
@@ -118,7 +122,7 @@ export function evaluateNetwork(network, state, settings, now = Date.now()) {
     dapi: { ok: validatorRows.filter((r) => r.data.dapi?.ok).length, total: validatorRows.filter((r) => r.host.state === 'running').length },
   };
   const level = rows.reduce((a, r) => (r.host.duplicate || r.host.role === 'vpn' ? a : RANK[r.level] > RANK[a] ? r.level : a), 'ok');
-  return { level: level === 'stopped' ? 'ok' : level, rows, summary, generatedAt: state?.generatedAt || null, ageSeconds: state?.generatedAt ? Math.round((now - Date.parse(state.generatedAt)) / 1000) : null };
+  return { level: level === 'stopped' ? 'ok' : level, rows, summary, tags, generatedAt: state?.generatedAt || null, ageSeconds: state?.generatedAt ? Math.round((now - Date.parse(state.generatedAt)) / 1000) : null };
 }
 
 function chainMatches(chain, network) {
@@ -142,7 +146,7 @@ export function projectNetwork(network, evaluation, state, operator) {
       insight: d.insight || null, faucet: d.faucet || null,
       wallets: c.wallets && (network.showBalances || operator) ? c.wallets.filter((w) => w.name).map((w) => ({ name: w.name, trusted: w.trusted, pending: w.pending, immature: w.immature, coinjoin: w.coinjoin })) : c.wallets ? { count: c.wallets.filter((w) => w.name).length } : null,
       system: d.system ? { load: s.load, cpus: s.cpus, memPercent: pct(s.memTotal - s.memAvailable, s.memTotal), memTotal: s.memTotal, swapPercent: s.swapTotal ? pct(s.swapTotal - s.swapFree, s.swapTotal) : null, disks: (s.disks || []).map((x) => ({ mount: x.mount, percent: pct(x.used, x.size), size: x.size, avail: x.avail })), uptime: s.uptime, os: s.os, kernel: s.kernel } : null,
-      containers: (d.containers || []).map((k) => ({ name: k.name, component: COMPONENT_OF[k.repo] || null, image: k.image, version: COMPONENT_OF[k.repo] ? versionOf(COMPONENT_OF[k.repo], k, d) : tagOf(k.image), digest: k.digest, state: k.state, running: k.running, restarts: k.restarts, startedAt: k.startedAt, health: k.health })),
+      containers: (d.containers || []).map((k) => ({ name: k.name, component: COMPONENT_OF[k.repo] || null, image: k.image, version: COMPONENT_OF[k.repo] ? versionOf(COMPONENT_OF[k.repo], k, d, evaluation.tags) : tagOf(k.image), digest: k.digest, state: k.state, running: k.running, restarts: k.restarts, startedAt: k.startedAt, health: k.health })),
       p2p: h.p2p ? { port: h.p2p.port, ok: h.p2p.ok, ms: h.p2p.ms } : null,
       dapiPublic: h.dapiPublic ? { ok: h.dapiPublic.ok, ms: h.dapiPublic.ms } : null,
     };
@@ -151,7 +155,7 @@ export function projectNetwork(network, evaluation, state, operator) {
   });
   return {
     name: network.name, displayName: network.displayName, description: network.description || '', chainType: network.chainType, coreNetwork: network.coreNetwork,
-    public: network.public, deployable: network.deployable, level: evaluation.level, generatedAt: evaluation.generatedAt, ageSeconds: evaluation.ageSeconds,
+    public: network.public, deployable: network.deployable, observationWindow: network.observationWindow, operationTimeout: network.operationTimeout, level: evaluation.level, generatedAt: evaluation.generatedAt, ageSeconds: evaluation.ageSeconds,
     pollSeconds: state?.pollSeconds || null, discovery: state?.discovery ? { at: state.discovery.at, error: operator ? state.discovery.error : state.discovery.error ? 'discovery failed' : null } : null,
     summary: evaluation.summary, endpoints: (state?.endpoints || []).map((e) => ({ label: e.label, kind: e.kind, url: e.url, status: e.status, ok: e.ok, ms: e.ms, error: e.error, height: e.height, version: e.version, chainId: e.chainId })),
     hosts, journal: operator ? state?.journal || null : undefined,

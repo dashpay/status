@@ -82,7 +82,7 @@ def repo(image):
     name = image.split('@')[0]
     if ':' in name.rsplit('/', 1)[-1]:
         name = name.rsplit(':', 1)[0]
-    return re.sub(r'^(docker\.io/)?(library/)?', '', name)
+    return re.sub(r'^((index\.)?docker\.io/)?(library/)?', '', name)
 
 
 def docker():

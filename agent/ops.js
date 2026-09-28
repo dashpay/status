@@ -11,7 +11,7 @@ import { COMPONENTS, COMPONENT_REPOS, readJSON, writeAtomic } from '../shared/se
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ACTIONS = new Set(['upgrade', 'deploy', 'enroll', 'doctor']);
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'interrupted', 'rejected']);
-const REPO_COMPONENT = Object.fromEntries(Object.entries(COMPONENT_REPOS).map(([c, r]) => [r, c]));
+const REPO_COMPONENT = Object.fromEntries(Object.entries(COMPONENT_REPOS).flatMap(([c, r]) => [[r, c], [`index.docker.io/${r}`, c]]));
 const IMAGE = (component) => new RegExp(`^(docker\\.io/)?${COMPONENT_REPOS[component]}(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|@sha256:[0-9a-f]{64})$`);
 
 export function manifestFor(settings, network, state) {
@@ -87,7 +87,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
 
   function dashnet(r, args, { timeoutMs, onLine } = {}) {
     return new Promise((resolve) => {
-      write(r.id, `$ dashnet ${args.map((a) => a.includes(work) ? a.slice(work.length + 1) : a).join(' ')}`);
+      write(r.id, `$ dashnet ${args.map((a) => a.startsWith(work) ? a.slice(work.length + 1) : a).join(' ')}`);
       const child = spawnImpl(binary, args, { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, AWS_REGION: getSettings().aws.region } });
       const slot = running.get(r.network);
       if (slot?.id === r.id) slot.child = child; else running.set(r.network, { id: r.id, child });
@@ -130,7 +130,9 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
   async function prepare(r) {
     const s = getSettings();
     const { network, components, images } = validateRequest(s, r.request);
-    const dir = join(work, r.id); mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // Each preparation gets fresh artifacts; dashnet never overwrites outputs.
+    r.attempt = (r.attempt || 0) + 1;
+    const dir = join(work, r.id, String(r.attempt)); mkdirSync(dir, { recursive: true, mode: 0o700 });
     r.status = 'preparing'; save(r);
     let done = step(r, 'Build manifest from discovery');
     const state = await readState(network.name);
@@ -200,7 +202,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
   };
 
   async function execute(r) {
-    const dir = join(work, r.id);
+    const dir = r.attempt ? join(work, r.id, String(r.attempt)) : join(work, r.id);
     const plan = readJSON(join(dir, 'plan.json'));
     if (!plan || plan.id !== r.review?.planId) throw new Error('reviewed plan is missing');
     const { window, timeout } = validateRequest(getSettings(), r.request);
@@ -228,6 +230,11 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     const c = await dashnet(r, [`managed-${plan.operation}`, '--plan', join(dir, 'plan.json'), '--confirm', plan.id, ...access(dir), '--observation-window', window, '--timeout', timeout, '--out', join(dir, `result-${Date.now()}.json`)], { timeoutMs: ms + 60_000, onLine });
     if (c !== 0) { done('failed'); throw new Error(r.cancelRequested ? 'cancelled by operator' : 'operation stopped; the journal keeps progress. Resume continues the same plan.'); }
     done('ok');
+    // Remember which tag each pinned digest came from so the board can show it.
+    const tagsPath = join(dirs.state, 'image-tags.json');
+    const tags = readJSON(tagsPath, {});
+    for (const change of r.review.changes) if (change.requested) tags[change.to.split('@')[1]] = change.requested.replace(/^docker\.io\//, '');
+    writeAtomic(tagsPath, JSON.stringify(tags));
   }
 
   async function doctor(r, dir) {
