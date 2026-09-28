@@ -363,8 +363,10 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       const who = plan.scope === 'core' ? 'every node one at a time (Core: validators, then the mining node)' : 'validators one at a time';
       const done = step(r, `Upgrade ${who} (dashnet upgrade, scope ${plan.scope})`);
       r.progress = { phase: plan.scope, completed: [], current: null }; save(r);
-      await run(r, 'upgrade', ['upgrade', '--plan', join(dir, phase.plan), '--confirm', plan.id, ...access(dir), '--observation-window', '90s', '--timeout', '110m', '--out', join(dir, `upgrade-result.${stamp()}.json`)], {
-        timeoutMs: 111 * 60_000,
+      // A Core rollout visits every node and waits for quiet DKG windows.
+      const minutes = plan.scope === 'core' ? 240 : 110;
+      await run(r, 'upgrade', ['upgrade', '--plan', join(dir, phase.plan), '--confirm', plan.id, ...access(dir), '--observation-window', '90s', '--timeout', `${minutes}m`, '--out', join(dir, `upgrade-result.${stamp()}.json`)], {
+        timeoutMs: (minutes + 1) * 60_000,
         onLine: (line) => {
           const m = /((?:validators|wallet|miner|fullnodes?)-\d+)/.exec(line);
           if (m && /appl|withdraw|replac|upgrad/i.test(line)) { r.progress.current = m[1]; if (/complete|done|verified|upgraded/i.test(line) && !r.progress.completed.includes(m[1])) r.progress.completed.push(m[1]); save(r); }
