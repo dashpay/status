@@ -349,7 +349,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
   }
 
   const reset = createReset({ ctx: { step, save, write }, dirs, pool, getSettings });
-  const devnets = devnetsImpl || createDevnets({ ctx: { dashnet, step, save, write, pinBinary }, dirs, key, pool, getSettings, region: getSettings().aws.region, log });
+  const devnets = devnetsImpl || createDevnets({ ctx: { dashnet, step, save, write, pinBinary, binary }, dirs, key, pool, getSettings, region: getSettings().aws.region, log });
 
   // Poll the request directory: create, confirm, cancel, resume.
   function tick() {

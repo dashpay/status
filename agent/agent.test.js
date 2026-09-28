@@ -295,3 +295,29 @@ test('a devnet Core + Platform upgrade runs Core first, then plans and runs Plat
   await d.executeUpgrade(r);
   assert.equal(calls.filter((c) => c[0] === 'upgrade').length, 2);
 });
+
+test('a devnet moves to a newer dashnet only when its plans bind the same node and bootstrap recipes', async () => {
+  const { createDevnets } = await import('./devnets.js');
+  const root = mkdtempSync(join(tmpdir(), 'pin-'));
+  const dirs = { data: root, private: join(root, 'p'), state: join(root, 'state') };
+  const dir = join(dirs.private, 'devnets', 'devnet-x');
+  mkdirSync(dir, { recursive: true });
+  const fake = (version, node) => `#!/bin/sh\ncase "$1" in version) echo ${version};; recipes) echo '{"node":"${node}","bootstrap":"b"}';; upgrade-plan) echo 'or core (Core only, every node)' >&2;; *) exit 0;; esac\n`;
+  writeFileSync(join(dir, 'dashnet'), fake('old', 'n1'), { mode: 0o755 });
+  writeFileSync(join(root, 'current'), fake('new', 'n1'), { mode: 0o755 });
+  writeFileSync(join(dir, 'deployment.json'), JSON.stringify({ recipeSha256: 'n1' }));
+  writeFileSync(join(dir, 'bootstrap-plan.json'), JSON.stringify({ recipeSha256: 'b' }));
+  writeFileSync(join(root, 'devnets.json'), JSON.stringify({ 'devnet-x': { status: 'ready' } }));
+  const logs = [];
+  const d = createDevnets({ ctx: { dashnet: async () => 0, step: () => () => {}, save: () => {}, write: (id, l) => logs.push(l), pinBinary: () => join(dir, 'dashnet'), binary: join(root, 'current') }, dirs, key: { path: '/k' }, pool: {}, getSettings: () => settings, region: 'us-west-2', log: () => {} });
+  const r = { id: 'd1', network: 'devnet-x', steps: [] };
+  await d.doctor(r).catch(() => {});
+  assert.match(readFileSync(join(dir, 'dashnet'), 'utf8'), /echo new/, 'compatible binary adopted');
+  assert.ok(logs.some((l) => /dashnet old -> new/.test(l)));
+  assert.deepEqual(JSON.parse(readFileSync(join(root, 'devnets.json'), 'utf8'))['devnet-x'].upgradeScopes, ['platform', 'tenderdash', 'core']);
+  // A different node recipe means the new binary would refuse the plan: keep the pin.
+  writeFileSync(join(dir, 'dashnet'), fake('old', 'n1'), { mode: 0o755 });
+  writeFileSync(join(root, 'current'), fake('newer', 'n2'), { mode: 0o755 });
+  await d.doctor(r).catch(() => {});
+  assert.match(readFileSync(join(dir, 'dashnet'), 'utf8'), /echo old/, 'incompatible binary not adopted');
+});

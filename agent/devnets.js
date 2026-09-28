@@ -8,7 +8,7 @@
 // Each dashnet stage resumes from its own journal, so "Resume" reruns the same
 // sequence with the same plans. Delete tears down only resources tagged as
 // owned by dash-network-go for exactly this network.
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { EC2Client, DescribeInstancesCommand, DescribeVolumesCommand, TerminateInstancesCommand, DeleteVolumeCommand } from '@aws-sdk/client-ec2';
@@ -81,7 +81,7 @@ export function networkYaml(settings, name, d, amis) {
 }
 
 export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log = console.log }) {
-  const { dashnet, step, save, write, pinBinary } = ctx;
+  const { dashnet, step, save, write, pinBinary, binary } = ctx;
   const registryPath = join(dirs.data, 'devnets.json');
   const registry = () => readJSON(registryPath, {});
   const register = (name, patch) => { const r = registry(); r[name] = { ...(r[name] || {}), ...patch, updatedAt: new Date().toISOString() }; writeAtomic(registryPath, JSON.stringify(r, null, 1)); };
@@ -97,6 +97,24 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     const p = spawnSync(bin, ['upgrade-plan', '-h'], { encoding: 'utf8', timeout: 10_000 });
     return /or core \(Core only/.test(`${p.stdout}${p.stderr}`) ? ['platform', 'tenderdash', 'core'] : ['platform', 'tenderdash'];
   }
+  // A devnet is pinned to the dashnet that created it: its plans bind that
+  // binary's recipes. A newer binary reporting the same node and bootstrap
+  // recipes (dashnet recipes) can operate it, so fixes reach existing devnets.
+  function adoptCompatible(r, name) {
+    const dir = join(dirs.private, 'devnets', name), pinned = join(dir, 'dashnet');
+    const dep = readJSON(join(dir, 'deployment.json')), boot = readJSON(join(dir, 'bootstrap-plan.json'));
+    if (!binary || !existsSync(binary) || !existsSync(pinned) || !dep || !boot) return;
+    const p = spawnSync(binary, ['recipes'], { encoding: 'utf8', timeout: 10_000 });
+    let rec; try { rec = JSON.parse(p.stdout); } catch { return; }
+    if (rec.node !== dep.recipeSha256 || rec.bootstrap !== boot.recipeSha256) return;
+    const version = (bin) => spawnSync(bin, ['version'], { encoding: 'utf8', timeout: 10_000 }).stdout.trim();
+    const [was, now] = [version(pinned), version(binary)];
+    if (!now || was === now) return;
+    copyFileSync(binary, `${pinned}.next`); chmodSync(`${pinned}.next`, 0o700); renameSync(`${pinned}.next`, pinned);
+    register(name, { upgradeScopes: upgradeScopes(name), dashnet: now });
+    write(r.id, `dashnet ${was.slice(0, 12)} -> ${now.slice(0, 12)} for ${name} (same node and bootstrap recipes)`);
+  }
+
   for (const [name, reg] of Object.entries(registry())) {
     if (reg.status === 'deleted' || reg.upgradeScopes) continue;
     const scopes = upgradeScopes(name);
@@ -339,6 +357,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
   async function prepareUpgrade(r) {
     const name = r.network, dir = workDir(name);
     if (!existsSync(join(dir, 'deployment.json'))) throw new Error('devnet is not deployed yet');
+    adoptCompatible(r, name);
     r.status = 'preparing'; r.artifacts = { ts: stamp() }; save(r);
     const phases = phasesOf(r.request.components);
     // The first phase is planned exactly now; a later one after its predecessor.
@@ -381,6 +400,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
 
   async function doctor(r) {
     const name = r.network, dir = workDir(name);
+    adoptCompatible(r, name);
     r.status = 'running'; save(r);
     const done = step(r, 'Health check (dashnet doctor)');
     const out = join(dir, `health.${stamp()}.json`);
