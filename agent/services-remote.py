@@ -206,16 +206,21 @@ def topup_cron():
 
 
 def wait(url, seconds=180):
-    end = time.time() + seconds
+    # Services come up in order (the explorer API answers 500 until the indexer
+    # has written block 1), so keep retrying 5xx until the deadline.
+    end, last = time.time() + seconds, None
     while time.time() < end:
         try:
             with opener.open(url, timeout=5) as r:
                 return r.status
         except urllib.error.HTTPError as e:
-            return e.code
+            last = e.code
+            if e.code < 500:
+                return e.code
         except Exception:
-            time.sleep(3)
-    return None
+            pass
+        time.sleep(3)
+    return last
 
 
 if cfg.get('topupOnly'):
