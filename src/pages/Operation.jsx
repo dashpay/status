@@ -76,6 +76,7 @@ export default function Operation({ name, id }) {
       )}
 
       {review?.kind === 'create-devnet' && <CreateReview op={op} review={review} operator={operator} pending={pending} act={act} expiresIn={expiresIn} />}
+      {review?.kind === 'devnet-services' && <ServicesReview op={op} review={review} operator={operator} pending={pending} act={act} />}
       {review?.kind === 'delete-devnet' && <DeleteReview op={op} review={review} operator={operator} pending={pending} act={act} />}
       {review && !review.kind && (
         <Section title={`Plan ${short(review.planId, 16)} · ${review.changes.length} container change(s)`} right={op.status === 'review' && <span className="text-dim text-[12px]">expires in {Math.max(0, Math.round(expiresIn / 60))} min</span>}>
@@ -192,6 +193,29 @@ function DeleteReview({ op, review, operator, pending, act }) {
         <div className="mt-3 flex items-center gap-3">
           <button className="btn btn-danger" disabled={pending} onClick={() => act('confirm', { planId: review.planId })}>Permanently delete {op.network}</button>
           <span className="text-dim text-[12px]">Terminates every instance and deletes their disks. Not reversible.</span>
+        </div>
+      )}
+    </>
+  );
+}
+
+function ServicesReview({ op, review, operator, pending, act }) {
+  const to = review.to;
+  const keys = ['quorumServer', 'explorerVersion', 'faucetRef', 'faucetAmount', 'faucetRateLimit', 'faucetFunding'];
+  return (
+    <>
+      <Section title={`Services on ${op.network}`}>
+        <div className="panel scroll-x">
+          <table className="grid"><thead><tr><th>setting</th><th>current</th><th>after</th></tr></thead><tbody className="[&_tr]:!cursor-default">
+            {keys.map((k) => <tr key={k}><td>{k}</td><td className="mono text-dim">{String(review.from?.[k] ?? '—')}</td><td className={`mono ${String(review.from?.[k]) !== String(to[k]) ? 'lv-warn' : ''}`}>{String(to[k])}</td></tr>)}
+          </tbody></table>
+          <div className="px-3 py-2 text-[12px] border-t border-line text-dim">Re-installs quorum-list-server, Platform Explorer and dash-faucet on the wallet host ({Object.values(review.dns).map((x) => x.host).join(', ')}); builds images when versions change. Chain data is not touched.</div>
+        </div>
+      </Section>
+      {op.status === 'review' && operator && (
+        <div className="mt-3 flex items-center gap-3">
+          <button className="btn btn-primary" disabled={pending} onClick={() => act('confirm', { planId: review.planId })}>Apply services</button>
+          <span className="text-dim text-[12px]">Versions come from Settings → New devnet defaults; change them there and prepare again.</span>
         </div>
       )}
     </>

@@ -1,10 +1,24 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 const nonce = () => randomBytes(32).toString('base64url');
 const equal = (a, b) => typeof a === 'string' && typeof b === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 const cookies = (req) => Object.fromEntries((req.headers.cookie || '').split(';').map((s) => s.trim().split('=')));
 
-export function createAuth(config, { clientId = process.env.GITHUB_OAUTH_CLIENT_ID, clientSecret = process.env.GITHUB_OAUTH_CLIENT_SECRET, fetcher = fetch, clock = Date.now } = {}) {
+export function createAuth(config, { clientId = process.env.GITHUB_OAUTH_CLIENT_ID, clientSecret = process.env.GITHUB_OAUTH_CLIENT_SECRET, fetcher = fetch, clock = Date.now, store = null } = {}) {
   const sessions = new Map(), states = new Map();
+  // Sessions survive web restarts (deploys) when a private store file is given.
+  if (store) {
+    try { for (const [k, v] of Object.entries(JSON.parse(readFileSync(store, 'utf8')))) if (v.expires > clock()) sessions.set(k, v); } catch { /* first start */ }
+  }
+  let pending = null;
+  const persist = () => {
+    if (!store || pending) return;
+    pending = setTimeout(() => {
+      pending = null;
+      try { const tmp = `${store}.tmp`; writeFileSync(tmp, JSON.stringify(Object.fromEntries(sessions)), { mode: 0o600 }); renameSync(tmp, store); } catch (e) { console.error('session store:', e.message); }
+    }, 200);
+    pending.unref?.();
+  };
   const secure = config.origin.startsWith('https:');
   const options = { httpOnly: true, secure, sameSite: 'lax', path: '/' };
   const sessionName = secure ? '__Host-dash-session' : 'dash-session';
@@ -48,12 +62,12 @@ export function createAuth(config, { clientId = process.env.GITHUB_OAUTH_CLIENT_
         if (!response.ok) throw new Error('Identity unavailable');
         const u = await response.json(); if (!Number.isSafeInteger(u.id) || typeof u.login !== 'string') throw new Error('Identity invalid');
         if (sessions.size >= 5000) throw new Error('Session capacity');
-        const id = nonce(); sessions.set(id, { user: { id: u.id, login: u.login }, csrf: nonce(), expires: clock() + 8 * 60 * 60_000 });
+        const id = nonce(); sessions.set(id, { user: { id: u.id, login: u.login }, csrf: nonce(), expires: clock() + 8 * 60 * 60_000 }); persist();
         res.cookie(sessionName, id, { ...options, maxAge: 8 * 60 * 60_000 });
         res.redirect('/');
       } catch { res.status(502).json({ error: 'GitHub sign-in failed; retry from the sign-in button' }); }
     });
-    app.post('/api/auth/logout', requireUser, csrf, (req, res) => { sessions.delete(cookies(req)[sessionName]); res.clearCookie(sessionName, options); res.json({ ok: true }); });
+    app.post('/api/auth/logout', requireUser, csrf, (req, res) => { sessions.delete(cookies(req)[sessionName]); persist(); res.clearCookie(sessionName, options); res.json({ ok: true }); });
   }
   return { install, session, requireUser, csrf };
 }

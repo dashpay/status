@@ -208,6 +208,31 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     pool.savePins();
   }
 
+  // ---- services only (re-install / change service versions) ---------------
+  async function prepareServices(r) {
+    const name = r.network, dir = workDir(name);
+    const reg = registry()[name];
+    if (!reg || !['ready', 'services', 'failed'].includes(reg.status) || !existsSync(join(dir, 'deployment.json'))) throw new Error('services can be updated once the devnet is deployed');
+    const d = readJSON(join(dir, 'request.json'));
+    // Current Settings defaults are the desired service versions for every console devnet.
+    const services = { ...d.services, ...getSettings().devnets.services, ...(r.request.services || {}) };
+    r.status = 'preparing'; save(r);
+    r.review = { kind: 'devnet-services', planId: `services-${name}-${Date.now()}`, preparedAt: new Date().toISOString(), from: d.services, to: services, dns: serviceNames(name, d) };
+  }
+
+  async function executeServices(r) {
+    const name = r.network, dir = workDir(name);
+    const d = readJSON(join(dir, 'request.json'));
+    d.services = r.review.to;
+    const dplan = readJSON(join(dir, 'deployment.json'));
+    r.status = 'running'; save(r);
+    const done = step(r, 'Quorum server, Platform Explorer, faucet, DNS and TLS');
+    const services = await deployServices({ r, write, dplan, d, name, pool, s: getSettings(), ec2, r53, dir });
+    writeFileSync(join(dir, 'request.json'), JSON.stringify(d), { mode: 0o600 });
+    register(name, { services: d.services, dns: services.dns, status: registry()[name]?.status === 'failed' ? 'ready' : registry()[name]?.status });
+    done('ok', services.summary);
+  }
+
   // ---- delete ------------------------------------------------------------
   async function owned(name) {
     const out = await ec2.send(new DescribeInstancesCommand({ Filters: [{ Name: 'tag:dashnet:network', Values: [name] }, { Name: 'tag:dashnet:managed-by', Values: ['dash-network-go'] }, { Name: 'instance-state-name', Values: ['pending', 'running', 'stopping', 'stopped', 'shutting-down'] }] }));
@@ -264,7 +289,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     log(`devnet ${name} deleted by ${r.actor.login}`);
   }
 
-  return { prepareCreate, executeCreate, prepareDelete, executeDelete, registry };
+  return { prepareCreate, executeCreate, prepareServices, executeServices, prepareDelete, executeDelete, registry };
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

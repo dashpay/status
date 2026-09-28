@@ -32,7 +32,7 @@ async function start(userId = 9920871, extraUsers = []) {
     await req(`/api/auth/callback?state=${state}&code=x`);
     return (await (await req('/api/session')).json()).csrf;
   };
-  return { dataDir, req, login, close: () => { app.close(); server.close(); } };
+  return { dataDir, req, login, cookie: () => cookie, close: () => { app.close(); server.close(); } };
 }
 
 test('public board needs no session and hides operator fields', async () => {
@@ -107,4 +107,22 @@ test('viewers read granted networks and operations but cannot deploy; admins loo
     assert.equal((await a.req('/api/github/users/nobody-here')).status, 404);
     assert.equal((await a.req('/api/github/users/bad..name')).status, 400);
   } finally { a.close(); }
+});
+
+test('sessions survive a web restart', async () => {
+  const w = await start();
+  let cookie;
+  try {
+    await w.login();
+    const r = await w.req('/api/me');
+    assert.equal((await r.json()).role, 'admin');
+    cookie = w.cookie();
+  } finally { w.close(); }
+  await new Promise((r) => setTimeout(r, 300));
+  const again = createWeb({ dataDir: w.dataDir, origin: 'http://127.0.0.1', auth: { clientId: 'c', clientSecret: 's' } });
+  const server = await new Promise((r) => { const s = again.listen(0, '127.0.0.1', () => r(s)); });
+  try {
+    const me = await (await fetch(`http://127.0.0.1:${server.address().port}/api/me`, { headers: { cookie } })).json();
+    assert.equal(me.role, 'admin');
+  } finally { again.close(); server.close(); }
 });

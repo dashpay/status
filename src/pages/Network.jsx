@@ -334,7 +334,11 @@ function Lifecycle({ n, member, admin }) {
       <span className="text-dim">created by {l.createdBy} {l.createdAt ? ago(l.createdAt) + ' ago' : ''}</span>
       {member && l.operation && <Link className="link" to={`/n/${n.name}/ops/${l.operation}`}>creation log</Link>}
       {l.dns && Object.entries(l.dns).map(([k, v]) => <a key={k} className="link mono" href={`https://${v.host}/`} target="_blank" rel="noreferrer">{k}</a>)}
-      {admin && !open && <button className="btn btn-danger !py-0.5 ml-auto" onClick={() => setOpen(true)}>Delete devnet…</button>}
+      {admin && !open && ['ready', 'failed', 'services'].includes(l.status) && <button className="btn !py-0.5 ml-auto" onClick={async () => {
+        setError(null);
+        try { const r = await api(`/api/networks/${n.name}/ops`, { method: 'POST', body: { action: 'devnet-services' } }); navigate(`/n/${n.name}/ops/${r.id}`); } catch (e) { setError(e); }
+      }}>Update services…</button>}
+      {admin && !open && <button className={`btn btn-danger !py-0.5 ${['ready', 'failed', 'services'].includes(l.status) ? '' : 'ml-auto'}`} onClick={() => setOpen(true)}>Delete devnet…</button>}
       {admin && open && <span className="ml-auto flex items-center gap-2"><span className="text-dim">type <span className="mono">{n.name}</span></span>
         <input className="input mono w-56" value={confirm} onChange={(e) => setConfirm(e.target.value.trim())} />
         <button className="btn btn-danger !py-0.5" disabled={confirm !== n.name} onClick={remove}>Prepare deletion</button>

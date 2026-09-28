@@ -21,7 +21,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   let settings = loadSettings(settingsPath);
   const reloadSettings = () => { settings = loadSettings(settingsPath); return settings; };
   const app = express();
-  const auth = createAuth({ origin }, authDeps);
+  const auth = createAuth({ origin }, { store: join(dataDir, 'sessions.json'), ...authDeps });
   const clients = new Set();
   const cache = new Map();
 
@@ -128,8 +128,8 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     const n = settings.networks.find((x) => x.name === req.params.name);
     if (!n) return res.status(404).json({ error: 'Network not found' });
     const body = req.body || {};
-    if (body.action === 'delete-devnet' && !isAdmin(req)) return res.status(403).json({ error: 'Only admins delete devnets' });
-    const q = { id: randomUUID(), network: n.name, action: body.action, nodes: body.nodes || [], components: body.components || [], images: body.images || {}, options: body.options || {}, ...(body.confirmName ? { confirmName: body.confirmName } : {}) };
+    if (['delete-devnet', 'devnet-services'].includes(body.action) && !isAdmin(req)) return res.status(403).json({ error: 'Only admins manage devnet lifecycle and services' });
+    const q = { id: randomUUID(), network: n.name, action: body.action, nodes: body.nodes || [], components: body.components || [], images: body.images || {}, options: body.options || {}, ...(body.confirmName ? { confirmName: body.confirmName } : {}), ...(body.services ? { services: body.services } : {}) };
     try { validateRequest(settings, q, registry()); } catch (e) { return res.status(400).json({ error: e.message }); }
     const busy = listOps(n.name).find((r) => ['queued', 'preparing', 'confirmed', 'running'].includes(r.status));
     if (busy) return res.status(409).json({ error: `operation ${busy.id.slice(0, 8)} (${busy.request.action}) is ${busy.status} on this network`, id: busy.id });

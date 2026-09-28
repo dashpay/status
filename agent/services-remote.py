@@ -137,6 +137,21 @@ def build_explorer_frontend():
     return tag
 
 
+def patch_explorer_api(image):
+    # The released API resolves block quorums as testnet/mainnet types only;
+    # devnet Platform quorums are llmq_devnet_platform (107).
+    sh('docker', 'pull', '--quiet', image, timeout=1200)
+    src = subprocess.run(['docker', 'run', '--rm', '--entrypoint', 'cat', image, '/app/src/controllers/BlocksController.js'],
+                         capture_output=True, check=True, timeout=120).stdout.decode()
+    old = "NETWORK === 'testnet'\n        ? QuorumTypeEnum.llmq_25_67\n        : QuorumTypeEnum.llmq_100_67"
+    if old in src:
+        src = src.replace(old, 'QuorumTypeEnum.llmq_devnet_platform')
+    else:
+        log('explorer API: block quorum code changed upstream; leaving it unpatched')
+    write('explorer-BlocksController.js', src, 0o644)
+    return f'{ROOT}/explorer-BlocksController.js:/app/src/controllers/BlocksController.js:ro'
+
+
 # ---- compose --------------------------------------------------------------
 def compose(faucet_image, frontend_image):
     pg = secret('postgres')
@@ -173,7 +188,7 @@ def compose(faucet_image, frontend_image):
                      healthcheck=dict(test=['CMD-SHELL', 'pg_isready -h 127.0.0.1 -p 5433 -U explorer -d explorer'], interval='5s', retries=30)),
         **{'explorer-migrate': dict(svc(idx, env_file=[f'{ROOT}/explorer-indexer.env'], command=['/app/indexer', 'migrate'], depends_on={'postgres': {'condition': 'service_healthy'}}), restart='no')},
         **{'explorer-indexer': svc(idx, env_file=[f'{ROOT}/explorer-indexer.env'], command=['/app/indexer'], depends_on={'explorer-migrate': {'condition': 'service_completed_successfully'}})},
-        **{'explorer-api': svc(f'ghcr.io/pshenmic/platform-explorer-api:{ev}', env_file=[f'{ROOT}/explorer-api.env'], depends_on={'explorer-migrate': {'condition': 'service_completed_successfully'}})},
+        **{'explorer-api': svc(f'ghcr.io/pshenmic/platform-explorer-api:{ev}', env_file=[f'{ROOT}/explorer-api.env'], volumes=[patch_explorer_api(f'ghcr.io/pshenmic/platform-explorer-api:{ev}')], depends_on={'explorer-migrate': {'condition': 'service_completed_successfully'}})},
         **{'explorer-frontend': svc(frontend_image)},
         caddy=svc('caddy:2', volumes=[f'{ROOT}/Caddyfile:/etc/caddy/Caddyfile:ro', 'caddy-data:/data', 'caddy-config:/config']),
     ), volumes={'explorer-db': {}, 'caddy-data': {}, 'caddy-config': {}})
