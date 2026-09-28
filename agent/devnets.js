@@ -107,9 +107,12 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     const p = spawnSync(binary, ['recipes'], { encoding: 'utf8', timeout: 10_000 });
     let rec; try { rec = JSON.parse(p.stdout); } catch { return; }
     if (rec.node !== dep.recipeSha256 || rec.bootstrap !== boot.recipeSha256) return;
+    // Versions are <commit date>-<commit>; adopt only a strictly newer build
+    // (never downgrade on an agent rollback; undated pins are older).
     const version = (bin) => spawnSync(bin, ['version'], { encoding: 'utf8', timeout: 10_000 }).stdout.trim();
     const [was, now] = [version(pinned), version(binary)];
-    if (!now || was === now) return;
+    const dated = (v) => /^(\d{8}T\d{6}Z)-[0-9a-f]{40}$/.exec(v || '')?.[1];
+    if (!dated(now) || (dated(was) && dated(was) >= dated(now))) return;
     copyFileSync(binary, `${pinned}.next`); chmodSync(`${pinned}.next`, 0o700); renameSync(`${pinned}.next`, pinned);
     register(name, { upgradeScopes: upgradeScopes(name), dashnet: now });
     write(r.id, `dashnet ${was.slice(0, 12)} -> ${now.slice(0, 12)} for ${name} (same node and bootstrap recipes)`);
@@ -127,7 +130,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
   }
 
   async function run(r, name, args, opts = {}) {
-    const code = await dashnet(r, args, { ...opts, bin: pinBinary(workDir(r.network)) });
+    const code = await dashnet(r, args, { ...opts, bin: opts.bin || pinBinary(workDir(r.network)) });
     if (code !== 0 && !opts.allowFail) throw new Error(`${name} failed (exit ${code}); see log`);
     return code;
   }
@@ -340,10 +343,10 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     // Each phase changes only its own images on top of the current network.
     writeFileSync(join(dir, a.candidate), candidate(dir, currentYaml(dir), phase.components, r.request.images), { mode: 0o600 });
     let done = step(r, `Resolve ${phase.scope === 'core' ? 'Core' : 'Platform'} images (dashnet resolve)`);
-    await run(r, 'resolve', ['resolve', '--network', join(dir, a.candidate), '--out', join(dir, a.lock)], { timeoutMs: 5 * 60_000 });
+    await run(r, 'resolve', ['resolve', '--network', join(dir, a.candidate), '--out', join(dir, a.lock)], { timeoutMs: 5 * 60_000, bin: r.artifacts.bin });
     done('ok', phase.components.map((c) => `${c} ${r.request.images[c]}`).join(', '));
     done = step(r, `Upgrade plan, scope ${phase.scope} (dashnet upgrade-plan)`);
-    await run(r, 'upgrade-plan', ['upgrade-plan', '--deployment-plan', join(dir, 'deployment.json'), '--network', join(dir, a.candidate), '--lock', join(dir, a.lock), '--scope', phase.scope, '--out', join(dir, a.plan)], { timeoutMs: 5 * 60_000 });
+    await run(r, 'upgrade-plan', ['upgrade-plan', '--deployment-plan', join(dir, 'deployment.json'), '--network', join(dir, a.candidate), '--lock', join(dir, a.lock), '--scope', phase.scope, '--out', join(dir, a.plan)], { timeoutMs: 5 * 60_000, bin: r.artifacts.bin });
     const plan = readJSON(join(dir, a.plan));
     const changes = [];
     for (const [node, to] of Object.entries(plan.to || {})) for (const [component, pin] of Object.entries(to)) {
@@ -358,7 +361,12 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     const name = r.network, dir = workDir(name);
     if (!existsSync(join(dir, 'deployment.json'))) throw new Error('devnet is not deployed yet');
     adoptCompatible(r, name);
-    r.status = 'preparing'; r.artifacts = { ts: stamp() }; save(r);
+    r.status = 'preparing'; r.artifacts = { ts: stamp() };
+    // The upgrade executes with exactly the binary that planned it, even if the
+    // devnet adopts a newer one meanwhile (upgrade plans bind its recipe).
+    r.artifacts.bin = join(dir, `dashnet.upgrade-${r.artifacts.ts}`);
+    copyFileSync(join(dir, 'dashnet'), r.artifacts.bin); chmodSync(r.artifacts.bin, 0o700);
+    save(r);
     const phases = phasesOf(r.request.components);
     // The first phase is planned exactly now; a later one after its predecessor.
     const first = await planPhase(r, dir, phases[0], 0);
@@ -385,7 +393,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       // A Core rollout visits every node and waits for quiet DKG windows.
       const minutes = plan.scope === 'core' ? 240 : 110;
       await run(r, 'upgrade', ['upgrade', '--plan', join(dir, phase.plan), '--confirm', plan.id, ...access(dir), '--observation-window', '90s', '--timeout', `${minutes}m`, '--out', join(dir, `upgrade-result.${stamp()}.json`)], {
-        timeoutMs: (minutes + 1) * 60_000,
+        timeoutMs: (minutes + 1) * 60_000, bin: r.artifacts.bin,
         onLine: (line) => {
           const m = /((?:validators|wallet|miner|fullnodes?)-\d+)/.exec(line);
           if (m && /appl|withdraw|replac|upgrad/i.test(line)) { r.progress.current = m[1]; if (/complete|done|verified|upgraded/i.test(line) && !r.progress.completed.includes(m[1])) r.progress.completed.push(m[1]); save(r); }

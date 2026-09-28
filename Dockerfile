@@ -3,7 +3,7 @@ FROM golang:1.27-bookworm AS dashnet
 ARG DASHNET_REF=main
 RUN git clone --quiet https://github.com/dashpay/dash-network-go /src \
  && cd /src && git checkout --quiet "$DASHNET_REF" \
- && CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=$(git rev-parse HEAD)" -o /dashnet ./cmd/dashnet \
+ && CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%dT%H%M%SZ)-$(git rev-parse HEAD)" -o /dashnet ./cmd/dashnet \
  && /dashnet version
 
 FROM node:22-bookworm-slim AS builder
