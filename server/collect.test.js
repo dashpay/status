@@ -13,7 +13,7 @@ test('partial observations retain unreachable targets; foreign and failed collec
       collection: join(dir, 'collection.json'), manifest: 'fixture', sshKey: 'private-fixture', knownHosts: 'trust-fixture' };
     const snapshot = { kind: 'ExistingSnapshot', id: 'a'.repeat(64), observedAt: new Date().toISOString(), fleet: {
       metadata: { name: 'testnet' }, targets: [{ name: 'seed-1', instanceId: 'i-fixture', role: 'seed', containers: {} }] }, nodes: { 'seed-1': { error: 'SSH timeout' } } };
-    const runner = async (binary, args) => { assert.equal(args[0], 'managed-import'); writeFileSync(args.at(-1), JSON.stringify(snapshot)); return 1; };
+    const runner = async (binary, args) => { const value = args[0] === 'managed-doctor' ? {snapshot,observedAt:new Date().toISOString(),healthy:false,nodes:{'seed-1':{healthy:false,status:'unknown',problems:['SSH timeout']}}} : snapshot; writeFileSync(args.at(-1), JSON.stringify(value)); return 1; };
     const partial = await collect({ binary: 'fixture' }, n, runner);
     assert.equal(partial.failed, false); assert.equal(partial.importComplete, false);
     let view = networkView(n, null, {}); assert.equal(view.nodes.length, 1); assert.equal(view.nodes[0].status, 'unknown');

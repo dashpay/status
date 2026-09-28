@@ -4,11 +4,12 @@ import rateLimit from 'express-rate-limit';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createAuth } from './auth.js';
+import { createOperatorQueue } from './operator-queue.js';
 import { createWorkflowService, preview } from './workflows.js';
 import { loadRegistry, canView, grants, networkView } from './networks.js';
 
 export function createConsole(config, dependencies = {}) {
-  const app = express(), auth = createAuth(config, dependencies.auth), workflows = createWorkflowService(config, dependencies.workflows);
+  const app = express(), auth = createAuth(config, dependencies.auth), workflows = config.workflow?.transport === 'queue' ? createOperatorQueue(config) : createWorkflowService(config, dependencies.workflows);
   // Optional fixed reverse-proxy CIDRs, never blindly trust arbitrary forwarded IPs.
   if (config.trustedProxies) app.set('trust proxy', config.trustedProxies);
   app.use(helmet({ contentSecurityPolicy: { directives: { 'style-src': ["'self'", "'unsafe-inline'"], 'img-src': ["'self'", 'data:'] } } }));
@@ -18,7 +19,7 @@ export function createConsole(config, dependencies = {}) {
   auth.install(app);
   app.get('/api/networks', (req, res) => {
     const user = auth.session(req)?.user;
-    res.json({ networks: config.networks.filter((n) => canView(config, user, n)).map((n) => networkView(n, user, config)), executionEnabled: !!config.workflow?.enabled });
+    res.json({ networks: config.networks.filter((n) => canView(config, user, n)).map((n) => networkView(n, user, config)), executionEnabled: !!config.workflow?.enabled, planningEnabled: config.workflow?.transport === 'queue' });
   });
   function target(req, res, next) {
     const n = config.networks.find((n) => n.name === req.params.name), user = auth.session(req)?.user;
@@ -35,11 +36,20 @@ export function createConsole(config, dependencies = {}) {
     res.json({ operations: await workflows.reconcile(req.network.name) });
   });
   app.post('/api/networks/:name/preview', auth.requireUser, auth.csrf, target, permitted, (req, res) => {
-    try { res.json({ ...preview(req.network, req.body.action), executionEnabled: !!config.workflow?.enabled }); }
+    try { res.json({ ...(config.workflow?.transport === 'queue' ? workflows.prepare(req.network, req.body.action, req.body.selection, req.session.user) : preview(req.network, req.body.action)), executionEnabled: !!config.workflow?.enabled, planningEnabled: config.workflow?.transport === 'queue' }); }
     catch (e) { res.status(409).json({ error: e.message }); }
   });
+  app.get('/api/networks/:name/reviews/:id', auth.requireUser, target, (req, res) => {
+    if (!grants(config,req.session.user,req.network.name).length) return res.status(403).json({error:'Operator access required'});
+    try { res.json({...workflows.draft(req.network,req.params.id,req.session.user), executionEnabled:!!config.workflow?.enabled}); }
+    catch { res.status(404).json({error:'Review not found'}); }
+  });
   app.post('/api/networks/:name/operations', auth.requireUser, auth.csrf, target, permitted, async (req, res) => {
-    try { res.status(202).json(await workflows.dispatch(req.network, req.body.action, req.body.planId, req.body.requestId, req.session.user)); }
+    try { res.status(202).json(await workflows.dispatch(req.network, req.body.action, req.body.planId, req.body.requestId, req.session.user, req.body.draftId)); }
+    catch (e) { res.status(409).json({ error: e.message }); }
+  });
+  app.post('/api/networks/:name/operations/:id/resume', auth.requireUser, auth.csrf, target, permitted, (req, res) => {
+    try { res.status(202).json(workflows.resume(req.network, req.body.action, req.params.id, req.body.requestId, req.session.user)); }
     catch (e) { res.status(409).json({ error: e.message }); }
   });
   app.get('/api/health', (req, res) => res.json({ service: 'dash-network-console', status: 'ok' }));

@@ -1,0 +1,32 @@
+import { chromium } from 'playwright';
+import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, writeFileSync, readdirSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createConsole } from '../server/console.js';
+const root=mkdtempSync(join(tmpdir(),'status-operator-browser-'));
+const n={name:'devnet-moutai',displayName:'Moutai',public:true,snapshot:join(root,'snapshot.json')};
+writeFileSync(n.snapshot,JSON.stringify({kind:'ExistingSnapshot',id:'a'.repeat(64),observedAt:new Date().toISOString(),fleet:{metadata:{name:n.name},targets:[{name:'hp-masternode-1',instanceId:'private-1',role:'validator',containers:{core:'core',drive:'drive',dapi:'dapi',tenderdash:'td'}}]},nodes:{'hp-masternode-1':{instanceId:'private-1',chain:{coreHeight:123,platformHeight:44,dapiHealthy:true,masternodeState:'READY'},components:{core:{image:'dashpay/dashd:23',running:true},drive:{image:'dashpay/drive:4.2.0-beta.3',running:true},dapi:{image:'dashpay/rs-dapi:4.2.0-beta.3',running:true},tenderdash:{image:'dashpay/tenderdash:1.8.0',running:true}}}}}));
+const config={origin:'http://127.0.0.1',networks:[n],operationsDir:join(root,'ops'),workflow:{enabled:true,transport:'queue'},operators:{'42':{networks:[n.name],actions:['upgrade','doctor','deploy']}}};
+const app=createConsole(config,{auth:{clientId:'fixture',clientSecret:'fixture-secret',fetcher:async(url)=>new Response(JSON.stringify(url.includes('access_token')?{access_token:'fixture-token'}:{id:42,login:'fixture-operator'}))}});
+const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));config.origin=`http://127.0.0.1:${server.address().port}`;
+let browser;
+try {
+ browser=await chromium.launch({headless:true});const page=await browser.newPage({viewport:{width:1440,height:1000}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ await page.goto(config.origin);assert.equal(await page.getByRole('region',{name:'Operator workspace'}).count(),0);
+ await page.route('**/api/auth/github',async route=>{const r=await route.fetch({maxRedirects:0});const state=new URL(r.headers().location).searchParams.get('state');await route.fulfill({response:r,status:302,headers:{...r.headers(),location:config.origin+'/api/auth/callback?code=fixture&state='+state}});});
+ await page.getByRole('link',{name:'Sign in with GitHub'}).click();await page.getByText('fixture-operator',{exact:true}).waitFor();
+ const panel=page.getByRole('region',{name:'Operator workspace'});await panel.waitFor();
+ await panel.getByRole('checkbox',{name:/hp-masternode-1/}).check();await panel.getByRole('checkbox',{name:'DAPI',exact:true}).check();await panel.getByRole('textbox',{name:'DAPI image'}).fill('dashpay/rs-dapi:4.2.0-beta.4');
+ await panel.getByRole('button',{name:'Prepare review'}).click();await page.getByRole('status').filter({hasText:'Checking the selected'}).waitFor();
+ const drafts=readdirSync(join(config.operationsDir,'drafts'));assert.equal(drafts.length,1);const path=join(config.operationsDir,'drafts',drafts[0]);const d=JSON.parse(readFileSync(path));
+ assert.deepEqual(d.selection,{nodes:['hp-masternode-1'],components:['dapi'],images:{dapi:'dashpay/rs-dapi:4.2.0-beta.4'}});
+ const planId='b'.repeat(64);writeFileSync(path,JSON.stringify({...d,status:'ready',preparedAt:new Date().toISOString(),review:{network:n.name,action:'upgrade',planId,targets:d.selection.nodes,scope:'dapi',preservesCore:true,enrollment:true,recovery:'Forward recovery using this exact plan.',changes:[{node:'hp-masternode-1',component:'dapi',from:'dashpay/rs-dapi:4.2.0-beta.3',to:'dashpay/rs-dapi@sha256:'+'c'.repeat(64)}]}}));
+ await page.getByRole('region',{name:'Review operation'}).waitFor();assert.match(await page.getByRole('region',{name:'Review operation'}).innerText(),/Core is preserved/);
+ mkdirSync('artifacts',{recursive:true});await page.screenshot({path:'artifacts/operator-node-review.png'});
+ await panel.getByRole('button',{name:'Run reviewed operation'}).click();await page.getByText('queued',{exact:true}).waitFor();
+ const ops=readdirSync(config.operationsDir).filter(v=>v.endsWith('.json'));assert.equal(ops.length,1);const op=JSON.parse(readFileSync(join(config.operationsDir,ops[0])));assert.equal(op.planId,planId);assert.equal(op.actor.id,42);assert.deepEqual(op.targets,['hp-masternode-1']);
+ await page.setViewportSize({width:390,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));await page.screenshot({path:'artifacts/operator-node-mobile.png'});
+ await page.getByRole('button',{name:'Sign out'}).click();await page.getByRole('link',{name:'Sign in with GitHub'}).waitFor();assert.equal(await panel.count(),0);assert.deepEqual(errors,[]);
+ console.log('Node/component selection -> immutable review -> durable queued request passed. Fixture broker only; no live mutation.');
+}finally{if(browser)await browser.close();await new Promise(r=>server.close(r));rmSync(root,{recursive:true,force:true});}
