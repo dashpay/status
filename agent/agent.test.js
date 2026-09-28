@@ -111,6 +111,25 @@ test('operation lifecycle: request -> enroll -> plan -> review -> confirm -> upg
   assert.equal(readdirSync(dirs.requests).length, 0);
 });
 
+test('run as soon as ready: the prepared plan is confirmed automatically and executed', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ops-'));
+  const dirs = { data: root, private: join(root, 'private'), requests: join(root, 'req'), ops: join(root, 'ops'), work: join(root, 'work'), state: join(root, 'state') };
+  const calls = [];
+  const ops = createOps({ settings: () => settings, dirs, key: { path: '/key' }, pool: { knownHosts: () => 'x\n', pins: new Proxy({}, { get: () => ({ type: 'ssh-ed25519', key: 'k' }) }) }, binary: 'dashnet', log: () => {}, spawnImpl: fakeDashnet(calls) });
+  mkdirSync(dirs.state, { recursive: true });
+  writeFileSync(join(dirs.state, 'testnet.json'), JSON.stringify({ hosts: [host('seed-2', 'seed', [['dashd', 'dashpay/dashd'], ['tenderdash', 'dashpay/tenderdash']])] }));
+  const id = '8c8139ad-e92f-40da-943d-1e001efaccb5';
+  const actor = { id: 9920871, login: 'ktechmidas' };
+  writeFileSync(join(dirs.requests, `${id}.json`), JSON.stringify({ type: 'create', id, network: 'testnet', action: 'upgrade', nodes: ['seed-2'], components: ['tenderdash'], images: { tenderdash: 'dashpay/tenderdash:1.8.2' }, options: { autoRun: true }, actor }));
+  const read = () => JSON.parse(readFileSync(join(dirs.ops, `${id}.json`), 'utf8'));
+  for (let i = 0; i < 300; i++) { ops.tick(); if (existsSync(join(dirs.ops, `${id}.json`)) && ['succeeded', 'failed'].includes(read().status)) break; await new Promise((r) => setTimeout(r, 5)); }
+  const r = read();
+  assert.equal(r.status, 'succeeded', r.error);
+  assert.ok(r.autoConfirmed && r.confirmedBy.login === 'ktechmidas' && r.review.planId, 'plan kept and confirmed on the requester\'s behalf');
+  assert.ok(calls.some((a) => a[0] === 'managed-upgrade'));
+  assert.match(readFileSync(join(dirs.ops, `${id}.log`), 'utf8'), /confirmed automatically/);
+});
+
 test('requests from non-operators are dropped', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ops-'));
   const dirs = { data: root, private: join(root, 'private'), requests: join(root, 'req'), ops: join(root, 'ops'), work: join(root, 'work'), state: join(root, 'state') };
@@ -237,4 +256,42 @@ test('platform reset: review from non-destructive stages; a failed wipe stops be
   assert.ok(calls.includes('verify:seed-1') && r.result.healthy === true);
   // Per-host results are recorded as each host finishes.
   assert.ok(r.stages.start['hp-masternode-2'].ok && r.stages.verify['seed-1'].ok);
+});
+
+test('a devnet Core + Platform upgrade runs Core first, then plans and runs Platform from the result', async () => {
+  const { createDevnets } = await import('./devnets.js');
+  const root = mkdtempSync(join(tmpdir(), 'dn-'));
+  const dirs = { data: root, private: join(root, 'p'), state: join(root, 'state') };
+  const dir = join(dirs.private, 'devnets', 'devnet-x');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'deployment.json'), '{}');
+  writeFileSync(join(dir, 'network.yaml'), 'images:\n  core: docker.io/dashpay/dashd:23.1.7\n  drive: docker.io/dashpay/drive:4.2.0-beta.5\n');
+  const calls = [];
+  const dashnet = async (r, args) => {
+    calls.push([args[0], args.includes('--scope') ? args[args.indexOf('--scope') + 1] : '']);
+    const out = args[args.indexOf('--out') + 1];
+    if (args[0] === 'resolve') writeFileSync(out, '{}');
+    if (args[0] === 'upgrade-plan') {
+      const scope = args[args.indexOf('--scope') + 1];
+      const candidate = readFileSync(args[args.indexOf('--network') + 1], 'utf8');
+      // Platform is planned from the network file that already carries the new Core.
+      if (scope === 'platform') assert.match(candidate, /dashd:23\.1\.8/);
+      writeFileSync(out, JSON.stringify({ id: `${scope}`.padEnd(64, '0'), scope, from: { v: { core: 'a', drive: 'a' } }, to: { v: { core: scope === 'core' ? 'b' : 'a', drive: scope === 'core' ? 'a' : 'b' } } }));
+    }
+    return 0;
+  };
+  const r = { id: 'u1', network: 'devnet-x', steps: [], actor: { login: 'k' }, request: { components: ['core', 'drive'], images: { core: 'dashpay/dashd:23.1.8', drive: 'dashpay/drive:4.2.0-beta.6' } } };
+  const d = createDevnets({ ctx: { dashnet, step: () => () => {}, save: () => {}, write: () => {}, pinBinary: () => 'dashnet' }, dirs, key: { path: '/k' }, pool: {}, getSettings: () => settings, region: 'us-west-2', log: () => {} });
+  await d.prepareUpgrade(r);
+  assert.equal(r.review.scope, 'core + platform');
+  assert.equal(r.review.changes[0].component, 'core', 'the reviewed plan is the Core rollout');
+  assert.deepEqual(r.review.then[0].images, { drive: 'dashpay/drive:4.2.0-beta.6' });
+  await d.executeUpgrade(r);
+  assert.deepEqual(calls.map((c) => c.join(':')), ['resolve:', 'upgrade-plan:core', 'upgrade:', 'resolve:', 'upgrade-plan:platform', 'upgrade:']);
+  const current = readFileSync(join(dir, 'network-current.yaml'), 'utf8');
+  assert.match(current, /dashd:23\.1\.8/);
+  assert.match(current, /drive:4\.2\.0-beta\.6/);
+  // A resumed operation does not repeat a finished phase.
+  await d.executeUpgrade(r);
+  assert.equal(calls.filter((c) => c[0] === 'upgrade').length, 2);
 });

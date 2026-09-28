@@ -75,8 +75,11 @@ export function validateRequest(settings, q, registry = {}) {
     if (!registry[q.network] || registry[q.network].status !== 'ready') throw new Error('devnet is not ready');
     const components = q.components || [], images = q.images || {};
     if (q.action === 'upgrade') {
-      const allowed = ['drive', 'dapi', 'gateway', 'helper', 'tenderdash'];
-      if (!components.length || components.some((c) => !allowed.includes(c)) || new Set(components).size !== components.length) throw new Error(`select from ${allowed.join(', ')}; Core upgrades are not supported by dash-network-go yet`);
+      // Core needs a devnet whose pinned dash-network-go supports --scope core.
+      const core = (registry[q.network].upgradeScopes || []).includes('core');
+      const allowed = ['drive', 'dapi', 'gateway', 'helper', 'tenderdash', ...(core ? ['core'] : [])];
+      if (components.includes('core') && !core) throw new Error('this devnet was created with a dash-network-go that cannot upgrade Core; devnets created since Core upgrades landed can');
+      if (!components.length || components.some((c) => !allowed.includes(c)) || new Set(components).size !== components.length) throw new Error(`select from ${allowed.join(', ')}`);
       for (const c of components) if (!IMAGE(c).test(images[c] || '')) throw new Error(`${c}: image must be ${COMPONENT_REPOS[c]}:<tag> or @sha256:<digest>`);
       if (Object.keys(images).some((c) => !components.includes(c))) throw new Error('image for an unselected component');
     } else if (components.length) throw new Error('components apply to upgrade only');
@@ -297,6 +300,15 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     done(r.result.healthy ? 'ok' : 'failed', c === 0 ? 'fleet healthy' : 'see node results');
   }
 
+  // "Run as soon as the plan is ready": the prepared plan is still recorded and
+  // shown, and confirmed on the requester's behalf (upgrades/restores only).
+  function autoConfirm(r) {
+    if (r.request.options?.autoRun !== true || r.status !== 'review' || !['upgrade', 'deploy'].includes(r.request.action) || r.cancelRequested) return;
+    Object.assign(r, { status: 'confirmed', confirmedBy: r.actor, confirmedAt: new Date().toISOString(), autoConfirmed: true });
+    save(r);
+    write(r.id, `plan ${r.review?.planId} confirmed automatically for ${r.actor.login} (run as soon as ready)`);
+  }
+
   async function run(r) {
     live.set(r.id, r);
     try {
@@ -307,16 +319,21 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
         else if (r.status === 'confirmed') { await mod[impl[1]](r); r.status = 'succeeded'; r.finishedAt = new Date().toISOString(); }
       } else if (getSettings().networks.find((n) => n.name === r.network)?.kind === 'dashnet') {
         if (r.request.action === 'doctor') { await devnets.doctor(r); r.status = r.result.healthy ? 'succeeded' : 'failed'; }
-        else if (r.status === 'queued') { await devnets.prepareUpgrade(r); r.status = 'review'; }
-        else if (r.status === 'confirmed') { await devnets.executeUpgrade(r); r.status = 'succeeded'; r.finishedAt = new Date().toISOString(); }
-      } else if (r.status === 'queued') {
-        const { dir } = await prepare(r);
-        if (r.request.action === 'doctor') { await doctor(r, dir); r.status = r.result.healthy ? 'succeeded' : 'failed'; }
-        else if (r.request.action === 'enroll') r.status = 'succeeded';
-        else r.status = 'review';
-      } else if (r.status === 'confirmed') {
-        await execute(r);
-        r.status = 'succeeded'; r.finishedAt = new Date().toISOString();
+        else {
+          if (r.status === 'queued') { await devnets.prepareUpgrade(r); r.status = 'review'; autoConfirm(r); }
+          if (r.status === 'confirmed') { await devnets.executeUpgrade(r); r.status = 'succeeded'; r.finishedAt = new Date().toISOString(); }
+        }
+      } else {
+        if (r.status === 'queued') {
+          const { dir } = await prepare(r);
+          if (r.request.action === 'doctor') { await doctor(r, dir); r.status = r.result.healthy ? 'succeeded' : 'failed'; }
+          else if (r.request.action === 'enroll') r.status = 'succeeded';
+          else { r.status = 'review'; autoConfirm(r); }
+        }
+        if (r.status === 'confirmed') {
+          await execute(r);
+          r.status = 'succeeded'; r.finishedAt = new Date().toISOString();
+        }
       }
     } catch (e) {
       r.status = r.cancelRequested ? 'cancelled' : shuttingDown ? 'interrupted' : 'failed';
@@ -362,7 +379,9 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     const lifecycle = LIFECYCLE.has(q.action) || LIFECYCLE.has(load(q.id)?.request?.action);
     if (!actor || !(lifecycle ? adminFor(s, actor) : operatorFor(s, actor, q.network))) throw new Error(lifecycle ? 'only admins create or delete devnets' : 'actor is not an operator for this network');
     if (q.type === 'create') {
-      const request = { id: q.id, network: q.network, action: q.action, nodes: q.nodes || [], components: q.components || [], images: q.images || {}, options: q.options || {}, ...(q.devnet ? { devnet: q.devnet } : {}), ...(q.services ? { services: q.services } : {}), ...(q.confirmName ? { confirmName: q.confirmName } : {}) };
+      const options = { ...(q.options || {}) };
+      if (options.autoRun !== undefined && typeof options.autoRun !== 'boolean') delete options.autoRun;
+      const request = { id: q.id, network: q.network, action: q.action, nodes: q.nodes || [], components: q.components || [], images: q.images || {}, options, ...(q.devnet ? { devnet: q.devnet } : {}), ...(q.services ? { services: q.services } : {}), ...(q.confirmName ? { confirmName: q.confirmName } : {}) };
       let r = { id: q.id, network: q.network, actor, createdAt: new Date().toISOString(), request, status: 'queued', steps: [] };
       if (existsSync(recordPath(q.id))) throw new Error('duplicate request id');
       try { validateRequest(s, request, devnets.registry()); } catch (e) { r = { ...r, status: 'rejected', error: e.message }; }

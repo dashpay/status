@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, navigate, useResource, useSession, ROLE_LABEL, ago } from '../lib.js';
 import { Dot, Empty, Err, Link, Section } from '../ui.jsx';
+import { cmp, newestRelease, reported } from '../releases.js';
 
 const COMPONENTS = ['core', 'drive', 'tenderdash', 'dapi', 'gateway', 'helper'];
 const REPOS = { core: 'dashpay/dashd', drive: 'dashpay/drive', tenderdash: 'dashpay/tenderdash', dapi: 'dashpay/rs-dapi', gateway: 'dashpay/envoy', helper: 'dashpay/dashmate-helper' };
@@ -32,7 +33,10 @@ export default function Deploy({ name }) {
   const hosts = useMemo(() => (n?.hosts || []).filter((h) => OPERABLE.includes(h.role) && !h.duplicate), [n]);
   // dash-network-go upgrades every validator, one at a time; there is no node selection.
   const chosen = native ? hosts.filter((h) => h.role === 'validator') : hosts.filter((h) => selected.has(h.name));
-  const available = new Set(chosen.flatMap((h) => ROLE_COMPONENTS[h.role].filter((c) => (!native || c !== 'core') && h.containers.some((k) => k.component === c))));
+  const coreUpgradable = !native || (n?.upgradeScopes || []).includes('core');
+  const available = new Set(chosen.flatMap((h) => ROLE_COMPONENTS[h.role].filter((c) => (c !== 'core' || coreUpgradable) && h.containers.some((k) => k.component === c))));
+  const [autoRun, setAutoRun] = useState(true);
+  const [filling, setFilling] = useState(null);
   const archs = [...new Set(chosen.map((h) => h.arch))];
   const needsComponents = action === 'upgrade' || action === 'deploy';
   const activeComponents = [...components].filter((c) => available.has(c));
@@ -55,10 +59,23 @@ export default function Deploy({ name }) {
     if (action === 'upgrade' && !new RegExp(`^(docker\\.io/)?${REPOS[c]}(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|@sha256:[0-9a-f]{64})$`).test(images[c] || '')) problems.push(`${c}: enter ${REPOS[c]}:<tag>`);
   }
 
+  // One click: newest release per component (same major line) where it is newer.
+  async function fillNewest() {
+    setFilling('loading');
+    const picks = {};
+    await Promise.all([...available].map(async (c) => {
+      const running = [...new Set(chosen.map((h) => reported(h, c)).filter(Boolean))].sort(cmp)[0];
+      try { const { tags } = await api(`/api/images/${c}/tags`); const t = newestRelease(tags, running); if (t) picks[c] = `${REPOS[c]}:${t}`; } catch { /* tags unavailable */ }
+    }));
+    setImages((x) => ({ ...x, ...picks }));
+    setComponents(new Set(Object.keys(picks)));
+    setFilling(Object.keys(picks).length ? `${Object.keys(picks).length} newer release(s) selected` : 'everything already runs the newest release in its line');
+  }
+
   async function submit() {
     setBusy(true); setSubmitError(null);
     try {
-      const body = { action, nodes: native ? [] : chosen.map((h) => h.name), components: needsComponents ? activeComponents : [], images: action === 'upgrade' ? Object.fromEntries(activeComponents.map((c) => [c, images[c]])) : {}, options: { ...(window ? { observationWindow: window } : {}), ...(timeout ? { timeout } : {}) } };
+      const body = { action, nodes: native ? [] : chosen.map((h) => h.name), components: needsComponents ? activeComponents : [], images: action === 'upgrade' ? Object.fromEntries(activeComponents.map((c) => [c, images[c]])) : {}, options: { ...(window ? { observationWindow: window } : {}), ...(timeout ? { timeout } : {}), ...(needsComponents ? { autoRun } : {}) } };
       const r = await api(`/api/networks/${name}/ops`, { method: 'POST', body });
       navigate(`/n/${name}/ops/${r.id}`);
     } catch (e) { setSubmitError(e); setBusy(false); }
@@ -85,7 +102,7 @@ export default function Deploy({ name }) {
 
       {native ? (
         <Section title={`2 · Nodes · all ${chosen.length} validators`}>
-          <div className="panel p-3 text-[12px] text-dim">dash-network-go withdraws one validator at a time and requires the whole fleet (advancing consensus, common block hashes, DAPI, membership) to be healthy before the next. Core is never restarted by an upgrade.</div>
+          <div className="panel p-3 text-[12px] text-dim">dash-network-go withdraws one node at a time and requires the whole fleet (advancing consensus, common block hashes, DAPI, membership) to be healthy before the next. A Core upgrade runs first on every node (validators, then the mining node); Platform images then roll across the validators. {coreUpgradable ? '' : <span className="lv-warn">This devnet was created with a dash-network-go that cannot upgrade Core; newer devnets can.</span>}</div>
         </Section>
       ) : (
       <Section title={`2 · Nodes · ${chosen.length} selected`} right={
@@ -116,7 +133,12 @@ export default function Deploy({ name }) {
       )}
 
       {needsComponents && (
-        <Section title="3 · Components">
+        <Section title="3 · Components" right={action === 'upgrade' && chosen.length > 0 && (
+          <span className="flex items-center gap-2">
+            {filling && filling !== 'loading' && <span className="text-dim text-[12px]">{filling}</span>}
+            <button className="btn !py-0.5" disabled={filling === 'loading'} onClick={fillNewest}>{filling === 'loading' ? 'Checking releases…' : 'Use newest releases'}</button>
+          </span>
+        )}>
           <div className="panel p-3 space-y-2">
             {!chosen.length && <div className="text-dim">Select nodes first.</div>}
             {COMPONENTS.filter((c) => available.has(c)).map((c) => (
@@ -136,12 +158,14 @@ export default function Deploy({ name }) {
           <label className="text-[12px]"><div className="text-dim mb-1">Observation window (health gap between checks)</div><input className="input w-28 mono" placeholder={n.observationWindow} value={window} onChange={(e) => setWindow(e.target.value.trim())} /></label>
           {(action === 'upgrade' || action === 'deploy') && <label className="text-[12px]"><div className="text-dim mb-1">Operation timeout</div><input className="input w-28 mono" placeholder={n.operationTimeout} value={timeout} onChange={(e) => setTimeoutValue(e.target.value.trim())} /></label>}
           <div className="text-dim text-[11.5px] max-w-[520px]">Defaults come from Settings. Upgrades withdraw one host at a time; validators additionally require the remaining quorum to be healthy before each withdrawal.</div>
+          {needsComponents && <label className="flex items-center gap-2 text-[12px] cursor-pointer"><input type="checkbox" checked={autoRun} onChange={(e) => setAutoRun(e.target.checked)} />
+            <span>Start as soon as the plan is ready <span className="text-dim">(the exact plan stays on the operation page; cancel any time)</span></span></label>}
         </div>
       </Section>
 
       <div className="mt-5 flex items-center gap-3">
-        <button className="btn btn-primary" disabled={busy || problems.length > 0} onClick={submit}>{busy ? 'Submitting…' : action === 'upgrade' || action === 'deploy' ? 'Prepare plan for review' : action === 'doctor' ? 'Run health check' : 'Enroll hosts'}</button>
-        <span className="text-dim text-[12px]">{problems.length ? problems[0] : action === 'upgrade' || action === 'deploy' ? 'Nothing changes until you confirm the prepared plan.' : ''}</span>
+        <button className="btn btn-primary" disabled={busy || problems.length > 0} onClick={submit}>{busy ? 'Submitting…' : needsComponents ? (autoRun ? (action === 'upgrade' ? 'Upgrade now' : 'Restart now') : 'Prepare plan for review') : action === 'doctor' ? 'Run health check' : 'Enroll hosts'}</button>
+        <span className="text-dim text-[12px]">{problems.length ? problems[0] : needsComponents ? (autoRun ? 'Plans, then runs straight away; progress shows on the operation page.' : 'Nothing changes until you confirm the prepared plan.') : ''}</span>
       </div>
       {submitError && <div className="mt-3"><Err error={submitError} /></div>}
     </div>
