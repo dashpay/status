@@ -183,7 +183,12 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     register(name, { coreNetwork: dplan.coreNetwork, platformChainId: dplan.platformChainId });
 
     done = step(r, 'Core, EvoNode registration, quorums, Platform (dashnet deploy)');
-    await run(r, 'deploy', ['deploy', '--plan', join(dir, 'deployment.json'), '--confirm', dplan.id, ...access(dir), '--timeout', '100m', '--observation-window', '90s', '--out', join(dir, `deployed.${stamp()}.json`)], { timeoutMs: 101 * 60_000 });
+    // A validator can be PoSe-banned by an early DKG while the fleet is still
+    // forming; dashnet then waits forever for it. Revive such nodes meanwhile.
+    const watcher = setInterval(() => reviveBanned(r, name, dplan).catch((e) => write(r.id, `revive: ${e.message}`)), 60_000);
+    try {
+      await run(r, 'deploy', ['deploy', '--plan', join(dir, 'deployment.json'), '--confirm', dplan.id, ...access(dir), '--timeout', '100m', '--observation-window', '90s', '--out', join(dir, `deployed.${stamp()}.json`)], { timeoutMs: 101 * 60_000 });
+    } finally { clearInterval(watcher); }
     done('ok');
     register(name, { status: 'services' });
 
@@ -196,6 +201,33 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     const code = await run(r, 'doctor', ['doctor', '--plan', join(dir, 'deployment.json'), ...access(dir), '--timeout', '5m', '--observation-window', '90s', '--out', join(dir, `health.${stamp()}.json`)], { allowFail: true, timeoutMs: 6 * 60_000 });
     done(code === 0 ? 'ok' : 'warn', code === 0 ? 'all targets healthy' : 'see log');
     register(name, { status: 'ready', readyAt: new Date().toISOString() });
+  }
+
+  const revived = new Map();
+  async function reviveBanned(r, name, dplan) {
+    const state = readJSON(join(dirs.state, `${name}.json`));
+    const banned = (state?.hosts || []).filter((h) => h.role === 'validator' && h.probe?.data?.core?.masternode?.state === 'POSE_BANNED');
+    const wallet = dplan.targets.find((t) => t.role === 'wallet');
+    const w = { name: wallet.name, instanceId: wallet.instanceId, publicIp: wallet.sshAddress };
+    const core = `sudo docker exec -i $(sudo docker ps --format '{{.Names}}' | grep -- '-core$' | head -1) dash-cli -conf=/etc/dash/dash.conf`;
+    for (const h of banned) {
+      if (Date.now() - (revived.get(h.instanceId) || 0) < 10 * 60_000) continue;
+      revived.set(h.instanceId, Date.now());
+      const t = dplan.targets.find((x) => x.instanceId === h.instanceId);
+      if (!t) continue;
+      const list = JSON.parse(await pool.exec(w, `${core} protx list registered true`, null, 60_000));
+      const mn = list.find((x) => x.state.service.startsWith(`${t.peerAddress}:`));
+      if (!mn || mn.state.PoSeBanHeight <= 0) continue;
+      const s = mn.state;
+      // Fee from an existing confirmed, unlocked wallet UTXO.
+      const locked = new Set(JSON.parse(await pool.exec(w, `${core} -rpcwallet=dashnet listlockunspent`, null, 60_000)).map((u) => `${u.txid}:${u.vout}`));
+      const utxo = JSON.parse(await pool.exec(w, `${core} -rpcwallet=dashnet listunspent 1`, null, 60_000)).find((u) => u.amount >= 1 && !locked.has(`${u.txid}:${u.vout}`) && u.address);
+      if (!utxo) { write(r.id, `revive ${t.name}: no spendable fee UTXO yet`); continue; }
+      const key = (await pool.exec({ name: t.name, instanceId: t.instanceId, publicIp: t.sshAddress }, `sudo python3 -c 'import json;print(json.load(open("/var/lib/dashnet/secrets.json"))["operatorPrivateKey"])'`, null, 30_000)).trim();
+      if (!/^[0-9a-f]{64}$/.test(key)) throw new Error(`unexpected operator key format on ${t.name}`);
+      const tx = (await pool.exec(w, `read k; ${core} -rpcwallet=dashnet protx update_service_evo ${mn.proTxHash} ${s.service} "$k" ${s.platformNodeID} ${s.platformP2PPort} ${s.platformHTTPPort} "" ${utxo.address}`, `${key}\n`, 60_000)).trim();
+      write(r.id, `revived PoSe-banned ${t.name} (ban height ${s.PoSeBanHeight}) with ProUpServTx ${tx.slice(0, 16)}…`);
+    }
   }
 
   function pinHostKeys(text) {
