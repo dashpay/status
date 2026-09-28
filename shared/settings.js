@@ -33,12 +33,16 @@ export const DEFAULT_SETTINGS = {
     images: {
       core: 'dashpay/dashd:23', drive: 'dashpay/drive:4.2.0-beta.5', dapi: 'dashpay/rs-dapi:4.2.0-beta.5',
       tenderdash: 'dashpay/tenderdash:1.8.1', gateway: 'dashpay/envoy:1.39.0-impr.1', helper: 'dashpay/dashmate-helper:4.2.0-beta.5',
+      // ACME client for each validator's Let's Encrypt certificate (public IP).
+      acme: 'goacme/lego:v5.5.2',
     },
+    acmeEmail: 'infrastructure@dash.org',
     services: {
       quorumServer: 'dashpay/quorum-list-server:0.7.0',
+      insightImage: 'dashpay/insight:4.0.10',
       explorerVersion: '2.5.3',
       faucetRef: 'b927e6058845ebf3c0722e56eb0e89642e98c28b',
-      faucetAmount: 10, faucetRateLimit: 20, faucetFunding: 5000, epochSeconds: 3600,
+      faucetAmount: 10, faucetRateLimit: 20, faucetFunding: 50000, epochSeconds: 3600,
     },
     dnsZoneId: 'Z0875113JJTK7DOU978T', dnsSuffix: 'networks.dash.org',
   },
@@ -64,14 +68,8 @@ export const DEFAULT_SETTINGS = {
       ],
       observationWindow: '4m', operationTimeout: '110m',
     },
-    {
-      name: 'mainnet', displayName: 'Mainnet', tag: 'mainnet-support', chainType: 'mainnet', coreNetwork: 'main', p2pPort: 9999,
-      public: true, deployable: false, showBalances: false,
-      endpoints: [
-        { label: 'Quorums', url: 'https://quorums.mainnet.networks.dash.org/health' },
-      ],
-      observationWindow: '4m', operationTimeout: '110m',
-    },
+    // Mainnet (EC2 tag mainnet-support) is off the board for now; an admin can
+    // add it back in Settings as a monitor-only (non-deployable) network.
   ],
 };
 
@@ -149,8 +147,11 @@ export function validateDevnetDefaults(d) {
   for (const k of ['validatorArch', 'walletArch']) req(['arm64', 'amd64'].includes(d[k]), `${k} must be arm64 or amd64`);
   req(Number.isInteger(d.protocol) && d.protocol >= 1 && d.protocol <= 100, 'protocol invalid');
   for (const c of COMPONENTS) req(IMAGE_TAG.test(d.images?.[c] || '') && d.images[c].replace(/^docker\.io\//, '').split(/[@:]/)[0] === COMPONENT_REPOS[c], `images.${c} must be ${COMPONENT_REPOS[c]}:<tag>`);
+  req(!d.images?.acme || (IMAGE_TAG.test(d.images.acme) && d.images.acme.replace(/^docker\.io\//, '').split(/[@:]/)[0] === 'goacme/lego'), 'images.acme must be goacme/lego:<tag> (or empty for self-signed gateways)');
+  req(!d.images?.acme || /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,24}$/.test(d.acmeEmail || ''), 'acmeEmail required for trusted gateway certificates');
   const sv = d.services || {};
   req(IMAGE_TAG.test(sv.quorumServer || '') && /^(docker\.io\/)?dashpay\/quorum-list-server[:@]/.test(sv.quorumServer), 'services.quorumServer must be dashpay/quorum-list-server:<tag>');
+  req(IMAGE_TAG.test(sv.insightImage || '') && /^(docker\.io\/)?dashpay\/insight[:@]/.test(sv.insightImage), 'services.insightImage must be dashpay/insight:<tag>');
   req(/^\d+\.\d+\.\d+$|^nightly$/.test(sv.explorerVersion || ''), 'services.explorerVersion like 2.5.3');
   req(/^[0-9a-f]{40}$/.test(sv.faucetRef || ''), 'services.faucetRef must be a full dash-faucet commit');
   req(typeof sv.faucetAmount === 'number' && sv.faucetAmount > 0 && sv.faucetAmount <= 1000, 'services.faucetAmount 0..1000');
@@ -195,6 +196,7 @@ export function devnetEntry(name, reg) {
     p2pPort: 20001, public: reg.public !== false, deployable: reg.status === 'ready', showBalances: true, kind: 'dashnet',
     description: '',
     endpoints: [
+      dns.insight && { label: 'Insight', url: `https://${dns.insight.host}/insight-api/status` },
       dns.quorums && { label: 'Quorums', url: `https://${dns.quorums.host}/health` },
       dns.explorer && { label: 'Explorer', url: `https://${dns.explorer.host}/` },
       dns.faucet && { label: 'Faucet', url: `https://${dns.faucet.host}/api/status` },

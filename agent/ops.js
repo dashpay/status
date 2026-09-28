@@ -57,7 +57,7 @@ export function validateRequest(settings, q, registry = {}) {
     const reg = registry[q.network];
     if (!reg || reg.status === 'deleted') throw new Error('services are managed only for console devnets');
     const sv = q.services || {};
-    const allowed = ['quorumServer', 'explorerVersion', 'faucetRef', 'faucetAmount', 'faucetRateLimit', 'faucetFunding'];
+    const allowed = ['quorumServer', 'insightImage', 'explorerVersion', 'faucetRef', 'faucetAmount', 'faucetRateLimit', 'faucetFunding'];
     if (Object.keys(sv).some((k) => !allowed.includes(k))) throw new Error(`service settings: ${allowed.join(', ')}`);
     validateDevnetDefaults({ ...settings.devnets, services: { ...settings.devnets.services, ...sv } });
     return { lifecycle: true };
@@ -71,7 +71,7 @@ export function validateRequest(settings, q, registry = {}) {
   const network = settings.networks.find((n) => n.name === q.network);
   if (network?.kind === 'dashnet') {
     // Console devnets: dash-network-go native upgrade (all validators) and doctor.
-    if (!['upgrade', 'doctor'].includes(q.action)) throw new Error('console devnets support upgrade and health gate');
+    if (!['upgrade', 'doctor'].includes(q.action)) throw new Error('console devnets support upgrade and health check');
     if (!registry[q.network] || registry[q.network].status !== 'ready') throw new Error('devnet is not ready');
     const components = q.components || [], images = q.images || {};
     if (q.action === 'upgrade') {
@@ -289,7 +289,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
 
   async function doctor(r, dir) {
     const { window } = validateRequest(getSettings(), r.request);
-    const done = step(r, 'Health gate (managed-doctor)');
+    const done = step(r, 'Health check (managed-doctor)');
     const c = await dashnet(r, ['managed-doctor', '--snapshot', join(dir, 'snapshot.json'), ...access(dir), '--observation-window', window, '--timeout', '20m', '--out', join(dir, 'health.json')], { timeoutMs: 21 * 60_000 });
     const h = readJSON(join(dir, 'health.json'));
     const nodes = Object.fromEntries(r.request.nodes.map((n) => [n, h?.nodes?.[n] ? { healthy: !!h.nodes[n].healthy, status: h.nodes[n].status, problems: h.nodes[n].problems || [] } : null]));

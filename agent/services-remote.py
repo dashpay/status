@@ -13,7 +13,7 @@ Input: argv[1] is base64 JSON or @file (no secrets). The Core RPC password is re
 this host from /var/lib/dashnet/secrets.json and written only to 0600 files here.
 Prints one JSON line with results.
 """
-import base64, fcntl, json, os, re, secrets, subprocess, sys, time, urllib.request
+import base64, fcntl, hashlib, json, os, re, secrets, subprocess, sys, time, urllib.request
 from pathlib import Path
 
 arg = sys.argv[1]
@@ -23,6 +23,7 @@ ROOT.mkdir(mode=0o700, exist_ok=True)
 log = lambda m: print(m, file=sys.stderr, flush=True)
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 RPC_PORT = int(cfg['coreRpcPort'])
+ZMQ_PORT = int(cfg.get('coreZmqPort', 29998))
 PASSWORD = json.loads(Path('/var/lib/dashnet/secrets.json').read_text())['rpcPassword']
 AUX = {'dashnet.auxiliary': cfg.get('auxiliary', '')}
 
@@ -78,7 +79,8 @@ def faucet_wallet():
         free = rpc('getbalance', wallet='dashnet')
         amount = min(funding - bal, max(0.0, free - 500))
         if amount >= 50:
-            parts = 20
+            # About 1000 DASH per output keeps collateral-sized payouts cheap.
+            parts = max(20, min(100, int(amount // 1000)))
             outs = {rpc('getnewaddress', wallet='faucet'): round(amount / parts, 8) for _ in range(parts)}
             txid = rpc('sendmany', ['', outs], wallet='dashnet')
             log(f'funded faucet wallet with {amount:.2f} in {parts} outputs: {txid}')
@@ -171,6 +173,55 @@ def patch_explorer_api(image):
     return mounts
 
 
+def promo_codes():
+    """Per-devnet faucet promo codes for collateral-sized amounts, as the legacy
+    devnet faucet offers (masternode, EvoNode, Platform funding). Generated once,
+    root-only; shared with network members by the console, never logged."""
+    path = ROOT / 'promo.json'
+    if path.exists():
+        return json.loads(path.read_text())
+    codes = {f'{kind}-{secrets.token_hex(4).upper()}': amount for kind, amount in [('MASTERNODE', 1005), ('EVONODE', 4005), ('PLATFORM', 55)]}
+    write('promo.json', json.dumps(codes))
+    return codes
+
+
+def insight_files():
+    """dashcore-node config for the wallet host's Core (which dash-network-go runs
+    with txindex/addressindex/spentindex/timestampindex and loopback ZMQ), plus a
+    patch so the web service listens on loopback only, behind Caddy."""
+    image = cfg['insightImage']
+    sh('docker', 'pull', '--quiet', image, timeout=1200)
+    write('insight.json', json.dumps(dict(
+        network='testnet', port=3001,
+        services=['dashd', '@dashevo/insight-api', '@dashevo/insight-ui', 'web'],
+        servicesConfig={'dashd': {'connect': [dict(rpchost='127.0.0.1', rpcport=RPC_PORT, rpcuser='dashnet', rpcpassword=PASSWORD,
+                                                   zmqpubrawtx=f'tcp://127.0.0.1:{ZMQ_PORT}', zmqpubhashblock=f'tcp://127.0.0.1:{ZMQ_PORT}')]},
+                        '@dashevo/insight-api': {'disableRateLimiter': True}}), indent=1))
+    web = subprocess.run(['docker', 'run', '--rm', '--label', f"dashnet.auxiliary={AUX['dashnet.auxiliary']}", '--entrypoint', 'cat', image, '/insight/lib/services/web.js'],
+                         capture_output=True, check=True, timeout=120).stdout.decode()
+    patched = web.replace('self.server.listen(self.port);', "self.server.listen(self.port, '127.0.0.1');")
+    if patched == web:
+        # Host networking: never fall back to listening on every interface.
+        raise RuntimeError('insight: web listener code changed upstream; refusing to start it unpatched')
+    write('insight-web.js', patched, 0o644)
+    return [f'{ROOT}/insight.json:/insight/dashcore-node.json:ro', f'{ROOT}/insight-web.js:/insight/lib/services/web.js:ro']
+
+
+def insight_blocks(seconds=300):
+    # Insight is useful once it follows the chain tip, not just when it answers.
+    end, last = time.time() + seconds, None
+    while time.time() < end:
+        try:
+            with opener.open('http://127.0.0.1:3001/insight-api/status?q=getInfo', timeout=10) as r:
+                last = json.loads(r.read()).get('info', {}).get('blocks')
+            if isinstance(last, int) and last >= rpc('getblockcount') - 2:
+                return last
+        except Exception:
+            pass
+        time.sleep(5)
+    return f'behind at {last}'
+
+
 # ---- compose --------------------------------------------------------------
 def compose(faucet_image, frontend_image):
     pg = secret('postgres')
@@ -181,9 +232,11 @@ def compose(faucet_image, frontend_image):
     write('qls.env', '\n'.join([
         'API_HOST=127.0.0.1', 'API_PORT=8080', 'DASH_NETWORK=devnet', 'QUORUM_PREVIOUS_BLOCKS_OFFSET=8',
         f'DASH_RPC_URL=http://127.0.0.1:{RPC_PORT}', 'DASH_RPC_USER=dashnet', f'DASH_RPC_PASSWORD={PASSWORD}', '']))
+    codes = promo_codes()
     write('faucet.env', '\n'.join([
         f'DASH_RPC_HOST=127.0.0.1:{RPC_PORT}/wallet/faucet#', f'DASH_RPC_PORT={RPC_PORT}', 'DASH_RPC_USER=dashnet', f'DASH_RPC_PASSWORD={PASSWORD}',
-        f"CORE_FAUCET_AMOUNT={cfg['faucetAmount']}", f"RATE_LIMIT_PER_HOUR={cfg['faucetRateLimit']}", 'ISLOCK_TIMEOUT=60', 'CAP_SITE_KEY=', 'CAP_SECRET=', '']))
+        f"CORE_FAUCET_AMOUNT={cfg['faucetAmount']}", f"RATE_LIMIT_PER_HOUR={cfg['faucetRateLimit']}", 'ISLOCK_TIMEOUT=60', 'CAP_SITE_KEY=', 'CAP_SECRET=',
+        "PROMO_CODES='" + json.dumps({c: {'amount': a} for c, a in codes.items()}) + "'", '']))
     common = [f'POSTGRES_HOST=127.0.0.1', 'POSTGRES_PORT=5433', 'POSTGRES_DB=explorer', 'POSTGRES_USER=explorer', f'POSTGRES_PASS={pg}',
               f"TENDERDASH_URL={cfg['tenderdashUrl']}"]
     write('explorer-indexer.env', '\n'.join(common + [
@@ -192,11 +245,13 @@ def compose(faucet_image, frontend_image):
     write('explorer-api.env', '\n'.join(common + [
         'DASHCORE_HOST=127.0.0.1', f'DASHCORE_PORT={RPC_PORT}', 'DASHCORE_USER=dashnet', f'DASHCORE_PASS={PASSWORD}',
         'DAPI_URL=' + ','.join(cfg['dapiUrls']), 'NETWORK=testnet', f"EPOCH_CHANGE_TIME={cfg['epochSeconds'] * 1000}",
-        'CONTESTED_RESOURCE_VOTE_DEADLINE=5400000', 'TCP_CONNECT_TIMEOUT=400', 'NODE_TLS_REJECT_UNAUTHORIZED=0', '']))
+        'CONTESTED_RESOURCE_VOTE_DEADLINE=5400000', 'TCP_CONNECT_TIMEOUT=400',
+        *([] if cfg.get('trustedGateways') else ['NODE_TLS_REJECT_UNAUTHORIZED=0']), '']))
     write('postgres.env', f'POSTGRES_DB=explorer\nPOSTGRES_USER=explorer\nPOSTGRES_PASSWORD={pg}\n')
     h = cfg['hosts']
     write('Caddyfile', '\n'.join([
         '{', '  email infrastructure@dash.org', '}',
+        f"{h['insight']} {{", '  redir / /insight/', '  reverse_proxy 127.0.0.1:3001', '}',
         f"{h['quorums']} {{", '  reverse_proxy 127.0.0.1:8080', '}',
         f"{h['explorer']} {{", '  handle_path /backend/* {', '    reverse_proxy 127.0.0.1:3005', '  }', '  reverse_proxy 127.0.0.1:3000', '}',
         f"{h['faucet']} {{", '  reverse_proxy 127.0.0.1:8000', '}', '']), 0o644)
@@ -205,6 +260,7 @@ def compose(faucet_image, frontend_image):
     idx = f'ghcr.io/pshenmic/platform-explorer-indexer:{ev}'
     spec = dict(name='devnet-services', services=dict(
         quorums=svc(cfg['quorumServerImage'], env_file=[f'{ROOT}/qls.env']),
+        insight=svc(cfg['insightImage'], volumes=insight_files()),
         faucet=svc(faucet_image, env_file=[f'{ROOT}/faucet.env'], healthcheck=dict(test=['CMD', 'curl', '-fsS', 'http://127.0.0.1:8000/health'], interval='30s', retries=3), command=['uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', '8000']),
         postgres=svc('postgres:17', env_file=[f'{ROOT}/postgres.env'], command=['postgres', '-c', 'listen_addresses=127.0.0.1', '-c', 'port=5433'], volumes=['explorer-db:/var/lib/postgresql/data'],
                      healthcheck=dict(test=['CMD-SHELL', 'pg_isready -h 127.0.0.1 -p 5433 -U explorer -d explorer'], interval='5s', retries=30)),
@@ -214,8 +270,15 @@ def compose(faucet_image, frontend_image):
         **{'explorer-frontend': svc(frontend_image)},
         caddy=svc('caddy:2', volumes=[f'{ROOT}/Caddyfile:/etc/caddy/Caddyfile:ro', 'caddy-data:/data', 'caddy-config:/config']),
     ), volumes={'explorer-db': {}, 'caddy-data': {}, 'caddy-config': {}})
+    # Files are replaced atomically, so a running container keeps the old inode.
+    # A content hash per service makes compose recreate exactly the services
+    # whose bind-mounted or env files changed (e.g. Caddy after a new site).
+    for svc_spec in spec['services'].values():
+        files = [v.split(':')[0] for v in svc_spec.get('volumes', []) if v.startswith(str(ROOT))] + list(svc_spec.get('env_file', []))
+        digest = hashlib.sha256(b''.join(Path(f).read_bytes() for f in sorted(files))).hexdigest()[:16]
+        svc_spec['labels'] = {**svc_spec.get('labels', {}), 'devnet.config': digest}
     write('compose.json', json.dumps(spec, indent=1))
-    sh('docker', 'compose', '-f', str(ROOT / 'compose.json'), 'pull', '--quiet', 'quorums', 'postgres', 'explorer-migrate', 'explorer-api', 'caddy', timeout=1200)
+    sh('docker', 'compose', '-f', str(ROOT / 'compose.json'), 'pull', '--quiet', 'quorums', 'insight', 'postgres', 'explorer-migrate', 'explorer-api', 'caddy', timeout=1200)
     sh('docker', 'compose', '-f', str(ROOT / 'compose.json'), 'up', '-d', '--remove-orphans', timeout=1200)
 
 
@@ -278,7 +341,8 @@ frontend_image = build_explorer_frontend()
 compose(faucet_image, frontend_image)
 topup_cron()
 result = dict(faucetBalance=balance, faucetImage=faucet_image, frontendImage=frontend_image,
-              quorums=wait('http://127.0.0.1:8080/health'), quorumList=wait_quorums(), faucet=wait('http://127.0.0.1:8000/health'),
+              quorums=wait('http://127.0.0.1:8080/health'), quorumList=wait_quorums(),
+              insight=wait('http://127.0.0.1:3001/insight-api/status'), insightBlocks=insight_blocks(), faucet=wait('http://127.0.0.1:8000/health'),
               explorerApi=wait('http://127.0.0.1:3005/status', 300), explorerValidators=wait('http://127.0.0.1:3005/validators?limit=1', 180), explorerFrontend=wait('http://127.0.0.1:3000/', 300),
-              walletAddress=rpc('getnewaddress', wallet='faucet'))
+              walletAddress=rpc('getnewaddress', wallet='faucet'), promoCodes=promo_codes())
 print(json.dumps(result))

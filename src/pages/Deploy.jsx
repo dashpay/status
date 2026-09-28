@@ -4,11 +4,12 @@ import { Dot, Empty, Err, Link, Section } from '../ui.jsx';
 
 const COMPONENTS = ['core', 'drive', 'tenderdash', 'dapi', 'gateway', 'helper'];
 const REPOS = { core: 'dashpay/dashd', drive: 'dashpay/drive', tenderdash: 'dashpay/tenderdash', dapi: 'dashpay/rs-dapi', gateway: 'dashpay/envoy', helper: 'dashpay/dashmate-helper' };
+// Plain-language actions; the dashnet command runs underneath (shown in the header).
 const ACTIONS = [
-  { id: 'upgrade', title: 'Upgrade images', text: 'Pull, pin by digest and replace the selected containers one host at a time behind health gates.' },
-  { id: 'deploy', title: 'Restore stopped', text: 'Start previously captured containers with their exact current images.' },
-  { id: 'doctor', title: 'Health gate', text: 'Run dashnet managed-doctor across the fleet; read-only.' },
-  { id: 'enroll', title: 'Enroll', text: 'Write host recovery records; no container restarts.' },
+  { id: 'upgrade', title: 'Upgrade images', text: 'Change the version of selected components. Each image is pinned by digest and swapped one host at a time; the next host waits until the whole fleet passes the health check.' },
+  { id: 'deploy', title: 'Restart stopped containers', text: 'Recovery: start containers that are stopped (crash, reboot, deliberate stop) with exactly the image and settings recorded at enrollment. No version change, not for new nodes.' },
+  { id: 'doctor', title: 'Health check', text: 'Read-only. Observes each host twice across the observation window: services running, Core synced and advancing with ChainLocks, masternode READY, Platform advancing in agreement, DAPI answering.' },
+  { id: 'enroll', title: 'Enroll hosts', text: 'One-time, changes nothing running: records each host\'s container setup (images, commands, mounts) as a root-only recovery file and in the shared dashnet journal. Upgrades and restarts need it; they enroll new hosts automatically.' },
 ];
 const OPERABLE = ['validator', 'masternode', 'seed'];
 const ROLE_COMPONENTS = { validator: COMPONENTS, masternode: ['core'], seed: ['core', 'tenderdash'] };
@@ -139,7 +140,7 @@ export default function Deploy({ name }) {
       </Section>
 
       <div className="mt-5 flex items-center gap-3">
-        <button className="btn btn-primary" disabled={busy || problems.length > 0} onClick={submit}>{busy ? 'Submitting…' : action === 'upgrade' || action === 'deploy' ? 'Prepare plan for review' : action === 'doctor' ? 'Run health gate' : 'Enroll nodes'}</button>
+        <button className="btn btn-primary" disabled={busy || problems.length > 0} onClick={submit}>{busy ? 'Submitting…' : action === 'upgrade' || action === 'deploy' ? 'Prepare plan for review' : action === 'doctor' ? 'Run health check' : 'Enroll hosts'}</button>
         <span className="text-dim text-[12px]">{problems.length ? problems[0] : action === 'upgrade' || action === 'deploy' ? 'Nothing changes until you confirm the prepared plan.' : ''}</span>
       </div>
       {submitError && <div className="mt-3"><Err error={submitError} /></div>}

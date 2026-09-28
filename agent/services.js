@@ -11,6 +11,7 @@ const RELAY_PORT = 26667;
 export function serviceNames(name, d) {
   const short = shortName(name), suffix = d.dnsSuffix || 'networks.dash.org';
   return {
+    insight: { host: `insight.${short}.${suffix}`, url: `https://insight.${short}.${suffix}/insight/` },
     quorums: { host: `quorums.${short}.${suffix}`, url: `https://quorums.${short}.${suffix}/quorums` },
     explorer: { host: `explorer.${short}.${suffix}`, url: `https://explorer.${short}.${suffix}/` },
     faucet: { host: `faucet.${short}.${suffix}`, url: `https://faucet.${short}.${suffix}/` },
@@ -29,13 +30,16 @@ export function serviceEndpoints(name, d) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // dashnet devnets use fixed default ports (internal/node DefaultPorts).
-const PORTS = { coreRPC: 20002, platformRPC: 26657, gateway: 1443 };
+const PORTS = { coreRPC: 20002, coreZMQ: 29998, platformRPC: 26657, gateway: 1443 };
 
 export async function deployServices({ r, write, dplan, d, name, pool, r53 }) {
   const ports = { ...PORTS, ...(dplan.ports || {}) };
   const wallet = dplan.targets.find((t) => t.role === 'wallet');
   const validators = dplan.targets.filter((t) => t.role === 'validator');
   const relay = validators[0];
+  // Public-address plans keep the VPC address separately; the Elastic IP is
+  // not bound on the instance's interface.
+  const vpc = (t) => t.privateAddress || t.peerAddress;
   const names = serviceNames(name, d);
   const host = (t) => ({ name: t.name, instanceId: t.instanceId, publicIp: t.sshAddress, role: t.role });
 
@@ -52,17 +56,20 @@ export async function deployServices({ r, write, dplan, d, name, pool, r53 }) {
 
   // Tenderdash RPC stays on loopback on validators; the explorer indexer needs a
   // full-history RPC, so relay one validator's RPC to its VPC address only.
-  write(r.id, `services: Tenderdash RPC relay ${relay.name} ${relay.peerAddress}:${RELAY_PORT} -> 127.0.0.1:${ports.platformRPC}`);
+  write(r.id, `services: Tenderdash RPC relay ${relay.name} ${vpc(relay)}:${RELAY_PORT} -> 127.0.0.1:${ports.platformRPC}`);
   const relayLabel = `dashnet.auxiliary=${name}/${relay.name}`;
-  await pool.exec(host(relay), `[ "$(sudo docker inspect -f '{{index .Config.Labels "dashnet.auxiliary"}}' devnet-td-relay 2>/dev/null)" = "${name}/${relay.name}" ] || { sudo docker rm -f devnet-td-relay >/dev/null 2>&1; sudo docker run -d --name devnet-td-relay --label ${relayLabel} --restart unless-stopped --network host --log-driver local alpine/socat:1.8.0.3 TCP-LISTEN:${RELAY_PORT},bind=${relay.peerAddress},fork,reuseaddr TCP:127.0.0.1:${ports.platformRPC}; }`, null, 180_000);
+  await pool.exec(host(relay), `[ "$(sudo docker inspect -f '{{index .Config.Labels "dashnet.auxiliary"}}' devnet-td-relay 2>/dev/null)" = "${name}/${relay.name}" ] || { sudo docker rm -f devnet-td-relay >/dev/null 2>&1; sudo docker run -d --name devnet-td-relay --label ${relayLabel} --restart unless-stopped --network host --log-driver local alpine/socat:1.8.0.3 TCP-LISTEN:${RELAY_PORT},bind=${vpc(relay)},fork,reuseaddr TCP:127.0.0.1:${ports.platformRPC}; }`, null, 180_000);
 
   const cfg = {
     short: shortName(name), displayName: d.displayName, auxiliary: `${name}/${wallet.name}`, coreNetwork: dplan.coreNetwork, platformChainId: dplan.platformChainId,
-    coreRpcPort: ports.coreRPC, hosts: Object.fromEntries(Object.entries(names).map(([k, v]) => [k, v.host])),
+    coreRpcPort: ports.coreRPC, coreZmqPort: ports.coreZMQ, hosts: Object.fromEntries(Object.entries(names).map(([k, v]) => [k, v.host])),
     quorumServerImage: d.services.quorumServer.startsWith('docker.io/') ? d.services.quorumServer : `docker.io/${d.services.quorumServer}`,
+    insightImage: (d.services.insightImage || 'dashpay/insight:4.0.9').replace(/^(?!docker\.io\/)/, 'docker.io/'),
     explorerVersion: d.services.explorerVersion, faucetRef: d.services.faucetRef, faucetAmount: d.services.faucetAmount,
     faucetRateLimit: d.services.faucetRateLimit, faucetFunding: d.services.faucetFunding, epochSeconds: d.services.epochSeconds,
-    tenderdashUrl: `http://${relay.peerAddress}:${RELAY_PORT}`,
+    tenderdashUrl: `http://${vpc(relay)}:${RELAY_PORT}`,
+    // Validators with Let's Encrypt certificates are verified; self-signed ones are not.
+    trustedGateways: !!dplan.gatewayTls,
     dapiUrls: validators.slice(0, 5).map((t) => `https://${t.sshAddress}:${ports.gateway}`),
   };
   write(r.id, 'services: installing on wallet host (builds faucet and explorer frontend; first run takes several minutes)');
@@ -70,9 +77,11 @@ export async function deployServices({ r, write, dplan, d, name, pool, r53 }) {
   await pool.exec(host(wallet), 'sudo install -d -m 0700 /opt/devnet-services && sudo tee /opt/devnet-services/services.py >/dev/null && sudo chmod 0700 /opt/devnet-services/services.py', REMOTE, 60_000);
   const out = await pool.exec(host(wallet), `set -o pipefail; { sudo python3 /opt/devnet-services/services.py ${arg} 2>&1 1>&3 | tee /tmp/devnet-services.log >&2; } 3>&1`, null, 100 * 60_000, (line) => write(r.id, `  ${line}`));
   const result = JSON.parse(out.trim().split('\n').pop());
-  write(r.id, `services: ${JSON.stringify(result)}`);
-  const bad = ['quorums', 'faucet', 'explorerApi', 'explorerFrontend'].filter((k) => !result[k] || result[k] >= 500);
+  const { promoCodes, ...shown } = result;
+  write(r.id, `services: ${JSON.stringify(shown)}`);
+  const bad = ['quorums', 'insight', 'faucet', 'explorerApi', 'explorerFrontend'].filter((k) => !result[k] || result[k] >= 500);
   if (bad.length) throw new Error(`services not answering locally: ${bad.join(', ')}`);
   if (!Number.isInteger(result.quorumList) || result.quorumList < 1) throw new Error(`quorum server has no quorums from Core: ${result.quorumList}`);
-  return { dns: names, walletAddress: result.walletAddress, summary: `faucet balance ${result.faucetBalance}, ${result.quorumList} quorums listed, explorer validators ${result.explorerValidators}, ${Object.values(names).map((x) => x.host).join(', ')}` };
+  if (result.insight !== 200 || !Number.isInteger(result.insightBlocks)) throw new Error(`Insight is not following the chain: HTTP ${result.insight}, ${result.insightBlocks}`);
+  return { dns: names, walletAddress: result.walletAddress, promoCodes, summary: `faucet balance ${result.faucetBalance}, ${result.quorumList} quorums listed, explorer validators ${result.explorerValidators}, insight at block ${result.insightBlocks}, ${Object.values(names).map((x) => x.host).join(', ')}` };
 }

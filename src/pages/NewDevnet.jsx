@@ -33,12 +33,14 @@ export default function NewDevnet() {
   if (existing.includes(full)) problems.push(`${full} already exists; names cannot be reused`);
   if (form.validators < 13 || form.validators > 25) problems.push('13 to 25 validators');
   for (const c of COMPONENTS) if ((form.images[c] || '').replace(/^docker\.io\//, '').split(/[@:]/)[0] !== REPOS[c]) problems.push(`${c} image must be ${REPOS[c]}:<tag>`);
+  if (form.images.acme && form.images.acme.replace(/^docker\.io\//, '').split(/[@:]/)[0] !== 'goacme/lego') problems.push('ACME client image must be goacme/lego:<tag>, or empty for self-signed gateways');
 
   async function submit() {
     setBusy(true); setError(null);
     try {
-      const { vpcId, subnetId, securityGroupIds, keyName, ipamPoolId, dnsZoneId, dnsSuffix, ...devnet } = form;
-      void vpcId; void subnetId; void securityGroupIds; void keyName; void ipamPoolId; void dnsZoneId; void dnsSuffix;
+      // Placement and the ACME contact always come from Settings.
+      const { vpcId, subnetId, securityGroupIds, keyName, ipamPoolId, dnsZoneId, dnsSuffix, acmeEmail, ...devnet } = form;
+      void vpcId; void subnetId; void securityGroupIds; void keyName; void ipamPoolId; void dnsZoneId; void dnsSuffix; void acmeEmail;
       const r = await api('/api/devnets', { method: 'POST', body: { name: full, devnet } });
       navigate(`/n/${r.network}/ops/${r.id}`);
     } catch (e) { setError(e); setBusy(false); }
@@ -58,7 +60,7 @@ export default function NewDevnet() {
             <div className="flex items-center"><span className="mono text-dim pr-1">devnet-</span><input className="input mono flex-1" value={name} autoFocus onChange={(e) => setName(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))} placeholder="bonsai" /></div></label>
           <label className="text-[12px]"><div className="text-dim mb-1">Display name</div><input className="input w-full" value={form.displayName || ''} placeholder={name ? name.replace(/(^|-)([a-z])/g, (_, a, b) => (a ? ' ' : '') + b.toUpperCase()) : ''} onChange={(e) => set((f) => { f.displayName = e.target.value; })} /></label>
           <div className="text-[12px] text-dim self-end">Core chain <span className="mono text-fg">devnet-{name || '…'}-g1</span><br />Platform <span className="mono text-fg">dash-devnet-{name || '…'}-g1</span><br />
-            Services <span className="mono text-fg">{['quorums', 'explorer', 'faucet'].map((s) => `${s}.${name || '…'}.${form.dnsSuffix}`).join(', ')}</span></div>
+            Services <span className="mono text-fg">{['insight', 'quorums', 'explorer', 'faucet'].map((s) => `${s}.${name || '…'}.${form.dnsSuffix}`).join(', ')}</span></div>
         </div>
       </Section>
 
@@ -81,6 +83,8 @@ export default function NewDevnet() {
       <Section title="3 · Versions">
         <div className="panel p-3 grid gap-3 sm:grid-cols-2">
           {COMPONENTS.map((c) => <ImageField key={c} c={c} value={form.images[c]} fallback={defaults.images[c]} onChange={(v) => set((f) => { f.images[c] = v; })} />)}
+          <label className="text-[12px]"><div className="text-dim mb-1">ACME client <span className="mono">goacme/lego</span> · Let's Encrypt certificate for each validator's public IP (empty: self-signed)</div>
+            <input className="input w-full mono" value={form.images.acme || ''} onChange={(e) => set((f) => { f.images.acme = e.target.value.trim(); })} /></label>
           <label className="text-[12px]"><div className="text-dim mb-1">Platform protocol number (4.2.x = 14, 4.1.x = 13)</div><input className="input w-28 mono" type="number" value={form.protocol} onChange={(e) => set((f) => { f.protocol = Number(e.target.value); })} /></label>
         </div>
       </Section>
@@ -88,6 +92,7 @@ export default function NewDevnet() {
       <Section title="4 · Services (wallet host)">
         <div className="panel p-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Text label="Quorum list server image" value={form.services.quorumServer} onChange={(v) => set((f) => { f.services.quorumServer = v; })} />
+          <Text label="Insight (Core explorer) image" value={form.services.insightImage} onChange={(v) => set((f) => { f.services.insightImage = v; })} />
           <Text label="Platform Explorer release" value={form.services.explorerVersion} onChange={(v) => set((f) => { f.services.explorerVersion = v; })} />
           <Text label="dash-faucet commit" value={form.services.faucetRef} onChange={(v) => set((f) => { f.services.faucetRef = v; })} />
           <Num label="Faucet payout (DASH)" value={form.services.faucetAmount} onChange={(v) => set((f) => { f.services.faucetAmount = v; })} />
