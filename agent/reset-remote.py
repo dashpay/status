@@ -186,7 +186,7 @@ def baseline():
         shutil.copytree(SEED / 'tenderdash' / 'config', backup / 'tenderdash-config', symlinks=True)
         td = inspect('tenderdash') or next((x for x in containers() if 'tenderdash' in x['Config']['Image']), None)
         genesis = json.loads((SEED / 'tenderdash' / 'config' / 'genesis.json').read_text())
-        out.update(dataDir=seed_dir_meta(), compose=sha(SEED_COMPOSE), tenderdashImage=td['Config']['Image'] if td else None,
+        out.update(dataDir=seed_dir_meta(), compose=sha(SEED_COMPOSE), tenderdashImage=td['Config']['Image'] if td else None, tenderdashId=td['Id'] if td else None,
                    genesisChainId=genesis.get('chain_id'), anchor=genesis.get('initial_core_chain_locked_height'),
                    nodeKey=sha(SEED / 'tenderdash' / 'config' / 'node_key.json'))
     save_json('baseline.json', out)
@@ -312,17 +312,27 @@ def preserved(b):
 
 def wipe():
     b = load_json('baseline.json')
-    # Refuse before touching anything if Core changed since the baseline.
+    # Refuse before touching anything if Core changed since the baseline, or if
+    # Platform was restarted or reset by someone else after it (stale anchor).
     preserved(b)
     if ROLE == 'hpmn':
+        # A rerun of this execution's own interrupted wipe skips the identity check.
+        if not (STATE / 'wipe-started').exists():
+            now = {k: v['id'] for k, v in platform_containers().items()}
+            need(now == {k: v['id'] for k, v in (b.get('platform') or {}).items()}, 'Platform containers changed since the prepared baseline; prepare again')
         mn = core_cli(core_container(), 'masternode', 'status')
         need(mn.get('state') == 'READY', f"masternode state {mn.get('state')}; not wiping")
+        save_json('wipe-started', dict(at=time.time()))
         run(['dashmate', 'reset', '--platform', '--force', f'--config={CFG}'], user='dashmate', cwd='/home/dashmate', timeout=900)
         left = platform_containers()
         need(not left, f'platform containers still present: {sorted(left)}')
         preserved(b)
         return dict(platformRemoved=True)
     need(seed_services() == ['tenderdash'], 'seed compose project changed')
+    td = inspect('tenderdash') or next((x for x in containers() if 'tenderdash' in x['Config']['Image']), None)
+    if not (STATE / 'wipe-started').exists():
+        need(not b.get('tenderdashId') or (td and td['Id'] == b['tenderdashId']), 'seed Tenderdash changed since the prepared baseline; prepare again')
+    save_json('wipe-started', dict(at=time.time()))
     run(['docker', 'compose', '-f', str(SEED_COMPOSE), 'down'], timeout=300)
     meta = seed_dir_meta()
     need(meta == b['dataDir'], 'seed data directory ownership/mode changed since baseline')

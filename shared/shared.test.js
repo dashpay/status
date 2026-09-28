@@ -76,6 +76,8 @@ test('console devnets merge into settings and deleted ones drop out', async () =
   const n = merged.networks.find((x) => x.name === 'devnet-bonsai');
   assert.equal(n.kind, 'dashnet');
   assert.equal(n.coreNetwork, 'devnet-bonsai-g1');
+  // dashnet plans name the chain without the devnet- prefix Core reports.
+  assert.equal(mergeDevnets(structuredClone(settings), { 'devnet-bonsai': { status: 'ready', coreNetwork: 'bonsai-g1' } }).networks.find((x) => x.name === 'devnet-bonsai').coreNetwork, 'devnet-bonsai-g1');
   assert.equal(n.endpoints[0].url, 'https://quorums.bonsai.networks.dash.org/health');
   assert.ok(validateSettings(merged));
   const gone = mergeDevnets(structuredClone(merged), { 'devnet-bonsai': { status: 'deleted' } });

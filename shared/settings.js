@@ -185,10 +185,13 @@ export function mergeDevnets(settings, registry) {
 }
 const lifecycleOf = (reg) => ({ status: reg.status, operation: reg.operation, createdBy: reg.createdBy, createdAt: reg.createdAt, readyAt: reg.readyAt || null, dns: reg.dns || null });
 
+// Core reports a devnet's chain as devnet-<name>; dashnet plans carry <name>.
+export const devnetChain = (core) => (core.startsWith('devnet-') ? core : `devnet-${core}`);
+
 export function devnetEntry(name, reg) {
   const dns = reg.dns || {};
   return {
-    name, displayName: reg.displayName || name, tag: name, chainType: 'devnet', coreNetwork: reg.coreNetwork || `devnet-${name.replace(/^devnet-/, '')}-g1`,
+    name, displayName: reg.displayName || name, tag: name, chainType: 'devnet', coreNetwork: devnetChain(reg.coreNetwork || `${name.replace(/^devnet-/, '')}-g1`),
     p2pPort: 20001, public: reg.public !== false, deployable: reg.status === 'ready', showBalances: true, kind: 'dashnet',
     description: '',
     endpoints: [

@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { EC2Client, DescribeInstancesCommand, DescribeVolumesCommand, TerminateInstancesCommand, DeleteVolumeCommand } from '@aws-sdk/client-ec2';
 import { Route53Client, ChangeResourceRecordSetsCommand, ListResourceRecordSetsCommand } from '@aws-sdk/client-route-53';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
-import { COMPONENTS, COMPONENT_REPOS, readJSON, validateDevnetDefaults, writeAtomic } from '../shared/settings.js';
+import { COMPONENTS, COMPONENT_REPOS, devnetChain, readJSON, validateDevnetDefaults, writeAtomic } from '../shared/settings.js';
 import { deployServices, serviceNames, shortName } from './services.js';
 
 const NAME = /^devnet-[a-z][a-z0-9-]{1,30}$/;
@@ -203,7 +203,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       done('ok');
     }
     const dplan = readJSON(join(dir, 'deployment.json'));
-    register(name, { coreNetwork: dplan.coreNetwork, platformChainId: dplan.platformChainId });
+    register(name, { coreNetwork: devnetChain(dplan.coreNetwork), platformChainId: dplan.platformChainId });
 
     await once('deploy', async () => {
     done = step(r, 'Core, EvoNode registration, quorums, Platform (dashnet deploy)');
