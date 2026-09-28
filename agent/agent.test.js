@@ -266,8 +266,10 @@ test('a devnet Core + Platform upgrade runs Core first, then plans and runs Plat
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'deployment.json'), '{}');
   writeFileSync(join(dir, 'network.yaml'), 'images:\n  core: docker.io/dashpay/dashd:23.1.7\n  drive: docker.io/dashpay/drive:4.2.0-beta.5\n');
+  writeFileSync(join(dir, 'dashnet'), '#!/bin/sh\n', { mode: 0o755 });
   const calls = [];
-  const dashnet = async (r, args) => {
+  const dashnet = async (r, args, opts) => {
+    assert.equal(opts.bin, r.artifacts.bin, 'every upgrade call uses the planning binary snapshot');
     calls.push([args[0], args.includes('--scope') ? args[args.indexOf('--scope') + 1] : '']);
     const out = args[args.indexOf('--out') + 1];
     if (args[0] === 'resolve') writeFileSync(out, '{}');
@@ -294,4 +296,35 @@ test('a devnet Core + Platform upgrade runs Core first, then plans and runs Plat
   // A resumed operation does not repeat a finished phase.
   await d.executeUpgrade(r);
   assert.equal(calls.filter((c) => c[0] === 'upgrade').length, 2);
+});
+
+test('a devnet moves to a newer dashnet only when its plans bind the same node and bootstrap recipes', async () => {
+  const { createDevnets } = await import('./devnets.js');
+  const root = mkdtempSync(join(tmpdir(), 'pin-'));
+  const dirs = { data: root, private: join(root, 'p'), state: join(root, 'state') };
+  const dir = join(dirs.private, 'devnets', 'devnet-x');
+  mkdirSync(dir, { recursive: true });
+  const fake = (version, node) => `#!/bin/sh\ncase "$1" in version) echo ${version};; recipes) echo '{"node":"${node}","bootstrap":"b"}';; upgrade-plan) echo 'or core (Core only, every node)' >&2;; *) exit 0;; esac\n`;
+  const V = (date, c) => `${date}-${c.repeat(40)}`;
+  writeFileSync(join(dir, 'dashnet'), fake(V('20260928T120000Z', 'a'), 'n1'), { mode: 0o755 });
+  writeFileSync(join(root, 'current'), fake(V('20260928T190000Z', 'b'), 'n1'), { mode: 0o755 });
+  writeFileSync(join(dir, 'deployment.json'), JSON.stringify({ recipeSha256: 'n1' }));
+  writeFileSync(join(dir, 'bootstrap-plan.json'), JSON.stringify({ recipeSha256: 'b' }));
+  writeFileSync(join(root, 'devnets.json'), JSON.stringify({ 'devnet-x': { status: 'ready' } }));
+  const logs = [];
+  const d = createDevnets({ ctx: { dashnet: async () => 0, step: () => () => {}, save: () => {}, write: (id, l) => logs.push(l), pinBinary: () => join(dir, 'dashnet'), binary: join(root, 'current') }, dirs, key: { path: '/k' }, pool: {}, getSettings: () => settings, region: 'us-west-2', log: () => {} });
+  const r = { id: 'd1', network: 'devnet-x', steps: [] };
+  await d.doctor(r).catch(() => {});
+  assert.match(readFileSync(join(dir, 'dashnet'), 'utf8'), /20260928T190000Z/, 'compatible newer binary adopted');
+  assert.ok(logs.some((l) => /dashnet 20260928T120 -> 20260928T190/.test(l)));
+  assert.deepEqual(JSON.parse(readFileSync(join(root, 'devnets.json'), 'utf8'))['devnet-x'].upgradeScopes, ['platform', 'tenderdash', 'core']);
+  // A different node recipe means the new binary would refuse the plan: keep the pin.
+  writeFileSync(join(dir, 'dashnet'), fake(V('20260928T120000Z', 'a'), 'n1'), { mode: 0o755 });
+  writeFileSync(join(root, 'current'), fake(V('20260929T000000Z', 'c'), 'n2'), { mode: 0o755 });
+  await d.doctor(r).catch(() => {});
+  assert.match(readFileSync(join(dir, 'dashnet'), 'utf8'), /20260928T120000Z/, 'incompatible binary not adopted');
+  // An older build (agent rollback) never replaces a newer pin.
+  writeFileSync(join(root, 'current'), fake(V('20260927T000000Z', 'd'), 'n1'), { mode: 0o755 });
+  await d.doctor(r).catch(() => {});
+  assert.match(readFileSync(join(dir, 'dashnet'), 'utf8'), /20260928T120000Z/, 'no downgrade');
 });
