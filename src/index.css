@@ -18,6 +18,7 @@
   --color-unreachable: #e0568f;
   --color-stopped: #6b7686;
   --color-info: #6b8bb3;
+  --color-deploying: #3aa0ff;
 }
 
 html, body { background: var(--color-bg); color: var(--color-fg); }
@@ -38,6 +39,7 @@ a.link:hover { text-decoration: underline; }
 .lv-unreachable { color: var(--color-unreachable); } .bg-lv-unreachable { background: var(--color-unreachable); }
 .lv-stopped { color: var(--color-stopped); } .bg-lv-stopped { background: var(--color-stopped); }
 .lv-info { color: var(--color-info); } .bg-lv-info { background: var(--color-info); }
+.lv-deploying { color: var(--color-deploying); } .bg-lv-deploying { background: var(--color-deploying); }
 
 table.grid { width: 100%; border-collapse: separate; border-spacing: 0; }
 table.grid th { position: sticky; top: 0; z-index: 1; background: var(--color-panel-2); color: var(--color-dim); font-weight: 600; font-size: 11px; text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--color-line); white-space: nowrap; }

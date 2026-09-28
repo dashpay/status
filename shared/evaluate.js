@@ -2,9 +2,9 @@
 // concrete facts that produced it; there is no status without a reason.
 import { COMPONENT_REPOS } from './settings.js';
 
-export const LEVELS = ['ok', 'warn', 'down', 'unreachable', 'stopped'];
+export const LEVELS = ['ok', 'warn', 'down', 'unreachable', 'stopped', 'deploying'];
 // `info` facts are shown with the host but never change its status.
-const RANK = { info: 0, ok: 0, stopped: 1, warn: 2, down: 3, unreachable: 3 };
+const RANK = { info: 0, ok: 0, stopped: 1, deploying: 1, warn: 2, down: 3, unreachable: 3 };
 const BY_REPO = Object.fromEntries(Object.entries(COMPONENT_REPOS).map(([c, r]) => [r, c]));
 // Older agents reported index.docker.io/ prefixes for digest-pulled images.
 const COMPONENT_OF = new Proxy(BY_REPO, { get: (t, k) => (typeof k === 'string' ? t[k.replace(/^(index\.)?docker\.io\//, '')] : undefined) });
@@ -39,6 +39,7 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
   const tipHost = hosts.find((h) => live(h)?.core?.blocks === coreTip);
   const platformHost = hosts.find((h) => (live(h)?.tenderdash?.height || 0) === platformTip && live(h)?.tenderdash?.blockTime);
 
+  const building = ['creating', 'services'].includes(network.lifecycle?.status);
   const rows = hosts.map((h) => {
     const d = live(h) || {};
     const reasons = [];
@@ -108,6 +109,11 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
         else if ((d.explorer.chainHeight || 0) - (d.explorer.indexedHeight || 0) > t.platformLagBlocks) flag('warn', `explorer indexer ${(d.explorer.chainHeight || 0) - (d.explorer.indexedHeight || 0)} blocks behind`);
       }
     }
+    // A console devnet under construction is not failing: say what is happening.
+    if (building && level !== 'ok' && level !== 'stopped') {
+      reasons.unshift({ level: 'deploying', text: `devnet ${network.lifecycle.status}; services start as the creation operation reaches them` });
+      level = 'deploying';
+    }
     return { host: h, data: d, level, reasons };
   });
 
@@ -134,7 +140,7 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
     dapi: { ok: validatorRows.filter((r) => r.data.dapi?.ok).length, total: validatorRows.filter((r) => r.host.state === 'running').length },
   };
   const level = rows.reduce((a, r) => (r.host.duplicate || r.host.role === 'vpn' ? a : RANK[r.level] > RANK[a] ? r.level : a), 'ok');
-  return { level: level === 'stopped' ? 'ok' : level, rows, summary, tags, generatedAt: state?.generatedAt || null, ageSeconds: state?.generatedAt ? Math.round((now - Date.parse(state.generatedAt)) / 1000) : null };
+  return { level: building ? 'deploying' : level === 'stopped' ? 'ok' : level, rows, summary, tags, generatedAt: state?.generatedAt || null, ageSeconds: state?.generatedAt ? Math.round((now - Date.parse(state.generatedAt)) / 1000) : null };
 }
 
 function chainMatches(chain, network) {

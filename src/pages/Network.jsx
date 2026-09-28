@@ -112,7 +112,7 @@ function Hosts({ n, now, member, operator }) {
     <>
       <div className="mt-5 flex flex-wrap items-center gap-2">
         <input className="input w-72" placeholder="filter: name, IP, version, reason…" value={q} onChange={(e) => setQ(e.target.value)} />
-        {['ok', 'warn', 'down', 'unreachable', 'stopped'].map((l) => (
+        {['ok', 'deploying', 'warn', 'down', 'unreachable', 'stopped'].filter((l) => l !== 'deploying' || counts.deploying).map((l) => (
           <span key={l} className={`chip ${levels.has(l) ? 'on' : ''}`} onClick={() => setLevels((s) => { const x = new Set(s); x.has(l) ? x.delete(l) : x.add(l); return x; })}>
             <Dot level={l} />{l} <span className="mono">{counts[l] || 0}</span>
           </span>

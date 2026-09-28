@@ -124,5 +124,5 @@ export const pct = (v) => (v == null ? '—' : `${Math.round(v)}%`);
 export const dash = (v) => (v == null ? '—' : Number(v).toLocaleString('en-US', { maximumFractionDigits: 2 }));
 export const short = (h, n = 8) => (h ? `${h.slice(0, n)}…` : '—');
 
-export const LEVEL_LABEL = { ok: 'ok', warn: 'warn', down: 'down', unreachable: 'unreachable', stopped: 'stopped', info: 'info' };
+export const LEVEL_LABEL = { ok: 'ok', warn: 'warn', down: 'down', unreachable: 'unreachable', stopped: 'stopped', info: 'info', deploying: 'deploying' };
 export const ROLE_LABEL = { validator: 'Evo masternodes', masternode: 'Regular masternodes', seed: 'Seeds', fullnode: 'Full nodes', web: 'Web', wallet: 'Wallet / services', miner: 'Miners', mixer: 'Mixers', quorums: 'Quorum list', metrics: 'Metrics', logs: 'Logs', vpn: 'VPN', other: 'Other' };

@@ -38,7 +38,7 @@ function NetworkCard({ n, now }) {
       <div className="px-4 pb-3">
         <div className="flex items-center justify-between text-[11px] text-dim mb-1.5">
           <span>{n.hostCount} hosts</span>
-          <span className="mono">{['ok', 'warn', 'down', 'unreachable', 'stopped'].filter((k) => s.counts?.[k]).map((k) => <span key={k} className={`ml-2 lv-${k}`}>{s.counts[k]} {k}</span>)}</span>
+          <span className="mono">{['ok', 'deploying', 'warn', 'down', 'unreachable', 'stopped'].filter((k) => s.counts?.[k]).map((k) => <span key={k} className={`ml-2 lv-${k}`}>{s.counts[k]} {k}</span>)}</span>
         </div>
         <Bar counts={s.counts || {}} />
         <div className="mt-2 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-dim">
