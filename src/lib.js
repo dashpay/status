@@ -8,9 +8,10 @@ export async function loadSession() {
     fetch('/api/session', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({})),
     fetch('/api/me', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({})),
   ]);
-  session = { ...s, operatorOf: me.operatorOf || [], memberOf: me.memberOf || [], role: me.role || null, admin: !!me.admin, loaded: true };
+  session = { ...s, operatorOf: me.operatorOf || [], memberOf: me.memberOf || [], allNetworks: !!me.allNetworks, role: me.role || null, admin: !!me.admin, loaded: true };
   sessionSubs.forEach((f) => f());
 }
+export { canOperate, canSee } from './access.js';
 export function useSession() {
   return useSyncExternalStore((f) => { sessionSubs.add(f); return () => sessionSubs.delete(f); }, () => session);
 }

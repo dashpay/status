@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, ago, clock, useNow, useResource, useSession, short } from '../lib.js';
+import { api, ago, canOperate, canSee, clock, useNow, useResource, useSession, short } from '../lib.js';
 import { Empty, Err, Link, OpBadge, Section } from '../ui.jsx';
 
 const ACTIVE = new Set(['queued', 'preparing', 'confirmed', 'running']);
@@ -11,10 +11,10 @@ export default function Operation({ name, id }) {
   const [actionError, setActionError] = useState(null);
   const [pending, setPending] = useState(false);
   if (!session.loaded) return null;
-  if (!session.memberOf?.includes(name)) return <div className="mt-6"><Empty>Access to this network required.</Empty></div>;
+  if (!canSee(session, name)) return <div className="mt-6"><Empty>Access to this network required.</Empty></div>;
   // Lifecycle operations (devnet create/delete/services, Platform reset) are admin-only.
   const lifecycle = ['create-devnet', 'delete-devnet', 'devnet-services', 'platform-reset'].includes(op?.request?.action);
-  const operator = lifecycle ? !!session.admin : session.operatorOf?.includes(name);
+  const operator = lifecycle ? !!session.admin : canOperate(session, name);
   if (error) return <div className="mt-6"><Err error={error} /></div>;
   if (!op) return <div className="mt-6 text-dim">Loading…</div>;
   const q = op.request;

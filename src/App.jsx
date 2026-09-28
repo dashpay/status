@@ -55,7 +55,7 @@ function Header({ networks, active, session }) {
           {session.user ? (
             <>
               {session.admin && <Link to="/devnets/new" className={`hover:text-fg ${active === 'devnets' ? 'text-fg' : 'text-dim'}`}>New devnet</Link>}
-              {session.memberOf?.length > 0 && <Link to="/settings" className={`hover:text-fg ${active === 'settings' ? 'text-fg' : 'text-dim'}`}>Settings</Link>}
+              {(session.allNetworks || session.memberOf?.length > 0) && <Link to="/settings" className={`hover:text-fg ${active === 'settings' ? 'text-fg' : 'text-dim'}`}>Settings</Link>}
               <span className="flex items-center gap-1.5 text-dim"><img src={`https://avatars.githubusercontent.com/u/${session.user.id}?s=40`} alt="" className="w-5 h-5 rounded-full" />{session.user.login}{session.role && <span className="tag">{session.role}</span>}</span>
               <button className="text-dim hover:text-fg" onClick={logout}>Sign out</button>
             </>

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { api, navigate, useResource, useSession, ROLE_LABEL, ago } from '../lib.js';
+import { api, canOperate, navigate, useResource, useSession, ROLE_LABEL, ago } from '../lib.js';
 import { Dot, Empty, Err, Link, Section } from '../ui.jsx';
 import { COMPONENTS, OPERABLE, REPOS, cmp, newestRelease, reported } from '../releases.js';
 
@@ -44,7 +44,7 @@ export default function Deploy({ name }) {
   const missingOn = (c) => chosen.filter((h) => !h.containers.some((k) => k.component === c)).map((h) => h.name);
 
   if (!session.loaded) return null;
-  if (!session.operatorOf?.includes(name)) return <div className="mt-6"><Empty>Sign in as an operator of this network to deploy.</Empty></div>;
+  if (!canOperate(session, name)) return <div className="mt-6"><Empty>Sign in as an operator of this network to deploy.</Empty></div>;
   if (error) return <div className="mt-6"><Err error={error} /></div>;
   if (!n) return <div className="mt-6 text-dim">Loading…</div>;
   if (!n.deployable) return <div className="mt-6"><Empty>{n.displayName} is monitored only. Enable “deployable” in Settings to operate it.</Empty></div>;
