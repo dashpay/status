@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { supplementLegacy } from './legacy-view.js';
 import { networkView } from './networks.js';
 
-test('legacy supplement retains fixed targets, validates identity and age, and cannot claim managed health', () => {
+test('legacy supplement retains fixed targets, validates identity and age, and uses the retained Core health result', () => {
   const dir = mkdtempSync(join(tmpdir(), 'status-legacy-'));
   try {
     const now = Date.now();
@@ -20,7 +20,7 @@ test('legacy supplement retains fixed targets, validates identity and age, and c
     const baseline = { status: 'unknown', nodes: [{ name: 'hp-masternode-1', status: 'unknown', services: [] }], notice: 'Managed health unavailable' };
     let result = supplementLegacy(n, baseline, now, false);
     assert.equal(result.expectedNodes, 3); assert.equal(result.status, 'unknown');
-    assert.equal(result.nodes[1].status, 'observed'); assert.equal(result.nodes[2].status, 'unknown');
+    assert.equal(result.nodes[1].status, 'healthy'); assert.equal(result.nodes[2].status, 'unknown');
     assert.equal(result.nodes[1].dapi, 'not-applicable'); assert.equal(result.nodes[1].services[0].restarts, null);
     assert.doesNotMatch(JSON.stringify(result), /PRIVATE|address|host/);
     source.nodes[0].host = 'FOREIGN'; save(); assert.equal(supplementLegacy(n, baseline, now, false).nodes[1].status, 'unknown');

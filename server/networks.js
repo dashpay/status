@@ -19,7 +19,7 @@ export function loadRegistry(path) {
     for (const key of ['snapshot', 'health', 'plan', 'collection', 'legacySnapshot']) if (n[key]) n[key] = resolve(dirname(path), n[key]);
     if (!n.snapshot) throw new Error('Observation source required');
     if (n.expectedTargets) {
-      if (!Array.isArray(n.expectedTargets) || n.expectedTargets.length > 1000 || new Set(n.expectedTargets.map((t) => t.name)).size !== n.expectedTargets.length || n.expectedTargets.some((t) => !/^[a-z][a-z0-9-]{0,62}$/.test(t.name) || !['validator', 'seed', 'core'].includes(t.role))) throw new Error('Invalid expected inventory');
+      if (!Array.isArray(n.expectedTargets) || n.expectedTargets.length > 1000 || new Set(n.expectedTargets.map((t) => t.name)).size !== n.expectedTargets.length || n.expectedTargets.some((t) => !/^[a-z][a-z0-9-]{0,62}$/.test(t.name) || !['validator', 'seed', 'core', 'masternode'].includes(t.role))) throw new Error('Invalid expected inventory');
     }
     if (n.legacyTargets) {
       if (!n.legacySnapshot || !Array.isArray(n.legacyTargets) || n.legacyTargets.length > 1000) throw new Error('Explicit legacy inventory required');
@@ -67,13 +67,15 @@ export function projectNetwork(n, snapshot, health, now = Date.now(), operator =
     const missing = Object.keys(t.containers || {}).some((component) => !o?.components?.[component]);
     const degraded = missing || (o?.problems || []).length > 0 || Object.values(o?.components || {}).some((s) => !s.running) ||
       (t.role === 'validator' && (!c.dapiHealthy || c.catchingUp || c.masternodeState !== 'READY'));
-    const status = stale ? 'stale' : unknown ? 'unknown' : degraded ? 'degraded' : verified ? 'healthy' : 'observed';
-    const row = { name: t.name, role: t.role, status, coreHeight: finite(c.coreHeight), platformHeight: finite(c.platformHeight),
+    const check = currentHealth ? health.nodes?.[t.name] : null;
+    const nodeVerified = !!check?.healthy || verified;
+    const status = stale ? 'stale' : unknown || check?.status === 'unknown' ? 'unknown' : degraded || check?.status === 'degraded' ? 'degraded' : nodeVerified ? 'healthy' : 'observed';
+    const row = { name: t.name, role: t.role, status, verification: nodeVerified ? t.role === 'validator' ? 'Core / consensus / DAPI' : t.role === 'seed' ? 'Seed services' : 'Core / ChainLocks / progress' : 'Snapshot', coreHeight: finite(c.coreHeight), platformHeight: finite(c.platformHeight),
       dapi: unknown || stale ? 'unknown' : c.dapiHealthy ? 'available' : t.role === 'validator' ? 'unavailable' : 'not-applicable',
       services: Object.entries(o?.components || {}).map(([component, s]) => ({ component, image: String(s.image || ''), running: !!s.running, restarts: finite(s.restarts) })) };
     if (!unknown && !stale && ['READY', 'POSE_BANNED', 'WAITING_FOR_PROTX', 'WAITING_FOR_PROTX_CONF', 'ERROR', 'REMOVED'].includes(c.masternodeState)) row.masternodeState = c.masternodeState;
     if (operator) row.operator = { instanceId: t.instanceId, address: t.address, architecture: t.architecture,
-      error: o?.error || null, problems: o?.problems || [], filesFingerprint: o?.filesHash || null,
+      managed: true, error: o?.error || null, problems: [...(o?.problems || []), ...(check?.problems || [])], filesFingerprint: o?.filesHash || null,
       proTxHash: c.proTxHash || null, coreGenesis: c.coreGenesis || null, platformChainId: c.platformChainId || null };
     return row;
   });

@@ -39,7 +39,7 @@ export async function collect(config, network, runner = execute) {
     // A partial import is useful evidence: publish it with every unresolved node.
     chmodSync(temp, 0o640); renameSync(temp, network.snapshot);
     status.failed = false; status.importComplete = code === 0;
-    if (code === 0) {
+    if (snapshot.fleet.targets.length) {
       await runner(config.binary, ['managed-doctor', '--snapshot', network.snapshot, ...args, '--observation-window', network.observationWindow || '4m', '--timeout', '12m', '--out', healthTemp], network.health + '.log', 750_000);
       const health = readJSON(healthTemp);
       if (health.snapshot?.fleet?.metadata?.name !== network.name || typeof health.healthy !== 'boolean') throw new Error('Health scope invalid');

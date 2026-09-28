@@ -89,3 +89,17 @@ test('lost workflow response is journaled, never blindly re-dispatched, and reco
     assert.doesNotMatch(JSON.stringify(records), /PRIVATE-TOKEN/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('per-node health remains independent when another node is unavailable', () => {
+ const dir = mkdtempSync(join(tmpdir(), 'node-health-'));
+ try {
+  const {n, snapshot} = fixture(dir); const original = snapshot.fleet.targets[0];
+  snapshot.fleet.targets.push({...original, name:'seed-1', instanceId:'missing', role:'seed', containers:{tenderdash:'seed'}});
+  snapshot.nodes['seed-1'] = {instanceId:'missing',error:'SSH unavailable'};
+  const health = {snapshot, observedAt:snapshot.observedAt, healthy:false, nodes:{'validator-1':{healthy:true,status:'healthy',problems:[]},'seed-1':{healthy:false,status:'unknown',problems:['unavailable']}}};
+  const view = projectNetwork(n,snapshot,health);
+  assert.equal(view.nodes[0].status,'healthy');assert.equal(view.nodes[1].status,'unknown');assert.equal(view.expectedNodes,2);assert.equal(view.status,'unknown');
+  health.nodes['validator-1']={healthy:false,status:'degraded',problems:['PRIVATE unhealthy DAPI']};
+  const bad=projectNetwork(n,snapshot,health);assert.equal(bad.nodes[0].status,'degraded');assert.doesNotMatch(JSON.stringify(bad),/PRIVATE/);
+ }finally{rmSync(dir,{recursive:true,force:true});}
+});

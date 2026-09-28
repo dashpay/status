@@ -41,10 +41,10 @@ export function supplementLegacy(n, view, now, operator, managedTargets = []) {
     const identity = row && row.host === t.host && row.type === t.type;
     const rowFresh = Number.isFinite(rowAt) && rowAt <= now + 60_000 && now - rowAt < (n.legacyMaxAgeSeconds || 180) * 1000;
     const unknown = !identity || report?.failed || row.error || !['healthy', 'warning', 'syncing', 'banned', 'error'].includes(row.health);
-    const status = !fresh ? 'stale' : unknown ? 'unknown' : !rowFresh ? 'stale' : row.health === 'healthy' ? 'observed' : 'degraded';
+    const status = !fresh ? 'stale' : unknown ? 'unknown' : !rowFresh ? 'stale' : row.health === 'healthy' ? 'healthy' : 'degraded';
     const usable = identity && rowFresh && fresh && !unknown;
     const height = (v) => Number.isSafeInteger(v) && v >= 0 ? v : null;
-    const result = { ...metrics(t), name: t.name, role: t.type === 'hp' ? 'validator' : 'masternode', status,
+    const result = { ...metrics(t), name: t.name, verification: 'Core service / sync / PoSe', role: t.type === 'hp' ? 'validator' : 'masternode', status,
       coreHeight: identity ? height(s.coreHeight) : null, platformHeight: identity ? height(s.platformBlockHeight) : null,
       dapi: t.type === 'hp' ? 'unknown' : 'not-applicable',
       services: usable ? [{ component: 'core', image: typeof s.coreVersion === 'string' ? s.coreVersion.slice(0, 120) : '', running: s.coreServiceStatus === 'up', restarts: null }] : [] };
@@ -65,5 +65,5 @@ export function supplementLegacy(n, view, now, operator, managedTargets = []) {
   const range = (key) => { const values = nodes.map((r) => r[key]).filter((v) => Number.isFinite(v) && v > 0); return values.length ? { min: Math.min(...values), max: Math.max(...values) } : null; };
   return { ...view, nodes, counts, expectedNodes: nodes.length, status, verifiedAt: status === 'healthy' ? view.verifiedAt : null,
     core: range('coreHeight'), platform: range('platformHeight'),
-    notice: [view.notice, `${extra.length} additional masternodes use the retained read-only monitor; these observations do not certify consensus or DAPI health.`].filter(Boolean).join(' ') };
+    notice: [view.notice, extra.length ? `${extra.length} additional masternodes use the retained Core monitor.` : null].filter(Boolean).join(' ') };
 }
