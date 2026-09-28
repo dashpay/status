@@ -81,6 +81,16 @@ try {
   const [file] = readdirSync(join(dataDir, 'requests')).filter((f) => f.endsWith('.json'));
   const q = JSON.parse(readFileSync(join(dataDir, 'requests', file), 'utf8'));
   assert.deepEqual([q.action, q.nodes, q.components, q.images], ['upgrade', ['hp-masternode-1'], ['helper'], { helper: 'dashpay/dashmate-helper:4.2.0-beta.5' }]);
+  // Admin: prepare (non-destructive) a Platform wipe/redeploy of a dashmate devnet.
+  await page.goto(origin + '/n/devnet-moutai/reset');
+  await page.getByText('Wipe and redeploy Platform').waitFor();
+  await page.screenshot({ path: 'artifacts/platform-reset.png', fullPage: true });
+  await page.getByRole('button', { name: 'Prepare (non-destructive)' }).click();
+  await page.waitForURL('**/n/devnet-moutai/ops/*');
+  const reset = readdirSync(join(dataDir, 'requests')).map((f) => JSON.parse(readFileSync(join(dataDir, 'requests', f), 'utf8'))).find((x) => x.action === 'platform-reset');
+  assert.deepEqual(reset.images, { drive: 'dashpay/drive:4.2.0-beta.5', dapi: 'dashpay/rs-dapi:4.2.0-beta.5', tenderdash: 'dashpay/tenderdash:1.8.1' });
+  assert.equal(reset.options.epochSeconds, 3600);
+
   // Admin: prepare a new devnet from the form.
   await page.goto(origin + '/devnets/new');
   await page.getByPlaceholder('bonsai').fill('fixture');
