@@ -1,153 +1,81 @@
 # Dash Status
 
-Dash status dashboard with additional networks, GitHub sign-in and an operator
-workspace for [dash-network-go](https://github.com/dashpay/dash-network-go).
-The original Testnet API and live updates remain supported alongside these additions.
+Live infrastructure board and operator console for DCG-run Dash networks
+(testnet, devnets such as Moutai, mainnet support hosts), served at
+https://status.testnet.networks.dash.org.
 
-## Releases
+## How it works
 
-Use **Actions → Stage release** to prepare a versioned draft with tested Docker
-images and native Linux AMD64/ARM64 bundles, manifests and checksums. Docker images
-include Node 22 and are delivered as offline-loadable archives, not mutable
-registry tags. There is no staging environment or automatic site deployment.
-See [Docker deployment](deploy/DOCKER.md) and
-[release staging and promotion](deploy/RELEASING.md).
+```
+EC2 (tag DashNetwork=<net>, Name dn-<net>-<role>-<n>)
+        │ discovery every 5 min
+        ▼
+   agent ──SSH every 30 s──▶ every host: agent/probe.py (read-only)
+     │                         Docker, Core RPC, Tenderdash RPC/P2P, DAPI gRPC,
+     │                         Insight, faucet, wallets, load/mem/disk
+     │  writes /srv/dash-status/data/state/<net>.json
+     │
+     │  reads  /srv/dash-status/data/requests/*.json   (from web)
+     │  runs   dashnet managed-import / enroll / plan / upgrade / deploy / doctor
+     ▼  writes /srv/dash-status/data/ops/<id>.{json,log}
+   web ─── public board, GitHub sign-in, deploy form, review, live logs, settings
+```
 
-## Run and verify
+- **agent** (`STATUS_MODE=agent`) is the only process with credentials: the
+  status host's IAM role (`dash-status-server`: EC2 describe, Instance Connect,
+  dashnet journal) and its own SSH key. When the key is not yet authorized on a
+  newly discovered host it pushes it once through EC2 Instance Connect. Host keys
+  are pinned per instance ID. Deployments use the
+  [dash-network-go](https://github.com/dashpay/dash-network-go) `dashnet` CLI,
+  built into the image from its `main` branch.
+- **web** (`STATUS_MODE=web`) has no cloud or SSH access. It evaluates agent
+  state (every status carries its reason), serves the UI and SSE updates, writes
+  operator settings, and queues operation requests.
+- **legacy** (`INVENTORY_PATH` set) is the original single-network Testnet API
+  (`/api/nodes`, `/api/events`, …), kept for existing consumers; see
+  [API compatibility](deploy/API-COMPATIBILITY.md).
+
+## Operating
+
+Sign in with GitHub. Operators (GitHub user IDs in Settings) get:
+
+- **Deploy**: choose nodes (evo/regular masternodes, seeds), components and image
+  tags (Docker Hub suggestions, architecture check). The agent imports live state,
+  enrolls nodes that are not yet enrolled (no restarts), and plans with images
+  pinned by digest. Nothing changes until the plan is confirmed. Execution
+  withdraws one host at a time behind dashnet health gates; progress and the full
+  dashnet log stream live. Stopped/interrupted runs resume the same plan.
+- **Restore stopped**, **Health gate** (managed-doctor) and **Enroll**.
+- **Settings**: probe/discovery cadence, thresholds, operators, and per network:
+  EC2 tag, chain, visibility, deployability, wallet balance visibility,
+  observation window, timeout and checked endpoints (HTTP or DAPI gRPC-Web).
+  Applied on the agent's next cycle.
+
+Mainnet is monitored only.
+
+## Develop
 
 ```sh
 npm ci --include=dev
-npm test
-npm run lint
-npm run build
-npx playwright install --with-deps chromium
-node scripts/browser-check.mjs
-
-# Private configuration; no AWS/SSH credentials are needed by the web process.
-NETWORKS_CONFIG=/etc/dash-status/networks.json npm start
+npm test && npm run lint && npm run build
+npx playwright install chromium
+node scripts/browser-check.mjs        # fixture state, public + operator flow, screenshots in artifacts/
+STATUS_MODE=web STATUS_DATA_DIR=./data PUBLIC_ORIGIN=http://localhost:3001 npm start
 ```
 
-The browser check exercises actual rendered desktop/mobile pages, login,
-per-network permissions, plan review, dispatch and logout against **fixture**
-identity/workflow providers. It does not contact an identity provider or change
-a real network. Screenshots land in ignored `artifacts/`.
+## Deploy
 
-Without `NETWORKS_CONFIG`, the original single-network collector and API remain
-active. The public deployment keeps that collector behind the original routes,
-while the console handles `/api/networks/*`, sign-in and operator endpoints.
-Setting `NETWORKS_CONFIG` alone is not a compatible replacement for the original
-service. Follow the [API compatibility contract](deploy/API-COMPATIBILITY.md)
-and run its JSON/SSE check before every public promotion.
+On the status host (images are built there, Go and Node stages included):
 
-## Two views, one source of observations
-
-- **Public:** explicitly published networks, node roles, running image versions,
-  Core/Platform heights, DAPI availability, fresh/stale/unknown health and approved
-  developer endpoints. No AWS IDs, IP inventory, private networks, configuration,
-  logs, action history or controls.
-- **Operator:** the same pages plus permitted network details, exact plan review,
-  workflow history, enrollment, scoped upgrades and stopped-workload recovery.
-  Operations use the same CLI through GitHub Actions. There is no browser shell
-  or direct cloud credential path.
-
-An import says **observed**, not healthy. Health requires a matching independent
-`managed-doctor` result. Old observations become stale. Every intended target stays
-in the report, including testnet's unresolved seed. A green Actions run never
-replaces ongoing health collection.
-
-The initial console launches **prepared plans**, not arbitrary versions supplied
-by a browser. `managed-deploy` restores captured workloads: it is not presented as
-new-node provisioning or a network reset. Protocol migration and automatic
-downgrade are not inferred from image compatibility.
-
-## Configuration and independent collection
-
-Start from [networks.json](examples/networks.json) and
-[collector.json](examples/collector.json). Inputs and operation state belong
-outside the checkout and web root. Only explicitly listed endpoint URLs become
-public; URLs with embedded credentials, query strings or fragments are refused.
-
-`server/collect.js` is a separate process which runs only `managed-import` and
-`managed-doctor` with a pinned CLI. It writes validated results atomically,
-retains partial imports, and never promotes a report from another network.
-Complete imports proceed to an independent health observation. Collector failure
-is visible even when an older report is available. Both networks are observed
-concurrently; repeated timer invocations do not overlap.
-
-The example systemd units in [deploy/](deploy/) use separate `dash-observer` and
-`dash-status` users. Prepare report directories owned by `dash-observer`, group
-`dash-observations`, mode `0750`; grant the web process group read access only.
-Reports are `0640`, collector logs `0600`. Keep SSH/AWS credentials and manifests
-in `/etc/dash-observer`, accessible only to the observer. The web user cannot read
-them. The observer AWS policy needs scoped read-only EC2/STS access, not deployment
-permissions. Its SSH account must be an explicitly approved operational identity.
-No new remote access authority is silently provisioned by the collector.
-
-Use a health window longer than the network's empty-block interval (currently
-four minutes for Moutai). The web process defaults to loopback; terminate HTTPS
-at a trusted reverse proxy and configure the **exact** public origin. For a
-container, set `BIND_ADDRESS=0.0.0.0` only behind the intended proxy boundary.
-
-## GitHub sign-in and authority
-
-Configure a GitHub OAuth application with callback
-`https://YOUR-ORIGIN/api/auth/callback`. Install its `GITHUB_OAUTH_CLIENT_ID` and
-`GITHUB_OAUTH_CLIENT_SECRET` through the host's secret manager, never browser
-configuration, Git, chat, or public artifacts. Missing credentials leave the
-public view available and sign-in unavailable.
-
-Grants use stable **numeric GitHub user IDs**, not mutable display names:
-
-```json
-"operators": {
-  "123456": {
-    "networks": ["testnet", "devnet-moutai"],
-    "actions": ["import", "doctor", "enroll", "upgrade", "deploy"]
-  }
-}
+```sh
+sudo /opt/dash-status/src/deploy/deploy.sh            # origin/master
+sudo /opt/dash-status/src/deploy/deploy.sh <git-ref>  # any ref
 ```
 
-Replace the example ID after verifying identity and authority. An authenticated
-but unlisted user remains a public viewer. Private networks require a configured
-viewer or network grant. OAuth state is single-use and browser-bound. Sessions
-are server-side, expire after eight hours and are lost on restart; run one console
-instance until a shared session store is deliberately implemented. Cookies are
-HttpOnly, SameSite=Lax and Secure on HTTPS. Mutations require both the exact Origin
-and a session CSRF token. Logout invalidates the server session.
-
-## Reviewed operations and Actions
-
-Keep `workflow.enabled` false until the corresponding trusted-main workflow,
-protected `testnet-operations`/`devnet-operations` environments, scoped AWS OIDC
-roles, private artifact bucket and SSH trust have been configured and verified.
-The console dispatches only `dashpay/dash-network-go`, `managed.yml`, `main`.
-The backend computes inputs; browsers cannot supply workflow URLs or refs.
-
-Prefer a narrowly installed GitHub App with Actions write and Contents read for
-that repository. Set `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID` and
-`GITHUB_APP_PRIVATE_KEY_FILE` on the server. Short-lived installation tokens are
-cached server-side. A repository-scoped `DASHNET_WORKFLOW_TOKEN` is also supported
-for an explicitly provisioned deployment; it is never returned to a browser.
-
-Publish the same reviewed plan to the console's private `plan` path and the
-workflow's private artifact input. The exact plan ID shown to the operator is
-passed as CLI confirmation; a changed artifact is rejected. Read-only imports
-and plan outputs are **not** automatically promoted to privileged inputs.
-
-Every request has a durable unique ID before dispatch. An ambiguous response is
-marked unknown and never blindly dispatched twice. Run names include that ID;
-reconciliation links only a unique matching main-branch run. Pending/unknown
-requests block additional console operations on the same network. Actions
-concurrency and the CLI's shared journal provide execution exclusion independently
-of this UI. Keep `/var/lib/dash-status/operations` durable and private.
-
-Do not remove a pending request to make a failed run disappear. Inspect Actions
-and the shared CLI journal, establish that the previous controller has stopped,
-then recover the exact existing operation using the CLI runbook.
-
-## Delivery boundaries
-
-This source does not publish a website, create OAuth applications, grant access,
-enroll Moutai/testnet, or restart their services. Real login and real workflow
-dispatch must be verified against configured infrastructure before enabling
-operator execution. Browser fixtures and unit tests are not that live proof.
+The script builds `dash-status:<rev>`, retags `dash-status:current`, restarts the
+`web` and `agent` services from [deploy/compose.yml](deploy/compose.yml) and rolls
+back if the web health check fails. nginx proxies `/` and `/api/` to
+`127.0.0.1:3006`; the legacy routes in
+[nginx-legacy-api.conf](deploy/nginx-legacy-api.conf) go to the legacy container
+on `127.0.0.1:3002`. Operation history and agent state survive redeploys; an
+agent restart during a running operation marks it interrupted (resumable).

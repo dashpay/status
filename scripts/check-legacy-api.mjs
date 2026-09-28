@@ -39,11 +39,11 @@ export async function checkLegacyAPI(origin, { expectedNodes, token, events = tr
   assert.equal(total, nodes.length);
   assert.ok(Number.isInteger(health.sseClients));
   if (consoleEnabled) {
-    const networks = await json('/api/networks');
-    assert.ok(networks.networks.some((network) => network.name === 'testnet'));
-    assert.ok(networks.networks.some((network) => network.name === 'devnet-moutai'));
+    const overview = await json('/api/overview');
+    assert.ok(overview.networks.some((network) => network.name === 'testnet'));
+    assert.ok(overview.networks.some((network) => network.name === 'devnet-moutai'));
     assert.equal((await json('/api/session')).user, null);
-    const response = await fetch(origin + '/api/networks/testnet/operations', { signal: AbortSignal.timeout(10_000) });
+    const response = await fetch(origin + '/api/networks/testnet/ops', { signal: AbortSignal.timeout(10_000) });
     assert.equal(response.status, 401, 'Operator authorization must remain intact');
   }
   if (events) {

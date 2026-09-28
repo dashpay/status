@@ -17,6 +17,8 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@aws-sdk/client-ec2": "^3.1141.0",
+    "@aws-sdk/client-ec2-instance-connect": "^3.1141.0",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "express-rate-limit": "^7.5.0",
