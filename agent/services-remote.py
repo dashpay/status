@@ -24,6 +24,7 @@ log = lambda m: print(m, file=sys.stderr, flush=True)
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 RPC_PORT = int(cfg['coreRpcPort'])
 PASSWORD = json.loads(Path('/var/lib/dashnet/secrets.json').read_text())['rpcPassword']
+AUX = {'dashnet.auxiliary': cfg.get('auxiliary', '')}
 
 
 def rpc(method, params=None, wallet=None):
@@ -141,7 +142,7 @@ def patch_explorer_api(image):
     # The released API resolves block quorums as testnet/mainnet types only;
     # devnet Platform quorums are llmq_devnet_platform (107).
     sh('docker', 'pull', '--quiet', image, timeout=1200)
-    src = subprocess.run(['docker', 'run', '--rm', '--entrypoint', 'cat', image, '/app/src/controllers/BlocksController.js'],
+    src = subprocess.run(['docker', 'run', '--rm', '--label', f"dashnet.auxiliary={AUX['dashnet.auxiliary']}", '--entrypoint', 'cat', image, '/app/src/controllers/BlocksController.js'],
                          capture_output=True, check=True, timeout=120).stdout.decode()
     old = "NETWORK === 'testnet'\n        ? QuorumTypeEnum.llmq_25_67\n        : QuorumTypeEnum.llmq_100_67"
     if old in src:
@@ -179,7 +180,8 @@ def compose(faucet_image, frontend_image):
         f"{h['quorums']} {{", '  reverse_proxy 127.0.0.1:8080', '}',
         f"{h['explorer']} {{", '  handle_path /backend/* {', '    reverse_proxy 127.0.0.1:3005', '  }', '  reverse_proxy 127.0.0.1:3000', '}',
         f"{h['faucet']} {{", '  reverse_proxy 127.0.0.1:8000', '}', '']), 0o644)
-    svc = lambda image, **kw: dict(image=image, network_mode='host', restart='unless-stopped', logging=dict(driver='local'), **kw)
+    # dash-network-go preflight ignores only containers labelled for this exact host.
+    svc = lambda image, **kw: dict(image=image, network_mode='host', restart='unless-stopped', logging=dict(driver='local'), labels=AUX, **kw)
     idx = f'ghcr.io/pshenmic/platform-explorer-indexer:{ev}'
     spec = dict(name='devnet-services', services=dict(
         # The image sets API_HOST/API_PORT, which override config.toml.

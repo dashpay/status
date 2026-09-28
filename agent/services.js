@@ -53,10 +53,11 @@ export async function deployServices({ r, write, dplan, d, name, pool, r53 }) {
   // Tenderdash RPC stays on loopback on validators; the explorer indexer needs a
   // full-history RPC, so relay one validator's RPC to its VPC address only.
   write(r.id, `services: Tenderdash RPC relay ${relay.name} ${relay.peerAddress}:${RELAY_PORT} -> 127.0.0.1:${ports.platformRPC}`);
-  await pool.exec(host(relay), `sudo docker inspect devnet-td-relay >/dev/null 2>&1 || sudo docker run -d --name devnet-td-relay --restart unless-stopped --network host --log-driver local alpine/socat:1.8.0.3 TCP-LISTEN:${RELAY_PORT},bind=${relay.peerAddress},fork,reuseaddr TCP:127.0.0.1:${ports.platformRPC}`, null, 180_000);
+  const relayLabel = `dashnet.auxiliary=${name}/${relay.name}`;
+  await pool.exec(host(relay), `[ "$(sudo docker inspect -f '{{index .Config.Labels "dashnet.auxiliary"}}' devnet-td-relay 2>/dev/null)" = "${name}/${relay.name}" ] || { sudo docker rm -f devnet-td-relay >/dev/null 2>&1; sudo docker run -d --name devnet-td-relay --label ${relayLabel} --restart unless-stopped --network host --log-driver local alpine/socat:1.8.0.3 TCP-LISTEN:${RELAY_PORT},bind=${relay.peerAddress},fork,reuseaddr TCP:127.0.0.1:${ports.platformRPC}; }`, null, 180_000);
 
   const cfg = {
-    short: shortName(name), displayName: d.displayName, coreNetwork: dplan.coreNetwork, platformChainId: dplan.platformChainId,
+    short: shortName(name), displayName: d.displayName, auxiliary: `${name}/${wallet.name}`, coreNetwork: dplan.coreNetwork, platformChainId: dplan.platformChainId,
     coreRpcPort: ports.coreRPC, hosts: Object.fromEntries(Object.entries(names).map(([k, v]) => [k, v.host])),
     quorumServerImage: d.services.quorumServer.startsWith('docker.io/') ? d.services.quorumServer : `docker.io/${d.services.quorumServer}`,
     explorerVersion: d.services.explorerVersion, faucetRef: d.services.faucetRef, faucetAmount: d.services.faucetAmount,
