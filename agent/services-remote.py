@@ -13,7 +13,7 @@ Input: argv[1] is base64 JSON or @file (no secrets). The Core RPC password is re
 this host from /var/lib/dashnet/secrets.json and written only to 0600 files here.
 Prints one JSON line with results.
 """
-import base64, fcntl, json, os, secrets, subprocess, sys, time, urllib.request
+import base64, fcntl, json, os, re, secrets, subprocess, sys, time, urllib.request
 from pathlib import Path
 
 arg = sys.argv[1]
@@ -84,7 +84,9 @@ def faucet_wallet():
             log(f'funded faucet wallet with {amount:.2f} in {parts} outputs: {txid}')
         else:
             log(f'dashnet wallet has {free:.2f} spendable; faucet funding deferred')
-    return rpc('getbalance', wallet='faucet')
+    # Include the funding that is still confirming.
+    b = rpc('getbalances', wallet='faucet')['mine']
+    return round(b['trusted'] + b['untrusted_pending'], 8)
 
 
 # ---- builds ---------------------------------------------------------------
@@ -139,18 +141,34 @@ def build_explorer_frontend():
 
 
 def patch_explorer_api(image):
-    # The released API resolves block quorums as testnet/mainnet types only;
-    # devnet Platform quorums are llmq_devnet_platform (107).
+    """Bind-mounted patches for the released API image on a devnet."""
     sh('docker', 'pull', '--quiet', image, timeout=1200)
-    src = subprocess.run(['docker', 'run', '--rm', '--label', f"dashnet.auxiliary={AUX['dashnet.auxiliary']}", '--entrypoint', 'cat', image, '/app/src/controllers/BlocksController.js'],
-                         capture_output=True, check=True, timeout=120).stdout.decode()
+
+    def read(path):
+        return subprocess.run(['docker', 'run', '--rm', '--label', f"dashnet.auxiliary={AUX['dashnet.auxiliary']}", '--entrypoint', 'cat', image, path],
+                              capture_output=True, check=True, timeout=120).stdout.decode()
+
+    mounts = []
+    # Block quorums resolve as testnet/mainnet types only; devnet Platform
+    # quorums are llmq_devnet_platform (107).
+    src = read('/app/src/controllers/BlocksController.js')
     old = "NETWORK === 'testnet'\n        ? QuorumTypeEnum.llmq_25_67\n        : QuorumTypeEnum.llmq_100_67"
     if old in src:
         src = src.replace(old, 'QuorumTypeEnum.llmq_devnet_platform')
     else:
         log('explorer API: block quorum code changed upstream; leaving it unpatched')
     write('explorer-BlocksController.js', src, 0o644)
-    return f'{ROOT}/explorer-BlocksController.js:/app/src/controllers/BlocksController.js:ro'
+    mounts.append(f'{ROOT}/explorer-BlocksController.js:/app/src/controllers/BlocksController.js:ro')
+    # The SDK verifies proofs with quorum keys fetched from the public testnet
+    # explorer, which has no devnet quorums; ask this devnet's own API instead.
+    sdk = '/app/node_modules/dash-platform-sdk/src/utils/getQuorumPublicKey.js'
+    src = read(sdk)
+    patched = re.sub(r"https://\$\{network === 'mainnet' \? '' : 'testnet\.'\}platform-explorer\.pshenmic\.dev", 'http://127.0.0.1:3005', src)
+    if patched == src:
+        log('explorer API: SDK quorum key lookup changed upstream; leaving it unpatched')
+    write('explorer-getQuorumPublicKey.js', patched, 0o644)
+    mounts.append(f'{ROOT}/explorer-getQuorumPublicKey.js:{sdk}:ro')
+    return mounts
 
 
 # ---- compose --------------------------------------------------------------
@@ -192,7 +210,7 @@ def compose(faucet_image, frontend_image):
                      healthcheck=dict(test=['CMD-SHELL', 'pg_isready -h 127.0.0.1 -p 5433 -U explorer -d explorer'], interval='5s', retries=30)),
         **{'explorer-migrate': dict(svc(idx, env_file=[f'{ROOT}/explorer-indexer.env'], command=['/app/indexer', 'migrate'], depends_on={'postgres': {'condition': 'service_healthy'}}), restart='no')},
         **{'explorer-indexer': svc(idx, env_file=[f'{ROOT}/explorer-indexer.env'], command=['/app/indexer'], depends_on={'explorer-migrate': {'condition': 'service_completed_successfully'}})},
-        **{'explorer-api': svc(f'ghcr.io/pshenmic/platform-explorer-api:{ev}', env_file=[f'{ROOT}/explorer-api.env'], volumes=[patch_explorer_api(f'ghcr.io/pshenmic/platform-explorer-api:{ev}')], depends_on={'explorer-migrate': {'condition': 'service_completed_successfully'}})},
+        **{'explorer-api': svc(f'ghcr.io/pshenmic/platform-explorer-api:{ev}', env_file=[f'{ROOT}/explorer-api.env'], volumes=patch_explorer_api(f'ghcr.io/pshenmic/platform-explorer-api:{ev}'), depends_on={'explorer-migrate': {'condition': 'service_completed_successfully'}})},
         **{'explorer-frontend': svc(frontend_image)},
         caddy=svc('caddy:2', volumes=[f'{ROOT}/Caddyfile:/etc/caddy/Caddyfile:ro', 'caddy-data:/data', 'caddy-config:/config']),
     ), volumes={'explorer-db': {}, 'caddy-data': {}, 'caddy-config': {}})
@@ -261,6 +279,6 @@ compose(faucet_image, frontend_image)
 topup_cron()
 result = dict(faucetBalance=balance, faucetImage=faucet_image, frontendImage=frontend_image,
               quorums=wait('http://127.0.0.1:8080/health'), quorumList=wait_quorums(), faucet=wait('http://127.0.0.1:8000/health'),
-              explorerApi=wait('http://127.0.0.1:3005/status', 300), explorerFrontend=wait('http://127.0.0.1:3000/', 300),
+              explorerApi=wait('http://127.0.0.1:3005/status', 300), explorerValidators=wait('http://127.0.0.1:3005/validators?limit=1', 180), explorerFrontend=wait('http://127.0.0.1:3000/', 300),
               walletAddress=rpc('getnewaddress', wallet='faucet'))
 print(json.dumps(result))
