@@ -176,7 +176,7 @@ export function projectNetwork(network, evaluation, state, operator) {
   });
   return {
     name: network.name, displayName: network.displayName, description: network.description || '', chainType: network.chainType, coreNetwork: network.coreNetwork,
-    public: network.public, deployable: network.deployable, kind: network.kind || 'managed', lifecycle: network.lifecycle || null, observationWindow: network.observationWindow, operationTimeout: network.operationTimeout, level: evaluation.level, generatedAt: evaluation.generatedAt, ageSeconds: evaluation.ageSeconds,
+    public: network.public, deployable: network.deployable, kind: network.kind || 'managed', upgradeScopes: network.upgradeScopes || null, lifecycle: network.lifecycle || null, observationWindow: network.observationWindow, operationTimeout: network.operationTimeout, level: evaluation.level, generatedAt: evaluation.generatedAt, ageSeconds: evaluation.ageSeconds,
     pollSeconds: state?.pollSeconds || null, discovery: state?.discovery ? { at: state.discovery.at, error: operator ? state.discovery.error : state.discovery.error ? 'discovery failed' : null } : null,
     summary: evaluation.summary, endpoints: (state?.endpoints || []).map((e) => ({ label: e.label, kind: e.kind, url: e.url, status: e.status, ok: e.ok, ms: e.ms, error: e.error, height: e.height, version: e.version, chainId: e.chainId })),
     hosts, journal: operator ? state?.journal || null : undefined,

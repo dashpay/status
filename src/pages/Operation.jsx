@@ -83,7 +83,7 @@ export default function Operation({ name, id }) {
       {review?.kind === 'devnet-services' && <ServicesReview op={op} review={review} operator={operator} pending={pending} act={act} />}
       {review?.kind === 'delete-devnet' && <DeleteReview op={op} review={review} operator={operator} pending={pending} act={act} />}
       {review && !review.kind && (
-        <Section title={`Plan ${short(review.planId, 16)} · ${review.changes.length} container change(s)`} right={op.status === 'review' && <span className="text-dim text-[12px]">expires in {Math.max(0, Math.round(expiresIn / 60))} min</span>}>
+        <Section title={`Plan ${short(review.planId, 16)} · ${review.scope ? `${review.scope} · ` : ''}${review.changes.length} container change(s)`} right={op.autoConfirmed ? <span className="text-dim text-[12px]">confirmed automatically for {op.confirmedBy?.login} (run as soon as ready)</span> : op.status === 'review' && <span className="text-dim text-[12px]">expires in {Math.max(0, Math.round(expiresIn / 60))} min</span>}>
           <div className="panel scroll-x">
             <table className="grid"><thead><tr><th>node</th><th>component</th><th>from</th><th>to (pinned)</th><th /></tr></thead>
               <tbody className="[&_tr]:!cursor-default">
@@ -99,6 +99,13 @@ export default function Operation({ name, id }) {
               </tbody>
             </table>
           </div>
+          {review.then?.length > 0 && (
+            <div className="panel mt-2 px-3 py-2 text-[12px]">
+              <span className="text-dim">Then, once this rollout is healthy: </span>
+              {review.then.map((t, i) => <span key={i} className="mr-3"><span className="font-medium">{t.scope}</span> {Object.entries(t.images).map(([c, v]) => <span key={c} className="mono ml-1">{c} {v.split(':').pop()}</span>)}</span>)}
+              <span className="text-dim"> — planned from the upgraded network, then run the same way.</span>
+            </div>
+          )}
           {op.status === 'review' && operator && (
             <div className="mt-3 flex items-center gap-3">
               <button className="btn btn-primary" disabled={pending || !review.changes.length} onClick={() => act('confirm', { planId: review.planId })}>Confirm and {q.action === 'upgrade' ? 'upgrade' : 'restore'} {review.targets.length} node(s)</button>

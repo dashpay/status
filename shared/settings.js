@@ -194,6 +194,8 @@ export function devnetEntry(name, reg) {
   return {
     name, displayName: reg.displayName || name, tag: name, chainType: 'devnet', coreNetwork: devnetChain(reg.coreNetwork || `${name.replace(/^devnet-/, '')}-g1`),
     p2pPort: 20001, public: reg.public !== false, deployable: reg.status === 'ready', showBalances: true, kind: 'dashnet',
+    // Components this devnet's dash-network-go can upgrade in place.
+    upgradeScopes: reg.upgradeScopes || ['platform', 'tenderdash'],
     description: '',
     endpoints: [
       dns.insight && { label: 'Insight', url: `https://${dns.insight.host}/insight-api/status` },

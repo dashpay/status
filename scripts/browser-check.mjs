@@ -76,11 +76,12 @@ try {
   await page.getByLabel(/^helper/).check();
   await page.getByRole('button', { name: '4.2.0-beta.5' }).click();
   await page.screenshot({ path: 'artifacts/deploy.png', fullPage: true });
-  await page.getByRole('button', { name: 'Prepare plan for review' }).click();
+  // One click: the upgrade starts as soon as its plan is ready (the default).
+  await page.getByRole('button', { name: 'Upgrade now' }).click();
   await page.waitForURL('**/n/devnet-moutai/ops/*');
   const [file] = readdirSync(join(dataDir, 'requests')).filter((f) => f.endsWith('.json'));
   const q = JSON.parse(readFileSync(join(dataDir, 'requests', file), 'utf8'));
-  assert.deepEqual([q.action, q.nodes, q.components, q.images], ['upgrade', ['hp-masternode-1'], ['helper'], { helper: 'dashpay/dashmate-helper:4.2.0-beta.5' }]);
+  assert.deepEqual([q.action, q.nodes, q.components, q.images, q.options.autoRun], ['upgrade', ['hp-masternode-1'], ['helper'], { helper: 'dashpay/dashmate-helper:4.2.0-beta.5' }, true]);
   // Admin: prepare (non-destructive) a Platform wipe/redeploy of a dashmate devnet.
   await page.goto(origin + '/n/devnet-moutai/reset');
   await page.getByText('Wipe and redeploy Platform').waitFor();
