@@ -59,6 +59,8 @@ export default function Settings() {
 
       <Access doc={doc} ro={ro} set={set} self={session.user} />
 
+      <DevnetDefaults d={doc.devnets} ro={ro} update={(fn) => set((x) => fn(x.devnets))} />
+
       <Section title="Networks" right={!ro && <button className="btn" onClick={() => set((d) => { d.networks.push(blankNetwork()); })}>Add network</button>}>
         <div className="space-y-3">
           {doc.networks.map((n, i) => <NetworkEditor key={i} n={n} ro={ro} update={(fn) => set((d) => fn(d.networks[i]))} remove={() => set((d) => { d.networks.splice(i, 1); })} />)}
@@ -203,6 +205,36 @@ function Access({ doc, ro, set, self }) {
         </table>
       </div>
       <div className="text-dim text-[11.5px] mt-1">Access is bound to the GitHub numeric user id, so a renamed account keeps its access. Changes apply after Save.</div>
+    </Section>
+  );
+}
+
+function DevnetDefaults({ d, ro, update }) {
+  if (!d) return null;
+  const T = (label, key, mono = true) => <TextField label={label} value={d[key]} ro={ro} mono={mono} onChange={(v) => update((x) => { x[key] = v.trim(); })} />;
+  const N = (label, key) => <NumberField label={label} value={d[key]} ro={ro} onChange={(v) => update((x) => { x[key] = v; })} />;
+  return (
+    <Section title="New devnet defaults">
+      <div className="panel">
+        <div className="p-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {T('VPC', 'vpcId')}{T('Subnet', 'subnetId')}
+          <TextField label="Security groups (comma separated)" value={d.securityGroupIds.join(', ')} ro={ro} mono onChange={(v) => update((x) => { x.securityGroupIds = v.split(',').map((g) => g.trim()).filter(Boolean); })} />
+          {T('EC2 key pair (agent key)', 'keyName')}{T('BYOIP IPAM pool', 'ipamPoolId')}{T('Route 53 zone', 'dnsZoneId')}{T('DNS suffix', 'dnsSuffix')}{N('Root disk GiB', 'rootVolumeGiB')}
+          {N('Validators', 'validators')}{T('Validator type', 'validatorType')}{T('Validator arch', 'validatorArch')}{N('Platform protocol', 'protocol')}
+          {T('Wallet + services type', 'walletType')}{T('Wallet + services arch', 'walletArch')}
+        </div>
+        <div className="px-3 pb-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {Object.keys(d.images).map((c) => <TextField key={c} label={`${c} image`} value={d.images[c]} ro={ro} mono onChange={(v) => update((x) => { x.images[c] = v.trim(); })} />)}
+        </div>
+        <div className="px-3 pb-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 border-t border-line pt-3">
+          <TextField label="Quorum list server image" value={d.services.quorumServer} ro={ro} mono onChange={(v) => update((x) => { x.services.quorumServer = v.trim(); })} />
+          <TextField label="Platform Explorer release" value={d.services.explorerVersion} ro={ro} mono onChange={(v) => update((x) => { x.services.explorerVersion = v.trim(); })} />
+          <TextField label="dash-faucet commit" value={d.services.faucetRef} ro={ro} mono onChange={(v) => update((x) => { x.services.faucetRef = v.trim(); })} />
+          <NumberField label="Faucet payout (DASH)" value={d.services.faucetAmount} ro={ro} float onChange={(v) => update((x) => { x.services.faucetAmount = v; })} />
+          <NumberField label="Faucet requests per IP per hour" value={d.services.faucetRateLimit} ro={ro} onChange={(v) => update((x) => { x.services.faucetRateLimit = v; })} />
+          <NumberField label="Faucet wallet funding (DASH)" value={d.services.faucetFunding} ro={ro} float onChange={(v) => update((x) => { x.services.faucetFunding = v; })} />
+        </div>
+      </div>
     </Section>
   );
 }

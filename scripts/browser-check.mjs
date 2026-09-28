@@ -78,9 +78,19 @@ try {
   await page.screenshot({ path: 'artifacts/deploy.png', fullPage: true });
   await page.getByRole('button', { name: 'Prepare plan for review' }).click();
   await page.waitForURL('**/n/devnet-moutai/ops/*');
-  const [file] = readdirSync(join(dataDir, 'requests'));
+  const [file] = readdirSync(join(dataDir, 'requests')).filter((f) => f.endsWith('.json'));
   const q = JSON.parse(readFileSync(join(dataDir, 'requests', file), 'utf8'));
   assert.deepEqual([q.action, q.nodes, q.components, q.images], ['upgrade', ['hp-masternode-1'], ['helper'], { helper: 'dashpay/dashmate-helper:4.2.0-beta.5' }]);
+  // Admin: prepare a new devnet from the form.
+  await page.goto(origin + '/devnets/new');
+  await page.getByPlaceholder('bonsai').fill('fixture');
+  await page.screenshot({ path: 'artifacts/new-devnet.png', fullPage: true });
+  await page.getByRole('button', { name: 'Prepare plan for review' }).click();
+  await page.waitForURL('**/n/devnet-fixture/ops/*');
+  const created = readdirSync(join(dataDir, 'requests')).map((f) => JSON.parse(readFileSync(join(dataDir, 'requests', f), 'utf8'))).find((x) => x.action === 'create-devnet');
+  assert.equal(created.network, 'devnet-fixture');
+  assert.equal(created.devnet.validators, 13);
+  assert.equal(created.devnet.subnetId, undefined, 'placement is never sent by the browser');
   await page.goto(origin + '/settings');
   await page.getByPlaceholder('GitHub login, e.g. octocat').fill('octocat');
   await page.getByRole('button', { name: 'Look up' }).click();

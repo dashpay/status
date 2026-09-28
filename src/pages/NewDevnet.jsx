@@ -93,7 +93,6 @@ export default function NewDevnet() {
           <Num label="Faucet payout (DASH)" value={form.services.faucetAmount} onChange={(v) => set((f) => { f.services.faucetAmount = v; })} />
           <Num label="Faucet requests per IP per hour" value={form.services.faucetRateLimit} onChange={(v) => set((f) => { f.services.faucetRateLimit = v; })} />
           <Num label="Faucet wallet funding (DASH)" value={form.services.faucetFunding} onChange={(v) => set((f) => { f.services.faucetFunding = v; })} />
-          <Num label="Epoch length (s), for the explorer" value={form.services.epochSeconds} onChange={(v) => set((f) => { f.services.epochSeconds = v; })} />
         </div>
       </Section>
 

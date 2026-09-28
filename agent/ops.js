@@ -4,7 +4,7 @@
 // records, logs and every dashnet artifact. One operation runs per network.
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { COMPONENTS, COMPONENT_REPOS, adminFor, operatorFor, readJSON, writeAtomic } from '../shared/settings.js';
 import { createDevnets, validateDevnetRequest } from './devnets.js';
@@ -95,10 +95,18 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     }
   }
 
-  function dashnet(r, args, { timeoutMs, onLine } = {}) {
+  // Plans bind dashnet's node recipes, so every operation keeps using the exact
+  // binary it was planned with, even after the agent image is upgraded.
+  function pinBinary(dir) {
+    const pinned = join(dir, 'dashnet');
+    if (!existsSync(pinned) && existsSync(binary)) { copyFileSync(binary, pinned); chmodSync(pinned, 0o700); }
+    return existsSync(pinned) ? pinned : binary;
+  }
+
+  function dashnet(r, args, { timeoutMs, onLine, bin } = {}) {
     return new Promise((resolve) => {
       write(r.id, `$ dashnet ${args.map((a) => a.startsWith(work) ? a.slice(work.length + 1) : a).join(' ')}`);
-      const child = spawnImpl(binary, args, { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, AWS_REGION: getSettings().aws.region } });
+      const child = spawnImpl(bin || r.binary || binary, args, { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, AWS_REGION: getSettings().aws.region } });
       const slot = running.get(r.network);
       if (slot?.id === r.id) slot.child = child; else running.set(r.network, { id: r.id, child });
       let buffer = '';
@@ -143,6 +151,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     // Each preparation gets fresh artifacts; dashnet never overwrites outputs.
     r.attempt = (r.attempt || 0) + 1;
     const dir = join(work, r.id, String(r.attempt)); mkdirSync(dir, { recursive: true, mode: 0o700 });
+    r.binary = pinBinary(dir);
     r.status = 'preparing'; save(r);
     let done = step(r, 'Build manifest from discovery');
     const state = await readState(network.name);
@@ -285,7 +294,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     if (['succeeded', 'failed', 'cancelled'].includes(r.status)) onChange(r, true);
   }
 
-  const devnets = devnetsImpl || createDevnets({ ctx: { dashnet, step, save, write }, dirs, key, pool, getSettings, region: getSettings().aws.region, log });
+  const devnets = devnetsImpl || createDevnets({ ctx: { dashnet, step, save, write, pinBinary }, dirs, key, pool, getSettings, region: getSettings().aws.region, log });
 
   // Poll the request directory: create, confirm, cancel, resume.
   function tick() {

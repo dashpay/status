@@ -71,7 +71,7 @@ export function networkYaml(settings, name, d, amis) {
 }
 
 export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log = console.log }) {
-  const { dashnet, step, save, write } = ctx;
+  const { dashnet, step, save, write, pinBinary } = ctx;
   const registryPath = join(dirs.data, 'devnets.json');
   const registry = () => readJSON(registryPath, {});
   const register = (name, patch) => { const r = registry(); r[name] = { ...(r[name] || {}), ...patch, updatedAt: new Date().toISOString() }; writeAtomic(registryPath, JSON.stringify(r, null, 1)); };
@@ -86,7 +86,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
   }
 
   async function run(r, name, args, opts = {}) {
-    const code = await dashnet(r, args, opts);
+    const code = await dashnet(r, args, { ...opts, bin: pinBinary(workDir(r.network)) });
     if (code !== 0 && !opts.allowFail) throw new Error(`${name} failed (exit ${code}); see log`);
     return code;
   }
@@ -96,6 +96,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     const s = getSettings();
     const d = validateDevnetRequest(s, r.request, registry());
     const name = r.network, dir = workDir(name);
+    rmSync(join(dir, 'dashnet'), { force: true }); // nothing is bound to a binary before provisioning
     r.status = 'preparing'; save(r);
     let done = step(r, 'Current Ubuntu 24.04 AMIs (Canonical)');
     const amis = {};
