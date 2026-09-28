@@ -33,6 +33,7 @@ export default function NewDevnet() {
   if (existing.includes(full)) problems.push(`${full} already exists; names cannot be reused`);
   if (form.validators < 13 || form.validators > 25) problems.push('13 to 25 validators');
   for (const c of COMPONENTS) if ((form.images[c] || '').replace(/^docker\.io\//, '').split(/[@:]/)[0] !== REPOS[c]) problems.push(`${c} image must be ${REPOS[c]}:<tag>`);
+  if (form.images.acme && form.images.acme.replace(/^docker\.io\//, '').split(/[@:]/)[0] !== 'goacme/lego') problems.push('ACME client image must be goacme/lego:<tag>, or empty for self-signed gateways');
 
   async function submit() {
     setBusy(true); setError(null);
@@ -81,6 +82,8 @@ export default function NewDevnet() {
       <Section title="3 · Versions">
         <div className="panel p-3 grid gap-3 sm:grid-cols-2">
           {COMPONENTS.map((c) => <ImageField key={c} c={c} value={form.images[c]} fallback={defaults.images[c]} onChange={(v) => set((f) => { f.images[c] = v; })} />)}
+          <label className="text-[12px]"><div className="text-dim mb-1">ACME client <span className="mono">goacme/lego</span> · Let's Encrypt certificate for each validator's public IP (empty: self-signed)</div>
+            <input className="input w-full mono" value={form.images.acme || ''} onChange={(e) => set((f) => { f.images.acme = e.target.value.trim(); })} /></label>
           <label className="text-[12px]"><div className="text-dim mb-1">Platform protocol number (4.2.x = 14, 4.1.x = 13)</div><input className="input w-28 mono" type="number" value={form.protocol} onChange={(e) => set((f) => { f.protocol = Number(e.target.value); })} /></label>
         </div>
       </Section>

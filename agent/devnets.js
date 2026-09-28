@@ -74,7 +74,7 @@ export function networkYaml(settings, name, d, amis) {
     'nodes:',
     '- name: validators', '  role: validator', `  count: ${d.validators}`, `  architecture: ${d.validatorArch}`, `  instanceType: ${d.validatorType}`,
     '- name: wallet', '  role: wallet', '  count: 1', `  architecture: ${d.walletArch}`, `  instanceType: ${d.walletType}`,
-    'images:', ...COMPONENTS.map((c) => `  ${c}: ${img(c)}`),
+    'images:', ...COMPONENTS.map((c) => `  ${c}: ${img(c)}`), ...(d.images.acme ? [`  acme: ${img('acme')}`] : []),
   ];
   return lines.join('\n') + '\n';
 }
@@ -130,7 +130,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       planId: plan.id, kind: 'create-devnet', preparedAt: new Date().toISOString(),
       footprint: Object.entries(groups).map(([k, count]) => { const [group, type, arch] = k.split('|'); return { group, type, arch, count }; }),
       instances: plan.targets.length, storageGiB: plan.targets.length * d.rootVolumeGiB, estimate: estimate(d),
-      images: Object.fromEntries(COMPONENTS.map((c) => [c, { ref: d.images[c], digests: lockDigests(lock, c) }])),
+      images: Object.fromEntries([...COMPONENTS, ...(d.images.acme ? ['acme'] : [])].map((c) => [c, { ref: d.images[c], digests: lockDigests(lock, c) }])),
       protocol: d.protocol, coreNetwork: coreNetwork(name), platformChainId: `dash-${coreNetwork(name)}`,
       dns: serviceNames(name, d), services: d.services, amis, network: { vpc: d.vpcId, subnet: d.subnetId, securityGroups: d.securityGroupIds, ipamPool: d.ipamPoolId },
     };
@@ -199,7 +199,10 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
 
     if (!existsSync(join(dir, 'deployment.json'))) {
       done = step(r, `Deployment plan, Platform protocol ${d.protocol} (dashnet deployment-plan)`);
-      await run(r, 'deployment-plan', ['deployment-plan', '--bootstrap-plan', join(dir, 'bootstrap-plan.json'), '--protocol', String(d.protocol), '--out', join(dir, 'deployment.json')]);
+      // Public IPAM addresses and Let's Encrypt gateway certificates, as
+      // long-running devnets have; explicit so a missing prerequisite fails.
+      const tls = d.images.acme && d.ipamPoolId ? ['--gateway-tls', 'letsencrypt', '--acme-email', d.acmeEmail] : ['--gateway-tls', 'self-signed'];
+      await run(r, 'deployment-plan', ['deployment-plan', '--bootstrap-plan', join(dir, 'bootstrap-plan.json'), '--protocol', String(d.protocol), '--advertise', d.ipamPoolId ? 'public' : 'private', ...tls, '--out', join(dir, 'deployment.json')]);
       done('ok');
     }
     const dplan = readJSON(join(dir, 'deployment.json'));
@@ -220,7 +223,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     await once('services', async () => {
       done = step(r, 'Quorum server, Platform Explorer, faucet, DNS and TLS');
       const services = await deployServices({ r, write, dplan, d, name, pool, s, ec2, r53, dir });
-      register(name, { services: d.services, dns: services.dns, walletAddress: services.walletAddress });
+      register(name, { services: d.services, dns: services.dns, walletAddress: services.walletAddress, promoCodes: services.promoCodes });
       done('ok', services.summary);
     });
 
@@ -364,7 +367,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     const done = step(r, 'Quorum server, Platform Explorer, faucet, DNS and TLS');
     const services = await deployServices({ r, write, dplan, d, name, pool, s: getSettings(), ec2, r53, dir });
     writeFileSync(join(dir, 'request.json'), JSON.stringify(d), { mode: 0o600 });
-    register(name, { services: d.services, dns: services.dns, status: registry()[name]?.status === 'failed' ? 'ready' : registry()[name]?.status });
+    register(name, { services: d.services, dns: services.dns, promoCodes: services.promoCodes, status: registry()[name]?.status === 'failed' ? 'ready' : registry()[name]?.status });
     done('ok', services.summary);
   }
 

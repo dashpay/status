@@ -145,6 +145,9 @@ test('devnet requests: admin-only fields, permanent names, placement from settin
   assert.match(yaml, /count: 15/);
   assert.match(yaml, /ipamPoolId: ipam-pool-/);
   assert.match(yaml, /drive: docker.io\/dashpay\/drive:/);
+  assert.match(yaml, /acme: docker.io\/goacme\/lego:v5/, 'ACME client for trusted gateway certificates');
+  assert.doesNotMatch(networkYaml(s, 'devnet-bonsai', { ...d, images: { ...d.images, acme: '' } }, { arm64: 'ami-1', amd64: 'ami-2' }), /acme:/);
+  assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { images: { acme: 'evil/lego:1' } } }, {}), /images.acme/);
   assert.ok(estimate(d).hourly > 0.5);
   assert.throws(() => validateRequest(s, { id: q.id, network: 'devnet-bonsai', action: 'delete-devnet', confirmName: 'devnet-bonsai' }, {}), /only devnets created/);
   assert.throws(() => validateRequest(s, { id: q.id, network: 'devnet-bonsai', action: 'delete-devnet', confirmName: 'nope' }, { 'devnet-bonsai': { status: 'ready' } }), /type devnet-bonsai/);

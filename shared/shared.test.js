@@ -99,7 +99,7 @@ test('saving settings never freezes console devnet entries', async () => {
 
 test('hidden balances never reach the public projection', () => {
   const s = structuredClone(settings);
-  const n = { ...s.networks[2], showBalances: false };
+  const n = { ...s.networks[0], name: 'mainnet', tag: 'mainnet-support', chainType: 'mainnet', coreNetwork: 'main', deployable: false, showBalances: false };
   const host = { name: 'wallet-1', role: 'wallet', state: 'running', publicIp: '192.0.2.9', probe: { ok: true, at: new Date().toISOString(), data: {
     core: { chain: 'main', blocks: 10, wallets: [{ name: 'dashd-wallet-1-faucet', trusted: 12.34 }] }, faucet: { kind: 'dash-faucet', status: 503, state: 'low_balance', balance: 12.34, utxos: 3 }, containers: [] } } };
   const e = evaluateNetwork(n, { hosts: [host] }, s);
@@ -111,4 +111,13 @@ test('hidden balances never reach the public projection', () => {
 test('a validator without Tenderdash RPC is down, not merely behind', () => {
   const e = evaluateNetwork(network, { hosts: [evo('a'), evo('b', { tenderdash: null })] }, settings);
   assert.equal(e.rows[1].level, 'down');
+});
+
+test('a trusted gateway certificate close to expiry means renewal is failing', () => {
+  const soon = new Date(Date.now() + 10 * 3600_000).toISOString(), later = new Date(Date.now() + 5 * 86400_000).toISOString();
+  const tls = (trusted, expiresAt) => ({ dapi: { ok: true, latencyMs: 5, height: 10, tls: { trusted, issuer: "Let's Encrypt YR2", expiresAt } } });
+  const reasons = (hosts) => evaluateNetwork(network, { hosts }, settings).rows.flatMap((r) => r.reasons.map((x) => x.text));
+  assert.ok(reasons([evo('a', tls(true, soon))]).some((t) => /expires in 10 h/.test(t)));
+  assert.ok(!reasons([evo('a', tls(true, later))]).some((t) => /certificate/.test(t)));
+  assert.ok(!reasons([evo('a', tls(false, soon))]).some((t) => /certificate/.test(t)), 'self-signed certificates are not judged');
 });

@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { ago, api, bytes, clock, dash, duration, navigate, num, short, useNow, useResource, useSession, ROLE_LABEL } from '../lib.js';
 import { Delta, Dot, Empty, Err, Level, Link, Meter, Section, Stat } from '../ui.jsx';
 import Operations from './Operations.jsx';
@@ -283,6 +283,7 @@ function HostDetail({ h, now, member, operator, network }) {
         {h.dapi && <><div className="label mt-3 mb-1">DAPI (local getStatus)</div><KV rows={[
           ['result', h.dapi.ok ? `ok · ${h.dapi.latencyMs} ms · height ${num(h.dapi.height)}` : `failed${h.dapi.error ? `: ${h.dapi.error}` : ''}`],
           ['versions', h.dapi.ok ? `dapi ${h.dapi.dapiVersion} · drive ${h.dapi.driveVersion}` : null],
+          h.dapi.tls && ['certificate', `${h.dapi.tls.trusted ? 'publicly trusted' : 'not publicly trusted'} · ${h.dapi.tls.issuer || 'unknown issuer'}${h.dapi.tls.expiresAt ? ` · expires in ${duration(Math.max(0, (Date.parse(h.dapi.tls.expiresAt) - Date.now()) / 1000))}` : ''}`],
           h.dapiPublic && ['from status host', h.dapiPublic.ok ? `reachable ${h.dapiPublic.ms} ms` : 'not reachable'],
         ]} /></>}
         <div className="label mt-3 mb-1">Containers</div>
@@ -323,6 +324,8 @@ function Lifecycle({ n, member, admin }) {
   const [open, setOpen] = useState(false);
   const [error, setError] = useState(null);
   const level = { ready: 'ok', creating: 'info', services: 'info', deleting: 'warn', failed: 'down' }[l.status] || 'stopped';
+  const [codes, setCodes] = useState({});
+  useEffect(() => { if (member) api(`/api/networks/${n.name}/faucet-codes`).then((r) => setCodes(r.codes || {}), () => setCodes({})); }, [member, n.name]);
   const remove = async () => {
     setError(null);
     try { const r = await api(`/api/networks/${n.name}/ops`, { method: 'POST', body: { action: 'delete-devnet', confirmName: confirm } }); navigate(`/n/${n.name}/ops/${r.id}`); }
@@ -344,6 +347,7 @@ function Lifecycle({ n, member, admin }) {
         <input className="input mono w-56" value={confirm} onChange={(e) => setConfirm(e.target.value.trim())} />
         <button className="btn btn-danger !py-0.5" disabled={confirm !== n.name} onClick={remove}>Prepare deletion</button>
         <button className="btn !py-0.5" onClick={() => setOpen(false)}>cancel</button></span>}
+      {member && Object.keys(codes).length > 0 && <span className="w-full text-dim">faucet promo codes (members only; once per IP per hour): {Object.entries(codes).map(([c, a]) => <span key={c} className="mr-3"><span className="mono text-fg">{c}</span> {a} DASH</span>)}</span>}
       {error && <span className="lv-down w-full">{error.message}</span>}
     </div>
   );

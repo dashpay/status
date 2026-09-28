@@ -137,6 +137,11 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   const request = (payload) => writeAtomic(join(dirs.requests, `${payload.id}${payload.type === 'create' ? '' : '.' + payload.type + '-' + randomUUID().slice(0, 8)}.json`), JSON.stringify(payload));
 
   app.get('/api/networks/:name/ops', requireMember, (req, res) => res.json({ ops: listOps(req.params.name).slice(0, 100) }));
+  // Faucet promo codes of a console devnet: members only, never public.
+  app.get('/api/networks/:name/faucet-codes', requireMember, (req, res) => {
+    const reg = readJSON(join(dataDir, 'devnets.json'), {})[req.params.name];
+    res.json({ codes: reg?.status !== 'deleted' && reg?.promoCodes ? reg.promoCodes : {} });
+  });
   const registry = () => readJSON(join(dataDir, 'devnets.json'), {});
   app.post('/api/networks/:name/ops', requireOperator, auth.csrf, (req, res) => {
     const n = settings.networks.find((x) => x.name === req.params.name);

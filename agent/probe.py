@@ -4,10 +4,13 @@
 Only local sources are queried (Docker, Core RPC through dash-cli, Tenderdash RPC,
 DAPI gRPC through the local gateway, Insight, the faucet). Nothing is written.
 """
+import calendar
 import json
 import os
 import re
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -322,7 +325,28 @@ def dapi(raw, address):
     return dict(ok=True, latencyMs=latency, dapiVersion=txt(software.get(1)), driveVersion=txt(software.get(2)),
                 tenderdashVersion=txt(software.get(3)), height=chain.get(4), catchingUp=bool(chain.get(1, 0)),
                 chainId=txt(network.get(1)), peers=network.get(2),
-                driveProtocol=drp.get(2) or drp.get(1), tenderdashP2P=tdp.get(1))
+                driveProtocol=drp.get(2) or drp.get(1), tenderdashP2P=tdp.get(1),
+                tls=attempt('gateway tls', gateway_tls, address, port) if address else None)
+
+
+def gateway_tls(address, port):
+    """What a client connecting to the public IP sees: is the gateway's
+    certificate publicly trusted for that IP, who issued it, when it expires."""
+    def fetch(ctx):
+        with socket.create_connection(('127.0.0.1', port), timeout=5) as raw:
+            with ctx.wrap_socket(raw, server_hostname=address) as conn:
+                return conn.getpeercert(binary_form=True)
+    try:
+        der, trusted = fetch(ssl.create_default_context()), True
+    except ssl.SSLCertVerificationError:
+        der, trusted = fetch(ssl._create_unverified_context()), False
+    text = subprocess.run(['openssl', 'x509', '-inform', 'DER', '-noout', '-issuer', '-enddate'], input=der, capture_output=True, timeout=10).stdout.decode()
+    line = next((l for l in text.splitlines() if l.startswith('issuer=')), '')
+    field = lambda k: (re.search(r'(?:^|[,/=\s])' + k + r'\s*=\s*([^,/\n]+)', line[7:]) or [None, None])[1]
+    end = re.search(r'notAfter=(.+)', text)
+    expires = calendar.timegm(time.strptime(end.group(1).strip(), '%b %d %H:%M:%S %Y %Z')) if end else None
+    return dict(trusted=trusted, issuer=' '.join(x.strip() for x in [field('O'), field('CN')] if x) or None,
+                expiresAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(expires)) if expires else None)
 
 
 def insight(raw):

@@ -79,7 +79,8 @@ def faucet_wallet():
         free = rpc('getbalance', wallet='dashnet')
         amount = min(funding - bal, max(0.0, free - 500))
         if amount >= 50:
-            parts = 20
+            # About 1000 DASH per output keeps collateral-sized payouts cheap.
+            parts = max(20, min(100, int(amount // 1000)))
             outs = {rpc('getnewaddress', wallet='faucet'): round(amount / parts, 8) for _ in range(parts)}
             txid = rpc('sendmany', ['', outs], wallet='dashnet')
             log(f'funded faucet wallet with {amount:.2f} in {parts} outputs: {txid}')
@@ -172,6 +173,18 @@ def patch_explorer_api(image):
     return mounts
 
 
+def promo_codes():
+    """Per-devnet faucet promo codes for collateral-sized amounts, as the legacy
+    devnet faucet offers (masternode, EvoNode, Platform funding). Generated once,
+    root-only; shared with network members by the console, never logged."""
+    path = ROOT / 'promo.json'
+    if path.exists():
+        return json.loads(path.read_text())
+    codes = {f'{kind}-{secrets.token_hex(4).upper()}': amount for kind, amount in [('MASTERNODE', 1005), ('EVONODE', 4005), ('PLATFORM', 55)]}
+    write('promo.json', json.dumps(codes))
+    return codes
+
+
 def insight_files():
     """dashcore-node config for the wallet host's Core (which dash-network-go runs
     with txindex/addressindex/spentindex/timestampindex and loopback ZMQ), plus a
@@ -219,9 +232,11 @@ def compose(faucet_image, frontend_image):
     write('qls.env', '\n'.join([
         'API_HOST=127.0.0.1', 'API_PORT=8080', 'DASH_NETWORK=devnet', 'QUORUM_PREVIOUS_BLOCKS_OFFSET=8',
         f'DASH_RPC_URL=http://127.0.0.1:{RPC_PORT}', 'DASH_RPC_USER=dashnet', f'DASH_RPC_PASSWORD={PASSWORD}', '']))
+    codes = promo_codes()
     write('faucet.env', '\n'.join([
         f'DASH_RPC_HOST=127.0.0.1:{RPC_PORT}/wallet/faucet#', f'DASH_RPC_PORT={RPC_PORT}', 'DASH_RPC_USER=dashnet', f'DASH_RPC_PASSWORD={PASSWORD}',
-        f"CORE_FAUCET_AMOUNT={cfg['faucetAmount']}", f"RATE_LIMIT_PER_HOUR={cfg['faucetRateLimit']}", 'ISLOCK_TIMEOUT=60', 'CAP_SITE_KEY=', 'CAP_SECRET=', '']))
+        f"CORE_FAUCET_AMOUNT={cfg['faucetAmount']}", f"RATE_LIMIT_PER_HOUR={cfg['faucetRateLimit']}", 'ISLOCK_TIMEOUT=60', 'CAP_SITE_KEY=', 'CAP_SECRET=',
+        "PROMO_CODES='" + json.dumps({c: {'amount': a} for c, a in codes.items()}) + "'", '']))
     common = [f'POSTGRES_HOST=127.0.0.1', 'POSTGRES_PORT=5433', 'POSTGRES_DB=explorer', 'POSTGRES_USER=explorer', f'POSTGRES_PASS={pg}',
               f"TENDERDASH_URL={cfg['tenderdashUrl']}"]
     write('explorer-indexer.env', '\n'.join(common + [
@@ -230,7 +245,8 @@ def compose(faucet_image, frontend_image):
     write('explorer-api.env', '\n'.join(common + [
         'DASHCORE_HOST=127.0.0.1', f'DASHCORE_PORT={RPC_PORT}', 'DASHCORE_USER=dashnet', f'DASHCORE_PASS={PASSWORD}',
         'DAPI_URL=' + ','.join(cfg['dapiUrls']), 'NETWORK=testnet', f"EPOCH_CHANGE_TIME={cfg['epochSeconds'] * 1000}",
-        'CONTESTED_RESOURCE_VOTE_DEADLINE=5400000', 'TCP_CONNECT_TIMEOUT=400', 'NODE_TLS_REJECT_UNAUTHORIZED=0', '']))
+        'CONTESTED_RESOURCE_VOTE_DEADLINE=5400000', 'TCP_CONNECT_TIMEOUT=400',
+        *([] if cfg.get('trustedGateways') else ['NODE_TLS_REJECT_UNAUTHORIZED=0']), '']))
     write('postgres.env', f'POSTGRES_DB=explorer\nPOSTGRES_USER=explorer\nPOSTGRES_PASSWORD={pg}\n')
     h = cfg['hosts']
     write('Caddyfile', '\n'.join([
@@ -328,5 +344,5 @@ result = dict(faucetBalance=balance, faucetImage=faucet_image, frontendImage=fro
               quorums=wait('http://127.0.0.1:8080/health'), quorumList=wait_quorums(),
               insight=wait('http://127.0.0.1:3001/insight-api/status'), insightBlocks=insight_blocks(), faucet=wait('http://127.0.0.1:8000/health'),
               explorerApi=wait('http://127.0.0.1:3005/status', 300), explorerValidators=wait('http://127.0.0.1:3005/validators?limit=1', 180), explorerFrontend=wait('http://127.0.0.1:3000/', 300),
-              walletAddress=rpc('getnewaddress', wallet='faucet'))
+              walletAddress=rpc('getnewaddress', wallet='faucet'), promoCodes=promo_codes())
 print(json.dumps(result))

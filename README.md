@@ -23,7 +23,10 @@ EC2 (tag DashNetwork=<net>, Name dn-<net>-<role>-<n>)
 
 - **agent** (`STATUS_MODE=agent`) is the only process with credentials: the
   status host's IAM role (`dash-status-server`: EC2 describe, Instance Connect,
-  dashnet journal) and its own SSH key. When the key is not yet authorized on a
+  dashnet journal; for console devnets also EC2 launch/teardown of
+  dash-network-go-tagged resources, IPAM addresses, and Route 53 A records named
+  `insight|quorums|explorer|faucet|dapi.<devnet>.networks.dash.org` only, with
+  existing testnet/mainnet/Moutai names denied) and its own SSH key. When the key is not yet authorized on a
   newly discovered host it pushes it once through EC2 Instance Connect. Host keys
   are pinned per instance ID. Deployments use the
   [dash-network-go](https://github.com/dashpay/dash-network-go) `dashnet` CLI,

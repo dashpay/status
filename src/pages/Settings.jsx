@@ -228,6 +228,7 @@ function DevnetDefaults({ d, ro, update }) {
         </div>
         <div className="px-3 pb-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 border-t border-line pt-3">
           <TextField label="Quorum list server image" value={d.services.quorumServer} ro={ro} mono onChange={(v) => update((x) => { x.services.quorumServer = v.trim(); })} />
+          <TextField label="ACME contact (Let's Encrypt gateway certificates)" value={d.acmeEmail || ''} ro={ro} mono onChange={(v) => update((x) => { x.acmeEmail = v.trim(); })} />
           <TextField label="Insight (Core explorer) image" value={d.services.insightImage} ro={ro} mono onChange={(v) => update((x) => { x.services.insightImage = v.trim(); })} />
           <TextField label="Platform Explorer release" value={d.services.explorerVersion} ro={ro} mono onChange={(v) => update((x) => { x.services.explorerVersion = v.trim(); })} />
           <TextField label="dash-faucet commit" value={d.services.faucetRef} ro={ro} mono onChange={(v) => update((x) => { x.services.faucetRef = v.trim(); })} />

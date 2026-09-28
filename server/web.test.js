@@ -150,3 +150,16 @@ test('network operators cannot confirm, cancel or resume lifecycle operations', 
     assert.ok(!readdirSync(join(w.dataDir, 'requests')).length, 'no request reaches the agent');
   } finally { w.close(); }
 });
+
+test('faucet promo codes reach network members only', async () => {
+  const w = await start(77, [{ id: 77, login: 'viewer', role: 'viewer', networks: ['devnet-bonsai'] }]);
+  try {
+    writeFileSync(join(w.dataDir, 'devnets.json'), JSON.stringify({ 'devnet-bonsai': { status: 'ready', coreNetwork: 'bonsai-g1', promoCodes: { 'EVONODE-ABCD1234': 4005 } } }));
+    assert.equal((await w.req('/api/networks/devnet-bonsai/faucet-codes')).status, 401);
+    const pub = JSON.stringify(await (await w.req('/api/overview')).json()) + JSON.stringify(await (await w.req('/api/networks/devnet-bonsai')).json());
+    assert.ok(!pub.includes('EVONODE-ABCD1234'), 'codes never in public views');
+    await w.login();
+    assert.deepEqual((await (await w.req('/api/networks/devnet-bonsai/faucet-codes')).json()).codes, { 'EVONODE-ABCD1234': 4005 });
+    assert.equal((await w.req('/api/networks/testnet/faucet-codes')).status, 403);
+  } finally { w.close(); }
+});
