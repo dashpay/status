@@ -226,6 +226,34 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     } catch (e) { res.status(400).json({ error: e.message }); }
   });
 
+  // Access changes save immediately (no page-wide Save). Each call edits the
+  // current file, never a stale browser copy of the whole settings document.
+  const adminWrite = [(req, res, next) => { const s = auth.session(req); if (!s) return res.status(401).json({ error: 'Sign in required' }); req.session = s; next(); }, auth.csrf,
+    (req, res, next) => (isAdmin(req) ? next() : res.status(403).json({ error: 'Only admins can change access' }))];
+  const changeAccess = (req, res, fn) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) throw new Error('invalid GitHub user id');
+      if (id === req.session.user.id) throw new Error('You cannot change your own access');
+      const next = structuredClone(reloadSettings());
+      fn(next, id);
+      settings = saveSettings(settingsPath, validateSettings(next));
+      push('settings', { at: new Date(clock()).toISOString() });
+      res.json({ operators: settings.operators });
+    } catch (e) { res.status(400).json({ error: e.message }); }
+  };
+  app.put('/api/access/:id', ...adminWrite, (req, res) => changeAccess(req, res, (next, id) => {
+    const { login, role, networks } = req.body || {};
+    const entry = { id, login: String(login || '').slice(0, 39), role, networks: role === 'admin' ? ['*'] : networks };
+    const i = next.operators.findIndex((o) => o.id === id);
+    if (i >= 0) next.operators[i] = { ...next.operators[i], ...entry, login: entry.login || next.operators[i].login };
+    else next.operators.push(entry);
+  }));
+  app.delete('/api/access/:id', ...adminWrite, (req, res) => changeAccess(req, res, (next, id) => {
+    if (!next.operators.some((o) => o.id === id)) throw new Error('no such account');
+    next.operators = next.operators.filter((o) => o.id !== id);
+  }));
+
   // GitHub account lookup so admins can grant access by login.
   app.get('/api/github/users/:login', async (req, res) => {
     if (!isAdmin(req)) return res.status(403).json({ error: 'Only admins can add users' });

@@ -108,8 +108,11 @@ try {
   await page.locator('form select').selectOption('viewer');
   await page.locator('form .chip', { hasText: 'devnet-moutai' }).click();
   await page.getByRole('button', { name: 'Add @octocat' }).click();
-  await page.getByRole('button', { name: 'Save settings' }).click();
-  await page.getByText('saved').waitFor();
+  // Saved on add, with no page-wide Save: a reload keeps the new account.
+  await page.getByText('saved', { exact: true }).waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Save settings' }).isDisabled(), true, 'adding access leaves nothing unsaved');
+  await page.reload();
+  await page.getByText('@octocat').waitFor();
   const saved = JSON.parse(readFileSync(join(dataDir, 'settings.json'), 'utf8'));
   assert.deepEqual(saved.operators.find((o) => o.login === 'octocat'), { id: 583231, login: 'octocat', role: 'viewer', networks: ['devnet-moutai'] });
   await page.screenshot({ path: 'artifacts/settings.png', fullPage: true });

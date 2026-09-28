@@ -6,6 +6,16 @@ const ROLE_TEXT = { admin: 'all networks, deployments, settings and users', oper
 
 const blankNetwork = () => ({ name: '', displayName: '', tag: '', chainType: 'devnet', coreNetwork: 'devnet-', p2pPort: 20001, public: true, deployable: true, showBalances: true, endpoints: [], observationWindow: '4m', operationTimeout: '110m', description: '' });
 
+// Warn before leaving with unsaved (non-access) settings.
+function useLeaveGuard(dirty) {
+  useEffect(() => {
+    if (!dirty) return undefined;
+    const warn = (e) => { e.preventDefault(); e.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [dirty]);
+}
+
 export default function Settings() {
   const session = useSession();
   const [doc, setDoc] = useState(null);
@@ -13,6 +23,7 @@ export default function Settings() {
   const [admin, setAdmin] = useState(false);
   const [error, setError] = useState(null);
   const [status, setStatus] = useState(null);
+  useLeaveGuard(doc && saved && JSON.stringify(doc) !== saved);
   useEffect(() => {
     if (!session.user) return;
     api('/api/settings').then((r) => { setDoc(r.settings); setSaved(JSON.stringify(r.settings)); setAdmin(r.admin); }, setError);
@@ -22,6 +33,11 @@ export default function Settings() {
   if (error && !doc) return <div className="mt-6"><Err error={error} /></div>;
   if (!doc) return <div className="mt-6 text-dim">Loading…</div>;
   const dirty = JSON.stringify(doc) !== saved;
+  // Access is saved on every change; keep the draft and the saved copy in step.
+  const setOperators = (operators) => {
+    setDoc((d) => ({ ...d, operators }));
+    setSaved((x) => JSON.stringify({ ...JSON.parse(x), operators }));
+  };
   const set = (fn) => setDoc((d) => { const x = structuredClone(d); fn(x); return x; });
   const save = async () => {
     setStatus('saving'); setError(null);
@@ -57,7 +73,7 @@ export default function Settings() {
         </div>
       </Section>
 
-      <Access doc={doc} ro={ro} set={set} self={session.user} />
+      <Access doc={doc} ro={ro} setOperators={setOperators} self={session.user} />
 
       <DevnetDefaults d={doc.devnets} ro={ro} update={(fn) => set((x) => fn(x.devnets))} />
 
@@ -134,12 +150,23 @@ function Toggle({ label, value, onChange, ro }) {
   return <label className={`text-[12px] flex items-center gap-2 ${ro ? 'opacity-60' : 'cursor-pointer'}`}><input type="checkbox" disabled={ro} checked={!!value} onChange={(e) => onChange(e.target.checked)} />{label}</label>;
 }
 
-function Access({ doc, ro, set, self }) {
+function Access({ doc, ro, setOperators, self }) {
   const [login, setLogin] = useState('');
   const [found, setFound] = useState(null);
   const [lookupError, setLookupError] = useState(null);
   const [role, setRole] = useState('operator');
   const [networks, setNetworks] = useState([]);
+  const [busy, setBusy] = useState(null);
+  const [note, setNote] = useState(null);
+  // Every access change is saved at once, through the server's current copy.
+  const write = async (id, change, done) => {
+    setBusy(id); setNote(null);
+    try {
+      const r = await api(`/api/access/${id}`, change ? { method: 'PUT', body: change } : { method: 'DELETE' });
+      setOperators(r.operators); done?.(); setNote({ ok: true, text: 'saved' });
+    } catch (e) { setNote({ ok: false, text: e.message }); }
+    setBusy(null);
+  };
   const names = doc.networks.map((n) => n.name);
   const lookup = async (e) => {
     e?.preventDefault();
@@ -148,10 +175,7 @@ function Access({ doc, ro, set, self }) {
     catch (err) { setLookupError(err.message); }
   };
   const existing = found && doc.operators.find((o) => o.id === found.id);
-  const add = () => {
-    set((d) => { d.operators.push({ id: found.id, login: found.login, role, networks: role === 'admin' ? ['*'] : networks }); });
-    setFound(null); setLogin(''); setNetworks([]);
-  };
+  const add = () => write(found.id, { login: found.login, role, networks: role === 'admin' ? ['*'] : networks }, () => { setFound(null); setLogin(''); setNetworks([]); });
   const toggle = (list, n) => (list.includes(n) ? list.filter((x) => x !== n) : [...list, n]);
   return (
     <Section title={`Access · ${doc.operators.length} GitHub account(s)`}>
@@ -172,7 +196,7 @@ function Access({ doc, ro, set, self }) {
                 {role !== 'admin' && <div className="flex flex-wrap gap-1">{names.map((n) => <span key={n} className={`chip ${networks.includes(n) ? 'on' : ''}`} onClick={() => setNetworks((l) => toggle(l, n))}>{n}</span>)}
                   <span className={`chip ${networks.includes('*') ? 'on' : ''}`} onClick={() => setNetworks((l) => toggle(l, '*'))}>all networks</span></div>}
                 <span className="text-dim text-[11.5px]">{ROLE_TEXT[role]}</span>
-                <button type="button" className="btn btn-primary" disabled={role !== 'admin' && !networks.length} onClick={add}>Add @{found.login}</button>
+                <button type="button" className="btn btn-primary" disabled={busy !== null || (role !== 'admin' && !networks.length)} onClick={add}>{busy === found.id ? 'Adding…' : `Add @${found.login}`}</button>
               </>}
             </div>
           )}
@@ -188,23 +212,23 @@ function Access({ doc, ro, set, self }) {
                 <tr key={o.id || i}>
                   <td><span className="flex items-center gap-2"><img src={`https://avatars.githubusercontent.com/u/${o.id}?s=40`} alt="" className="w-5 h-5 rounded-full" /><span className="mono">@{o.login}</span><span className="text-faint mono text-[11px]">{o.id}</span>{me && <span className="tag">you</span>}</span></td>
                   <td>
-                    <select className="input" disabled={ro || me} value={r} onChange={(e) => set((d) => { d.operators[i].role = e.target.value; if (e.target.value === 'admin') d.operators[i].networks = ['*']; })}>
+                    <select className="input" disabled={ro || me || busy !== null} value={r} onChange={(e) => write(o.id, { login: o.login, role: e.target.value, networks: e.target.value === 'admin' ? ['*'] : o.networks })}>
                       <option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option>
                     </select>
                   </td>
                   <td className="!whitespace-normal">
                     {r === 'admin' ? <span className="text-dim">all networks</span> : <div className="flex flex-wrap gap-1">
-                      {['*', ...names].map((n) => <span key={n} className={`chip ${o.networks.includes(n) ? 'on' : ''} ${ro ? 'pointer-events-none' : ''}`} onClick={() => set((d) => { d.operators[i].networks = toggle(d.operators[i].networks, n); })}>{n === '*' ? 'all networks' : n}</span>)}
+                      {['*', ...names].map((n) => <span key={n} className={`chip ${o.networks.includes(n) ? 'on' : ''} ${ro || me || busy !== null ? 'pointer-events-none' : ''}`} onClick={() => { const next = toggle(o.networks, n); if (next.length) write(o.id, { login: o.login, role: r, networks: next }); }}>{n === '*' ? 'all networks' : n}</span>)}
                     </div>}
                   </td>
-                  <td>{!ro && !me && <button className="btn btn-danger !py-0.5" onClick={() => set((d) => { d.operators.splice(i, 1); })}>remove</button>}</td>
+                  <td>{!ro && !me && <button className="btn btn-danger !py-0.5" disabled={busy !== null} onClick={() => write(o.id, null)}>{busy === o.id ? '…' : 'remove'}</button>}</td>
                 </tr>
               );
             })}
           </tbody>
         </table>
       </div>
-      <div className="text-dim text-[11.5px] mt-1">Access is bound to the GitHub numeric user id, so a renamed account keeps its access. Changes apply after Save.</div>
+      <div className="text-dim text-[11.5px] mt-1">Access is bound to the GitHub numeric user id, so a renamed account keeps its access. Access changes are saved immediately.{note && <span className={`ml-2 ${note.ok ? 'lv-ok' : 'lv-down'}`}>{note.text}</span>}</div>
     </Section>
   );
 }
