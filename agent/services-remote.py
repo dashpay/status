@@ -13,7 +13,7 @@ Input: argv[1] is base64 JSON or @file (no secrets). The Core RPC password is re
 this host from /var/lib/dashnet/secrets.json and written only to 0600 files here.
 Prints one JSON line with results.
 """
-import base64, fcntl, json, os, re, secrets, subprocess, sys, time, urllib.request
+import base64, fcntl, hashlib, json, os, re, secrets, subprocess, sys, time, urllib.request
 from pathlib import Path
 
 arg = sys.argv[1]
@@ -254,6 +254,13 @@ def compose(faucet_image, frontend_image):
         **{'explorer-frontend': svc(frontend_image)},
         caddy=svc('caddy:2', volumes=[f'{ROOT}/Caddyfile:/etc/caddy/Caddyfile:ro', 'caddy-data:/data', 'caddy-config:/config']),
     ), volumes={'explorer-db': {}, 'caddy-data': {}, 'caddy-config': {}})
+    # Files are replaced atomically, so a running container keeps the old inode.
+    # A content hash per service makes compose recreate exactly the services
+    # whose bind-mounted or env files changed (e.g. Caddy after a new site).
+    for svc_spec in spec['services'].values():
+        files = [v.split(':')[0] for v in svc_spec.get('volumes', []) if v.startswith(str(ROOT))] + list(svc_spec.get('env_file', []))
+        digest = hashlib.sha256(b''.join(Path(f).read_bytes() for f in sorted(files))).hexdigest()[:16]
+        svc_spec['labels'] = {**svc_spec.get('labels', {}), 'devnet.config': digest}
     write('compose.json', json.dumps(spec, indent=1))
     sh('docker', 'compose', '-f', str(ROOT / 'compose.json'), 'pull', '--quiet', 'quorums', 'insight', 'postgres', 'explorer-migrate', 'explorer-api', 'caddy', timeout=1200)
     sh('docker', 'compose', '-f', str(ROOT / 'compose.json'), 'up', '-d', '--remove-orphans', timeout=1200)
