@@ -37,19 +37,56 @@ EC2 (tag DashNetwork=<net>, Name dn-<net>-<role>-<n>)
 
 ## Operating
 
-Sign in with GitHub. Operators (GitHub user IDs in Settings) get:
+Sign in with GitHub. Access is per GitHub account (bound to the numeric user id)
+and managed by admins in **Settings → Access**: look up a login, choose a role
+and networks, save.
 
-- **Deploy**: choose nodes (evo/regular masternodes, seeds), components and image
-  tags (Docker Hub suggestions, architecture check). The agent imports live state,
-  enrolls nodes that are not yet enrolled (no restarts), and plans with images
-  pinned by digest. Nothing changes until the plan is confirmed. Execution
-  withdraws one host at a time behind dashnet health gates; progress and the full
-  dashnet log stream live. Stopped/interrupted runs resume the same plan.
-- **Restore stopped**, **Health gate** (managed-doctor) and **Enroll**.
-- **Settings**: probe/discovery cadence, thresholds, operators, and per network:
-  EC2 tag, chain, visibility, deployability, wallet balance visibility,
-  observation window, timeout and checked endpoints (HTTP or DAPI gRPC-Web).
-  Applied on the agent's next cycle.
+| Role | Can |
+| --- | --- |
+| viewer | see granted networks in full detail (including private ones) and operation logs |
+| operator | deploy, restore and health-gate the granted networks |
+| admin | everything, on every network: settings, users, new devnets, Platform resets, deletion |
+
+**Existing networks (testnet, Moutai):** *Deploy* chooses nodes, components and
+image tags (Docker Hub suggestions, architecture check). The agent imports live
+state, enrolls nodes that are not yet enrolled (no restarts) and plans with images
+pinned by digest. Nothing changes until the plan is confirmed; execution withdraws
+one host at a time behind dashnet health gates, with live progress and log.
+Also *Restore stopped*, *Health gate* and *Enroll*.
+
+**New devnet** (admins): name, sizing, component versions and service settings;
+the agent runs dash-network-go `resolve` and `provision-plan` (read-only) and shows
+the footprint, cost estimate, pinned digests and DNS names for review. After
+confirmation: `provision` (BYOIP addresses) → `bootstrap-plan` → `host-trust` →
+`bootstrap` → `deployment-plan` → `deploy` (Core, EvoNode registration, quorums,
+Platform) → services → `doctor`. Every stage resumes after interruption, with the
+exact dashnet binary the plans were made with. The devnet appears on the board
+while it is built. Each devnet's wallet host also runs:
+
+- `quorum-list-server` → `https://quorums.<name>.networks.dash.org`
+- Platform Explorer (Postgres, indexer, API, per-devnet frontend) → `https://explorer.<name>…`
+- dash-faucet from source, with its own funded wallet topped up every 15 minutes → `https://faucet.<name>…`
+- Caddy with Let's Encrypt for all three.
+
+Console devnets can be upgraded (dash-network-go `upgrade-plan`/`upgrade`, Drive,
+DAPI, gateway, helper or Tenderdash, one validator at a time), have their services
+re-applied from Settings defaults, and be deleted (instances, disks, BYOIP
+addresses, DNS; the journal record keeps the name reserved).
+
+**Platform wipe/redeploy** (admins, dashmate devnets such as Moutai) follows the
+Platform reset rulebook: baseline and private backups on every HPMN and the seed,
+image staging, a fresh ChainLock anchor verified everywhere and a canary on a
+temporary dashmate home — all before review. After confirmation: wipe Platform on
+all HPMNs, reset only the seed's Tenderdash data, apply images/anchor/epoch writing
+only `config.json`, rendered Platform files and `dynamic-compose.yml`, start, and
+verify READY, images, consensus, epochs (config/env/parsed), DAPI TLS and Core
+preservation. Each stage must succeed on every target before the next.
+
+**Settings** (admins): probe/discovery cadence, thresholds, access, new devnet
+defaults (placement, sizing, versions, services) and per network: EC2 tag, chain,
+visibility, deployability, balance visibility, observation window, timeout and
+checked endpoints (HTTP or DAPI gRPC-Web). Applied on the agent's next cycle;
+AWS account/region changes take effect after an agent restart.
 
 Mainnet is monitored only.
 
