@@ -182,7 +182,8 @@ def compose(faucet_image, frontend_image):
     svc = lambda image, **kw: dict(image=image, network_mode='host', restart='unless-stopped', logging=dict(driver='local'), **kw)
     idx = f'ghcr.io/pshenmic/platform-explorer-indexer:{ev}'
     spec = dict(name='devnet-services', services=dict(
-        quorums=svc(cfg['quorumServerImage'], volumes=[f'{ROOT}/qls.toml:/app/config.toml:ro']),
+        # The image sets API_HOST/API_PORT, which override config.toml.
+        quorums=svc(cfg['quorumServerImage'], volumes=[f'{ROOT}/qls.toml:/app/config.toml:ro'], environment=dict(API_HOST='127.0.0.1', API_PORT='8080', DASH_NETWORK='devnet')),
         faucet=svc(faucet_image, env_file=[f'{ROOT}/faucet.env'], healthcheck=dict(test=['CMD', 'curl', '-fsS', 'http://127.0.0.1:8000/health'], interval='30s', retries=3), command=['uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', '8000']),
         postgres=svc('postgres:17', env_file=[f'{ROOT}/postgres.env'], command=['postgres', '-c', 'listen_addresses=127.0.0.1', '-c', 'port=5433'], volumes=['explorer-db:/var/lib/postgresql/data'],
                      healthcheck=dict(test=['CMD-SHELL', 'pg_isready -h 127.0.0.1 -p 5433 -U explorer -d explorer'], interval='5s', retries=30)),
