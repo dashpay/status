@@ -11,6 +11,7 @@ test('newest release stays in the running major line and avoids nightlies', () =
   const drive = tags('4.2.0-beta.4', '4.2.0-beta.6', '4.2.0-beta.10', '4.1.3', '4.2.0-dev.12');
   assert.equal(newestRelease(drive, '4.2.0-beta.5'), '4.2.0-beta.10', 'prerelease lines compare numerically');
   assert.equal(newestRelease(tags('1.8.1', '1.8.2', '1.9.0-beta.1'), '1.8.1'), '1.8.2', 'stable networks stay stable');
+  assert.equal(newestRelease(tags('4.1.3', '4.2.0-beta.6'), null), null, 'unknown running release: never guess (could downgrade)');
 });
 
 test('running versions come from what nodes report', () => {

@@ -15,11 +15,14 @@ export const cmp = (a, b) => {
 // Newest release in the running major line; prereleases only where the
 // network already runs one. Majors (e.g. Core 23 -> 24) are chosen by hand.
 export function newestRelease(tags, running) {
-  const r = running && SEMVER.exec(running);
+  // Without a known running release there is no safe "newer" (a stable tag
+  // could be older than a running prerelease): choose by hand.
+  if (!running) return null;
+  const r = SEMVER.exec(running);
   const ok = tags.map((t) => t.name).filter((t) => SEMVER.test(t) && !/nightly|dev|pr/.test(t)).filter((t) => {
     const m = SEMVER.exec(t);
-    return (!r || m[1] === r[1]) && (!m[4] || (r && r[4]));
+    return m[1] === r[1] && (!m[4] || r[4]);
   });
   const best = ok.sort(cmp).pop();
-  return best && (!running || cmp(best, running) > 0) ? best : null;
+  return best && cmp(best, running) > 0 ? best : null;
 }
