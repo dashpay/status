@@ -101,6 +101,7 @@ test('viewers read granted networks and operations but cannot deploy; admins loo
     const me = await (await w.req('/api/me')).json();
     assert.equal(me.role, 'viewer');
     assert.deepEqual(me.operatorOf, []);
+    assert.equal(me.allNetworks, false);
   } finally { w.close(); }
   const a = await start();
   try {
@@ -118,7 +119,9 @@ test('sessions survive a web restart', async () => {
   try {
     await w.login();
     const r = await w.req('/api/me');
-    assert.equal((await r.json()).role, 'admin');
+    const me = await r.json();
+    assert.equal(me.role, 'admin');
+    assert.equal(me.allNetworks, true, 'wildcard access covers devnets created after the session loaded');
     cookie = w.cookie();
   } finally { w.close(); }
   await new Promise((r) => setTimeout(r, 300));

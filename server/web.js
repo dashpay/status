@@ -58,7 +58,10 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   app.get('/api/health', (req, res) => res.json({ service: 'dash-status', status: 'ok' }));
   app.get('/api/me', (req, res) => {
     const u = user(req);
-    res.json({ user: u, role: accessFor(settings, u)?.role || null, operatorOf: u ? settings.networks.filter((n) => isOperator(req, n.name)).map((n) => n.name) : [],
+    const a = accessFor(settings, u);
+    // allNetworks: access covers every network, including ones created after this
+    // session loaded (a devnet being created is not yet in the network list).
+    res.json({ user: u, role: a?.role || null, allNetworks: !!a?.networks.includes('*'), operatorOf: u ? settings.networks.filter((n) => isOperator(req, n.name)).map((n) => n.name) : [],
       memberOf: u ? settings.networks.filter((n) => isMember(req, n.name)).map((n) => n.name) : [], admin: isAdmin(req) });
   });
   app.get('/api/overview', (req, res) => {

@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
-import { ago, api, bytes, clock, dash, duration, navigate, num, short, useNow, useResource, useSession, ROLE_LABEL } from '../lib.js';
+import { ago, api, bytes, canOperate, canSee, clock, dash, duration, navigate, num, short, useNow, useResource, useSession, ROLE_LABEL } from '../lib.js';
 import { Delta, Dot, Empty, Err, Level, Link, Meter, Section, Stat } from '../ui.jsx';
 import Operations from './Operations.jsx';
 import { COMPONENTS, OPERABLE, REPOS, cmp, newestRelease, reported } from '../releases.js';
@@ -10,8 +10,8 @@ export default function Network({ name, tab }) {
   const now = useNow(1000);
   const session = useSession();
   const { data: n, error } = useResource(`/api/networks/${name}`, (t, d) => (t === 'network' && (d.name === name || d.name === '*')) || t === 'settings');
-  const member = session.memberOf?.includes(name);
-  const operator = session.operatorOf?.includes(name);
+  const member = canSee(session, name);
+  const operator = canOperate(session, name);
   if (error) return <div className="mt-6"><Err error={error} /></div>;
   if (!n) return <div className="mt-6 text-dim">Loading…</div>;
   const s = n.summary;
