@@ -229,12 +229,14 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     if (!existsSync(join(dir, 'known_hosts'))) {
       done = step(r, 'Host keys from EC2 console (dashnet host-trust)');
       let ok = false;
-      for (let attempt = 1; attempt <= 20 && !ok; attempt++) {
+      // New instances publish their host keys to the console within a minute
+      // or two; poll often so bootstrap starts as soon as they are complete.
+      for (let attempt = 1; attempt <= 60 && !ok; attempt++) {
         if (r.cancelRequested) throw new Error('cancelled by operator');
         const out = join(dir, `known_hosts.${stamp()}`);
         ok = (await run(r, 'host-trust', ['host-trust', '--bootstrap-plan', join(dir, 'bootstrap-plan.json'), '--timeout', '3m', '--out', out], { allowFail: true, timeoutMs: 4 * 60_000 })) === 0;
         if (ok) writeFileSync(join(dir, 'known_hosts'), readFileSync(out), { mode: 0o600 });
-        else { write(r.id, `console output not complete yet; retry ${attempt}/20 in 30s`); await sleep(30_000); }
+        else { write(r.id, `console output not complete yet; retry ${attempt}/60 in 10s`); await sleep(10_000); }
       }
       if (!ok) { done('failed'); throw new Error('host keys unavailable from EC2 console output'); }
       done('ok');
