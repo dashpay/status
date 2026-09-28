@@ -219,8 +219,10 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     const onLine = (line) => {
       parseRunner(r)(line);
       const p = r.progress;
-      if (/^managed-(staging|applying|verifying)$/.test(line)) { p.phase = line.slice(8); if (p.phase === 'applying') p.current = p.next || null; }
-      let m = /^managed target (\S+) applied$/.exec(line);
+      if (/^managed-(staging|applying|verifying)$/.test(line)) p.phase = line.slice(8);
+      let m = /^managed target (\S+) applying$/.exec(line);
+      if (m) p.current = m[1];
+      m = /^managed target (\S+) applied$/.exec(line);
       if (m) { p.completed.push(m[1]); p.current = null; }
       m = /^managed health gate waiting: (.*)$/.exec(line);
       p.waiting = m ? m[1].slice(0, 300) : undefined;

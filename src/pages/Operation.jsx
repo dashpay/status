@@ -67,6 +67,7 @@ export default function Operation({ name, id }) {
         <Section title="Rollout">
           <div className="panel px-3 py-2 text-[12px] flex flex-wrap gap-x-6 gap-y-1">
             <span>phase <span className="mono">{op.progress.phase}</span></span>
+            {op.progress.current && <span>withdrawn <span className="mono lv-warn">{op.progress.current}</span></span>}
             <span>applied <span className="mono">{op.progress.completed.length}/{review?.targets?.length ?? '?'}</span> {op.progress.completed.length ? <span className="text-dim mono">({op.progress.completed.join(', ')})</span> : null}</span>
             {op.progress.waiting && <span className="lv-warn mono">health gate waiting: {op.progress.waiting}</span>}
           </div>
