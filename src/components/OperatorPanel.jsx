@@ -59,7 +59,8 @@ export default function OperatorPanel({ network, session, enabled, selectedNodes
       setOperations((old) => [result, ...old.filter((v) => v.id !== result.id)]);
     } catch (e) { setError(e.message); } finally { setBusy(false); }
   }
-  const plan = review?.review;
+  const selectionMatches = review && JSON.stringify([...selectedNodes].sort()) === JSON.stringify([...(review.selection?.nodes || [])].sort());
+  const plan = selectionMatches ? review.review : null;
   return <section className="nc-operator-panel" aria-label="Operator workspace" id="node-operations">
     <div className="nc-operator-heading"><h3>Operations</h3>{!enabled && <span className="nc-muted">Execution unavailable</span>}</div>
     <div className="nc-operation-form">
@@ -76,8 +77,8 @@ export default function OperatorPanel({ network, session, enabled, selectedNodes
     </div>
     <button className="nc-button" disabled={busy || !selectedNodes.length || (changing && !chosen.length)} onClick={prepare}>{busy ? 'Preparing…' : 'Prepare review'}</button>
     {error && <p role="alert" className="nc-error">{error}</p>}
-    {review?.status === 'preparing' && <p role="status">Checking the selected hosts and resolving exact image digests…</p>}
-    {review?.status === 'failed' && <p role="alert" className="nc-error">{review.notice || 'Plan preparation failed.'}</p>}
+    {selectionMatches && review?.status === 'preparing' && <p role="status">Checking the selected hosts and resolving exact image digests…</p>}
+    {selectionMatches && review?.status === 'failed' && <p role="alert" className="nc-error">{review.notice || 'Plan preparation failed.'}</p>}
     {review?.status === 'ready' && plan && <section className="nc-review" aria-label="Review operation"><h3>{actions[review.action]} · review</h3>
       <p>{plan.targets.join(', ')}</p><p>{plan.preservesCore ? 'Core is preserved.' : 'Core is included.'} {plan.recovery}</p>
       {plan.enrollment && <p>Selected workloads will be enrolled without a service restart before execution.</p>}

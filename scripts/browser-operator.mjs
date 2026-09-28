@@ -24,6 +24,13 @@ try {
  const planId='b'.repeat(64);writeFileSync(path,JSON.stringify({...d,status:'ready',preparedAt:new Date().toISOString(),review:{network:n.name,action:'upgrade',planId,targets:d.selection.nodes,scope:'dapi',preservesCore:true,enrollment:true,recovery:'Forward recovery using this exact plan.',changes:[{node:'hp-masternode-1',component:'dapi',from:'dashpay/rs-dapi:4.2.0-beta.3',to:'dashpay/rs-dapi@sha256:'+'c'.repeat(64)}]}}));
  await page.getByRole('region',{name:'Review operation'}).waitFor();assert.match(await page.getByRole('region',{name:'Review operation'}).innerText(),/Core is preserved/);
  mkdirSync('artifacts',{recursive:true});await page.screenshot({path:'artifacts/operator-node-review.png'});
+ await panel.getByRole('checkbox',{name:/hp-masternode-1/}).uncheck();
+ assert.equal(await page.getByRole('region',{name:'Review operation'}).count(),0,'Changing selection must invalidate the review');
+ await panel.getByRole('checkbox',{name:/hp-masternode-1/}).check();
+ await panel.getByRole('button',{name:'Prepare review'}).click();
+ await page.getByRole('status').filter({hasText:'Checking the selected'}).waitFor();
+ const latest=readdirSync(join(config.operationsDir,'drafts')).filter(v=>v!==drafts[0])[0];const ld=JSON.parse(readFileSync(join(config.operationsDir,'drafts',latest)));
+ writeFileSync(join(config.operationsDir,'drafts',latest),JSON.stringify({...JSON.parse(readFileSync(path)),...ld,status:'ready',preparedAt:new Date().toISOString()}));
  await panel.getByRole('button',{name:'Run reviewed operation'}).click();await page.getByText('queued',{exact:true}).waitFor();
  const ops=readdirSync(config.operationsDir).filter(v=>v.endsWith('.json'));assert.equal(ops.length,1);const op=JSON.parse(readFileSync(join(config.operationsDir,ops[0])));assert.equal(op.planId,planId);assert.equal(op.actor.id,42);assert.deepEqual(op.targets,['hp-masternode-1']);
  await page.setViewportSize({width:390,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));await page.screenshot({path:'artifacts/operator-node-mobile.png'});
