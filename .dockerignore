@@ -10,3 +10,9 @@
 !server/
 !server/**
 server/*.test.js
+!shared/
+!shared/**
+!agent/
+!agent/**
+shared/*.test.js
+agent/*.test.js
