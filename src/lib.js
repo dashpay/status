@@ -85,13 +85,27 @@ export function useResource(path, match) {
 
 // ---- routing -------------------------------------------------------------
 const routeSubs = new Set();
+// A page with unsaved edits registers a guard; in-app navigation (links and
+// the browser's back/forward) then asks before leaving it.
+let leaveGuard = null;
+export function setLeaveGuard(message) { leaveGuard = message; }
+const mayLeave = () => !leaveGuard || window.confirm(leaveGuard);
 export function navigate(to) {
   if (to === location.pathname + location.search) return;
+  if (!mayLeave()) return;
+  leaveGuard = null;
   history.pushState({}, '', to);
   routeSubs.forEach((f) => f());
   window.scrollTo(0, 0);
 }
-window.addEventListener('popstate', () => routeSubs.forEach((f) => f()));
+let current = location.pathname + location.search;
+window.addEventListener('popstate', () => {
+  if (leaveGuard && !mayLeave()) { history.pushState({}, '', current); return; }
+  leaveGuard = null;
+  current = location.pathname + location.search;
+  routeSubs.forEach((f) => f());
+});
+routeSubs.add(() => { current = location.pathname + location.search; });
 export function useRoute() {
   return useSyncExternalStore((f) => { routeSubs.add(f); return () => routeSubs.delete(f); }, () => location.pathname + location.search);
 }

@@ -70,9 +70,12 @@ test('operator sign-in queues a validated deployment request; CSRF and non-opera
     settings.pollSeconds = 20;
     const saved = await w.req('/api/settings', { method: 'PUT', body: JSON.stringify({ settings }), headers: { 'content-type': 'application/json', 'x-csrf-token': csrf } });
     assert.equal(saved.status, 200);
+    // A page-wide save never changes access (it has its own endpoints), so a
+    // stale or edited operator list cannot lock admins out or revert a grant.
     settings.operators = [{ id: 1, login: 'x', networks: ['*'] }];
-    const lockout = await w.req('/api/settings', { method: 'PUT', body: JSON.stringify({ settings }), headers: { 'content-type': 'application/json', 'x-csrf-token': csrf } });
-    assert.equal(lockout.status, 400);
+    const stale = await w.req('/api/settings', { method: 'PUT', body: JSON.stringify({ settings }), headers: { 'content-type': 'application/json', 'x-csrf-token': csrf } });
+    assert.equal(stale.status, 200);
+    assert.ok((await stale.json()).settings.operators.some((o) => o.id === 9920871), 'operators kept from disk');
   } finally { w.close(); }
 });
 

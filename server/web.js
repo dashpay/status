@@ -218,8 +218,9 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   app.put('/api/settings', (req, res, next) => { const s = auth.session(req); if (!s) return res.status(401).json({ error: 'Sign in required' }); req.session = s; next(); }, auth.csrf, (req, res) => {
     if (!isAdmin(req)) return res.status(403).json({ error: 'Only admins can change settings' });
     try {
-      const next = validateSettings(req.body?.settings);
-      if (!next.operators.some((o) => o.id === req.session.user.id && o.role === 'admin')) throw new Error('You cannot remove your own admin access');
+      // Access has its own endpoints; a page-wide save never carries a stale
+      // operator list over them.
+      const next = validateSettings({ ...req.body?.settings, operators: reloadSettings().operators });
       settings = saveSettings(settingsPath, next);
       push('settings', { at: new Date(clock()).toISOString() });
       res.json({ settings });

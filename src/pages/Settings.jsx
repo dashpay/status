@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, useSession } from '../lib.js';
+import { api, setLeaveGuard, useSession } from '../lib.js';
 import { Empty, Err, Section } from '../ui.jsx';
 
 const ROLE_TEXT = { admin: 'all networks, deployments, settings and users', operator: 'deploy and operate the granted networks', viewer: 'read-only, including private networks and operation logs' };
@@ -12,7 +12,8 @@ function useLeaveGuard(dirty) {
     if (!dirty) return undefined;
     const warn = (e) => { e.preventDefault(); e.returnValue = ''; };
     window.addEventListener('beforeunload', warn);
-    return () => window.removeEventListener('beforeunload', warn);
+    setLeaveGuard('Settings have unsaved changes. Leave without saving?');
+    return () => { window.removeEventListener('beforeunload', warn); setLeaveGuard(null); };
   }, [dirty]);
 }
 
