@@ -103,6 +103,18 @@ def checkout(url, ref, dest):
     return d
 
 
+def buildkit():
+    """Build with BuildKit only. The legacy builder (Ubuntu's docker.io without
+    the buildx plugin) runs every step in an unlabelled container, and dashnet
+    refuses a host with unknown containers (unexpected-container): a build next
+    to a running dashnet operation would fail it, and a failed build would leave
+    such a container behind. BuildKit's steps are not Docker containers."""
+    if subprocess.run(['docker', 'buildx', 'version'], capture_output=True).returncode != 0:
+        sh('env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', 'install', '-y', '-q', '--no-install-recommends',
+           '-o', 'DPkg::Lock::Timeout=300', 'docker-buildx', timeout=900)
+    return ['env', 'DOCKER_BUILDKIT=1', 'docker', 'build']
+
+
 def image_exists(tag):
     return subprocess.run(['docker', 'image', 'inspect', tag], capture_output=True).returncode == 0
 
@@ -120,7 +132,7 @@ def build_faucet():
     # Identity creation in this release is hardcoded to public testnet Platform.
     html = html.replace('</head>', '<style>#identityCard{display:none!important}</style></head>', 1)
     (d / 'static/index.html').write_text(html)
-    sh('docker', 'build', '--quiet', '-t', tag, '.', cwd=d)
+    sh(*buildkit(), '--quiet', '-t', tag, '.', cwd=d)
     return tag
 
 
@@ -137,7 +149,7 @@ def build_explorer_frontend():
         'ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL NEXT_PUBLIC_BASE_URL=$NEXT_PUBLIC_BASE_URL NEXT_PUBLIC_TESTNET_BASE_URL=$NEXT_PUBLIC_BASE_URL NEXT_TELEMETRY_DISABLED=1',
         'RUN npm install --no-audit --no-fund && npm run build',
         'CMD ["npx", "next", "start", "-H", "127.0.0.1", "-p", "3000"]', '']))
-    sh('docker', 'build', '--quiet', '-f', 'Dockerfile.devnet', '-t', tag,
+    sh(*buildkit(), '--quiet', '-f', 'Dockerfile.devnet', '-t', tag,
        '--build-arg', f"NEXT_PUBLIC_API_URL=https://{cfg['hosts']['explorer']}/backend",
        '--build-arg', f"NEXT_PUBLIC_BASE_URL=https://{cfg['hosts']['explorer']}", '.', cwd=front, timeout=5400)
     return tag

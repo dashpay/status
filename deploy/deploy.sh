@@ -39,5 +39,8 @@ for i in $(seq 1 30); do
   sleep 2
 done
 echo "web did not become healthy; rolling back" >&2
-if [ -n "$previous" ]; then docker tag "$previous" dash-status:current; docker compose -f deploy/compose.yml up -d; fi
+if [ -n "$previous" ]; then
+  docker tag "$previous" dash-status:current
+  if [ "${DEPLOY_ONLY:-}" = web ]; then docker compose -f deploy/compose.yml up -d --no-deps web; else docker compose -f deploy/compose.yml up -d; fi
+fi
 exit 1
