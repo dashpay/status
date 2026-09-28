@@ -142,12 +142,20 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     const d = readJSON(join(dir, 'request.json'));
     const plan = readJSON(join(dir, 'ec2-plan.json'));
     if (!plan || plan.id !== r.review?.planId) throw new Error('reviewed EC2 plan missing');
+    // Records created before stage tracking: derive completed stages from their steps.
+    r.done ??= [['provision', 'dashnet provision)'], ['bootstrap', 'dashnet bootstrap)'], ['deploy', 'dashnet deploy)']]
+      .filter(([, tag]) => r.steps.some((st) => st.name.endsWith(tag) && st.status === 'ok')).map(([k]) => k);
     r.status = 'running'; save(r);
-    register(name, { status: 'creating', displayName: d.displayName, createdBy: r.actor.login, createdAt: r.createdAt, operation: r.id, coreNetwork: coreNetwork(name), public: d.public !== false, dns: serviceNames(name, d), services: d.services });
+    // Resume continues at the first stage that has not completed.
+    const once = async (key, fn) => { if (r.done.includes(key)) return; await fn(); r.done.push(key); save(r); };
+    if (!r.done.includes('deploy')) register(name, { status: 'creating', displayName: d.displayName, createdBy: r.actor.login, createdAt: r.createdAt, operation: r.id, coreNetwork: coreNetwork(name), public: d.public !== false, dns: serviceNames(name, d), services: d.services });
 
-    let done = step(r, `Provision ${plan.targets.length} EC2 instances (dashnet provision)`);
-    await run(r, 'provision', ['provision', '--plan', join(dir, 'ec2-plan.json'), '--confirm', plan.id, '--timeout', '20m'], { timeoutMs: 21 * 60_000 });
-    done('ok');
+    let done;
+    await once('provision', async () => {
+      done = step(r, `Provision ${plan.targets.length} EC2 instances (dashnet provision)`);
+      await run(r, 'provision', ['provision', '--plan', join(dir, 'ec2-plan.json'), '--confirm', plan.id, '--timeout', '20m'], { timeoutMs: 21 * 60_000 });
+      done('ok');
+    });
 
     if (!existsSync(join(dir, 'bootstrap-plan.json'))) {
       done = step(r, 'Bootstrap plan (dashnet bootstrap-plan)');
@@ -170,9 +178,11 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     }
     pinHostKeys(readFileSync(join(dir, 'known_hosts'), 'utf8'));
 
-    done = step(r, 'Prepare hosts: Docker, images (dashnet bootstrap)');
-    await run(r, 'bootstrap', ['bootstrap', '--plan', join(dir, 'bootstrap-plan.json'), '--confirm', bplan.id, ...access(dir), '--timeout', '45m', '--out', join(dir, `hosts-ready.${stamp()}.json`)], { timeoutMs: 46 * 60_000 });
-    done('ok');
+    await once('bootstrap', async () => {
+      done = step(r, 'Prepare hosts: Docker, images (dashnet bootstrap)');
+      await run(r, 'bootstrap', ['bootstrap', '--plan', join(dir, 'bootstrap-plan.json'), '--confirm', bplan.id, ...access(dir), '--timeout', '45m', '--out', join(dir, `hosts-ready.${stamp()}.json`)], { timeoutMs: 46 * 60_000 });
+      done('ok');
+    });
 
     if (!existsSync(join(dir, 'deployment.json'))) {
       done = step(r, `Deployment plan, Platform protocol ${d.protocol} (dashnet deployment-plan)`);
@@ -182,6 +192,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     const dplan = readJSON(join(dir, 'deployment.json'));
     register(name, { coreNetwork: dplan.coreNetwork, platformChainId: dplan.platformChainId });
 
+    await once('deploy', async () => {
     done = step(r, 'Core, EvoNode registration, quorums, Platform (dashnet deploy)');
     // A validator can be PoSe-banned by an early DKG while the fleet is still
     // forming; dashnet then waits forever for it. Revive such nodes meanwhile.
@@ -191,11 +202,14 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     } finally { clearInterval(watcher); }
     done('ok');
     register(name, { status: 'services' });
+    });
 
-    done = step(r, 'Quorum server, Platform Explorer, faucet, DNS and TLS');
-    const services = await deployServices({ r, write, dplan, d, name, pool, s, ec2, r53, dir });
-    register(name, { services: d.services, dns: services.dns, walletAddress: services.walletAddress });
-    done('ok', services.summary);
+    await once('services', async () => {
+      done = step(r, 'Quorum server, Platform Explorer, faucet, DNS and TLS');
+      const services = await deployServices({ r, write, dplan, d, name, pool, s, ec2, r53, dir });
+      register(name, { services: d.services, dns: services.dns, walletAddress: services.walletAddress });
+      done('ok', services.summary);
+    });
 
     done = step(r, 'Independent health gate (dashnet doctor)');
     const code = await run(r, 'doctor', ['doctor', '--plan', join(dir, 'deployment.json'), ...access(dir), '--timeout', '5m', '--observation-window', '90s', '--out', join(dir, `health.${stamp()}.json`)], { allowFail: true, timeoutMs: 6 * 60_000 });
