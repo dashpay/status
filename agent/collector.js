@@ -43,6 +43,7 @@ export async function httpCheck(url, timeoutMs = 8000) {
 // Public port of the dashmate gateway (DAPI), e.g. "0.0.0.0:1443->10000/tcp".
 export function gatewayPublicPort(data) {
   const gw = (data?.containers || []).find((c) => c.repo === 'dashpay/envoy' && c.running);
+  if (gw?.network === 'host') return 1443; // dash-network-go gateway
   for (const p of gw?.ports || []) {
     const m = /^(0\.0\.0\.0|):(\d+)->(10000|443)\/tcp$/.exec(p);
     if (m) return Number(m[2]);

@@ -289,6 +289,8 @@ def dapi(raw, address):
         return None
     ports = (gw['HostConfig'].get('PortBindings') or {})
     port = next((int(b['HostPort']) for k, v in ports.items() if k == '10000/tcp' for b in v or []), None)
+    if not port and gw['HostConfig'].get('NetworkMode') == 'host':
+        port = 1443  # dash-network-go gateway: host networking, TLS on 1443
     if not port:
         port = next((int(b['HostPort']) for k, v in ports.items() for b in v or [] if b.get('HostPort') == '443'), 443)
     cert = [m['Source'] for m in gw['Mounts'] if m['Destination'].endswith('/bundle.crt')]
@@ -350,6 +352,52 @@ def http_check(raw, repos, port):
     return dict(status=code, latencyMs=round((time.time() - t) * 1000), title=title.group(1).strip()[:80] if title else None)
 
 
+def get_json(url, timeout=8):
+    t = time.time()
+    try:
+        with OPENER.open(url, timeout=timeout) as r:
+            return r.status, json.loads(r.read(2 * 1024 * 1024) or b'null'), round((time.time() - t) * 1000)
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read(1024 * 1024) or b'null')
+        except ValueError:
+            body = None
+        return e.code, body, round((time.time() - t) * 1000)
+
+
+def quorum_server(raw):
+    c = find(raw, ['dashpay/quorum-list-server'])
+    if not c:
+        return None
+    port = 8080 if c['HostConfig'].get('NetworkMode') == 'host' else host_port(c, 8080)[1]
+    code, _, ms = get_json('http://127.0.0.1:%d/health' % port)
+    qcode, q, _ = get_json('http://127.0.0.1:%d/quorums' % port)
+    data = q.get('data') if isinstance(q, dict) else None
+    return dict(status=code, latencyMs=ms, quorums=len(data) if isinstance(data, list) else None, quorumsStatus=qcode)
+
+
+def explorer(raw):
+    c = find(raw, ['ghcr.io/pshenmic/platform-explorer-api'])
+    if not c:
+        return None
+    code, v, ms = get_json('http://127.0.0.1:3005/status', 15)
+    v = v if isinstance(v, dict) else {}
+    idx = find(raw, ['ghcr.io/pshenmic/platform-explorer-indexer'])
+    return dict(status=code, latencyMs=ms, apiVersion=(v.get('api') or {}).get('version'), indexedHeight=((v.get('api') or {}).get('block') or {}).get('height'),
+                chainHeight=((v.get('tenderdash') or {}).get('block') or {}).get('height'), network=v.get('network'),
+                identities=v.get('identitiesCount'), transactions=v.get('transactionsCount'), indexerRunning=bool(idx))
+
+
+def new_faucet(raw):
+    c = next((c for n, c in sorted(raw.items()) if c['State']['Running'] and (repo(c['Config']['Image']) in ('dashpay/dash-faucet', 'devnet-faucet'))), None)
+    if not c:
+        return None
+    code, v, ms = get_json('http://127.0.0.1:8000/api/status', 15)
+    v = v if isinstance(v, dict) else {}
+    return dict(status=code, latencyMs=ms, state=v.get('status'), balance=v.get('balance'), blockHeight=v.get('block_height') or v.get('blockHeight'),
+                utxos=v.get('available_utxos') or v.get('availableUtxos'), kind='dash-faucet')
+
+
 result = dict(role=ROLE, system=attempt('system', system))
 containers, raw = attempt('docker', docker) or (None, {})
 result['containers'] = containers
@@ -362,7 +410,9 @@ if ROLE == 'validator':
     except Exception as e:
         result['dapi'] = dict(ok=False, error=str(e)[:200])
 result['insight'] = attempt('insight', insight, raw)
-result['faucet'] = attempt('faucet', http_check, raw, ['dashpay/multifaucet'], 80)
+result['faucet'] = attempt('faucet', new_faucet, raw) or attempt('faucet', http_check, raw, ['dashpay/multifaucet'], 80)
+result['quorumServer'] = attempt('quorum server', quorum_server, raw)
+result['explorer'] = attempt('explorer', explorer, raw)
 result['errors'] = errors
 result['probeMs'] = round((time.time() - START) * 1000)
 print(json.dumps(result, separators=(',', ':')))

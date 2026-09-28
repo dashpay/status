@@ -14,7 +14,7 @@ import { createOps, manifestFor } from './ops.js';
 const DATA = process.env.STATUS_DATA_DIR || '/var/lib/dash-status';
 const PRIVATE = process.env.AGENT_PRIVATE_DIR || '/var/lib/dash-status-agent';
 const BINARY = process.env.DASHNET_BINARY || '/usr/local/bin/dashnet';
-const dirs = { state: join(DATA, 'state'), requests: join(DATA, 'requests'), ops: join(DATA, 'ops'), work: join(PRIVATE, 'work') };
+const dirs = { data: DATA, private: PRIVATE, state: join(DATA, 'state'), requests: join(DATA, 'requests'), ops: join(DATA, 'ops'), work: join(PRIVATE, 'work') };
 for (const d of [dirs.state, dirs.requests, dirs.ops, dirs.work, join(PRIVATE, 'journal')]) mkdirSync(d, { recursive: true });
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);

@@ -33,8 +33,8 @@ export default function Operation({ name, id }) {
         <span className="text-dim mono text-[12px]">{op.id}</span>
         {operator && <div className="ml-auto flex gap-2">
           {['queued', 'review', 'confirmed', 'preparing', 'running'].includes(op.status) && <button className="btn btn-danger" disabled={pending} onClick={() => act('cancel')}>{op.status === 'running' ? 'Stop (SIGTERM dashnet)' : 'Cancel'}</button>}
-          {['failed', 'interrupted', 'cancelled'].includes(op.status) && <button className="btn" disabled={pending} onClick={() => act('resume')}>{op.confirmedAt ? 'Resume same plan' : 'Prepare again'}</button>}
-          {['succeeded', 'failed', 'cancelled', 'interrupted', 'rejected'].includes(op.status) && <Link className="btn" to={`/n/${name}/deploy?action=${q.action}&nodes=${q.nodes.join(',')}&components=${(q.components || []).join(',')}`}>New from this</Link>}
+          {['failed', 'interrupted', 'cancelled'].includes(op.status) && <button className="btn" disabled={pending} onClick={() => act('resume')}>{op.confirmedAt ? (q.action === 'create-devnet' ? 'Resume creation' : 'Resume same plan') : 'Prepare again'}</button>}
+          {!q.action.endsWith('-devnet') && ['succeeded', 'failed', 'cancelled', 'interrupted', 'rejected'].includes(op.status) && <Link className="btn" to={`/n/${name}/deploy?action=${q.action}&nodes=${q.nodes.join(',')}&components=${(q.components || []).join(',')}`}>New from this</Link>}
         </div>}
       </div>
       <div className="mt-2 panel px-3 py-2 grid gap-x-6 gap-y-1 text-[12px] sm:grid-cols-2 lg:grid-cols-4">
@@ -75,7 +75,9 @@ export default function Operation({ name, id }) {
         </Section>
       )}
 
-      {review && (
+      {review?.kind === 'create-devnet' && <CreateReview op={op} review={review} operator={operator} pending={pending} act={act} expiresIn={expiresIn} />}
+      {review?.kind === 'delete-devnet' && <DeleteReview op={op} review={review} operator={operator} pending={pending} act={act} />}
+      {review && !review.kind && (
         <Section title={`Plan ${short(review.planId, 16)} · ${review.changes.length} container change(s)`} right={op.status === 'review' && <span className="text-dim text-[12px]">expires in {Math.max(0, Math.round(expiresIn / 60))} min</span>}>
           <div className="panel scroll-x">
             <table className="grid"><thead><tr><th>node</th><th>component</th><th>from</th><th>to (pinned)</th><th /></tr></thead>
@@ -132,5 +134,66 @@ function LiveLog({ id, initial, active }) {
       {text || <span className="text-faint">no output yet</span>}
       {active && <span className="live text-accent">▍</span>}
     </div>
+  );
+}
+
+function CreateReview({ op, review, operator, pending, act, expiresIn }) {
+  const e = review.estimate || {};
+  return (
+    <>
+      <Section title={`Devnet ${op.network} · ${review.instances} instances`} right={op.status === 'review' && <span className="text-dim text-[12px]">expires in {Math.max(0, Math.round(expiresIn / 60))} min</span>}>
+        <div className="grid gap-3 lg:grid-cols-2">
+          <div className="panel">
+            <table className="grid"><thead><tr><th>group</th><th>type</th><th>arch</th><th className="num">count</th></tr></thead><tbody className="[&_tr]:!cursor-default">
+              {review.footprint.map((f) => <tr key={f.group}><td>{f.group}</td><td className="mono">{f.type}</td><td className="mono">{f.arch}</td><td className="num">{f.count}</td></tr>)}
+            </tbody></table>
+            <div className="px-3 py-2 text-[12px] border-t border-line">
+              {review.storageGiB} GiB gp3 · BYOIP public IPv4 ({review.network.ipamPool}) · estimate <span className="mono">${e.hourly}/h</span>, ≈ <span className="mono">${e.monthly}/month</span> incl. storage
+            </div>
+          </div>
+          <div className="panel px-3 py-2 text-[12px] space-y-1">
+            <div><span className="text-dim">Core chain </span><span className="mono">{review.coreNetwork}</span> · <span className="text-dim">Platform </span><span className="mono">{review.platformChainId}</span> · <span className="text-dim">protocol </span><span className="mono">{review.protocol}</span></div>
+            <div><span className="text-dim">Placement </span><span className="mono">{review.network.vpc} / {review.network.subnet} / {review.network.securityGroups.join(',')}</span></div>
+            <div><span className="text-dim">AMIs (Ubuntu 24.04) </span><span className="mono">{Object.entries(review.amis).map(([a, id]) => `${a} ${id}`).join(' · ')}</span></div>
+            <div className="pt-1 text-dim">Services on the wallet host</div>
+            {Object.entries(review.dns).map(([k, v]) => <div key={k} className="mono">{k}: https://{v.host}</div>)}
+            <div className="text-dim">quorum server <span className="mono text-fg">{review.services.quorumServer}</span> · explorer <span className="mono text-fg">{review.services.explorerVersion}</span> · faucet <span className="mono text-fg">{review.services.faucetRef.slice(0, 12)}</span>, {review.services.faucetAmount} per request, {review.services.faucetFunding} funded</div>
+          </div>
+        </div>
+        <div className="panel scroll-x mt-3">
+          <table className="grid"><thead><tr><th>component</th><th>requested</th><th>pinned per architecture</th></tr></thead><tbody className="[&_tr]:!cursor-default">
+            {Object.entries(review.images).map(([c, v]) => <tr key={c}><td>{c}</td><td className="mono">{v.ref}</td><td className="mono text-dim text-[11.5px]">{Object.entries(v.digests).map(([a, dg]) => `${a} ${dg.slice(7, 19)}…`).join('  ') || '—'}</td></tr>)}
+          </tbody></table>
+        </div>
+      </Section>
+      {op.status === 'review' && operator && (
+        <div className="mt-3 flex items-center gap-3">
+          <button className="btn btn-primary" disabled={pending} onClick={() => act('confirm', { planId: review.planId })}>Create {op.network} (starts billable EC2)</button>
+          <span className="text-dim text-[12px]">Runs provision → bootstrap → deploy → services → health gate (typically 60–90 min). Each stage resumes if interrupted.</span>
+        </div>
+      )}
+    </>
+  );
+}
+
+function DeleteReview({ op, review, operator, pending, act }) {
+  return (
+    <>
+      <Section title={`Delete ${op.network}`}>
+        <div className="panel scroll-x">
+          <table className="grid"><thead><tr><th>instance</th><th>name</th><th>public IP</th><th>state</th></tr></thead><tbody className="[&_tr]:!cursor-default">
+            {review.instances.map((i) => <tr key={i.id}><td className="mono">{i.id}</td><td className="mono">{i.name}</td><td className="mono">{i.ip || '—'}</td><td>{i.state}</td></tr>)}
+            {!review.instances.length && <tr><td colSpan={4} className="text-dim">no instances left</td></tr>}
+          </tbody></table>
+          <div className="px-3 py-2 text-[12px] border-t border-line">{review.volumes} EBS volume(s) · DNS {review.dns.join(', ') || 'none'} · BYOIP addresses released back to the pool. The dashnet journal record stays, so the name cannot be reused.</div>
+        </div>
+      </Section>
+      {op.status === 'review' && operator && (
+        <div className="mt-3 flex items-center gap-3">
+          <button className="btn btn-danger" disabled={pending} onClick={() => act('confirm', { planId: review.planId })}>Permanently delete {op.network}</button>
+          <span className="text-dim text-[12px]">Terminates every instance and deletes their disks. Not reversible.</span>
+        </div>
+      )}
+    </>
   );
 }

@@ -1,7 +1,7 @@
 // Operator-editable configuration shared by the web process (writer) and the
 // agent (reader). Everything here is non-secret.
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 // admin: every network, settings and user management; operator: deploy on the
@@ -24,6 +24,24 @@ export const DEFAULT_SETTINGS = {
   aws: { accountId: '854439639386', region: 'us-west-2', tagKey: 'DashNetwork', stateTable: 'dashnet-managed-state' },
   operators: [{ id: 9920871, login: 'ktechmidas', role: 'admin', networks: ['*'] }],
   thresholds: { coreLagBlocks: 3, platformLagBlocks: 10, diskWarnPercent: 85, memWarnPercent: 92, balanceWarn: 100 },
+  // Defaults for devnets created from the console (dash-network-go lifecycle).
+  devnets: {
+    vpcId: 'vpc-08b7a214713ca4ce9', subnetId: 'subnet-01765e4b0fc0a2aa4', securityGroupIds: ['sg-0246983c2e14a5f34'],
+    keyName: 'dash-status-agent', ipamPoolId: 'ipam-pool-0de83ed8bba5f9b48', rootVolumeGiB: 60,
+    validators: 13, validatorType: 't4g.medium', validatorArch: 'arm64', walletType: 't3.large', walletArch: 'amd64',
+    protocol: 14,
+    images: {
+      core: 'dashpay/dashd:23', drive: 'dashpay/drive:4.2.0-beta.5', dapi: 'dashpay/rs-dapi:4.2.0-beta.5',
+      tenderdash: 'dashpay/tenderdash:1.8.1', gateway: 'dashpay/envoy:1.39.0-impr.1', helper: 'dashpay/dashmate-helper:4.2.0-beta.5',
+    },
+    services: {
+      quorumServer: 'dashpay/quorum-list-server:0.7.0',
+      explorerVersion: '2.5.3',
+      faucetRef: 'b927e6058845ebf3c0722e56eb0e89642e98c28b',
+      faucetAmount: 10, faucetRateLimit: 20, faucetFunding: 5000, epochSeconds: 3600,
+    },
+    dnsZoneId: 'Z0875113JJTK7DOU978T', dnsSuffix: 'networks.dash.org',
+  },
   networks: [
     {
       name: 'testnet', displayName: 'Testnet', tag: 'testnet', chainType: 'testnet', coreNetwork: 'test', p2pPort: 19999,
@@ -89,7 +107,8 @@ export function validateSettings(input) {
   int(t.coreLagBlocks, 0, 1000, 'coreLagBlocks'); int(t.platformLagBlocks, 0, 10000, 'platformLagBlocks');
   int(t.diskWarnPercent, 1, 100, 'diskWarnPercent'); int(t.memWarnPercent, 1, 100, 'memWarnPercent');
   if (typeof t.balanceWarn !== 'number' || t.balanceWarn < 0) throw new Error('balanceWarn must be a non-negative number');
-  if (!Array.isArray(s.networks) || !s.networks.length || s.networks.length > 20) throw new Error('1-20 networks required');
+  s.devnets = validateDevnetDefaults(s.devnets ?? structuredClone(DEFAULT_SETTINGS.devnets));
+  if (!Array.isArray(s.networks) || !s.networks.length || s.networks.length > 40) throw new Error('1-40 networks required');
   const names = new Set();
   for (const n of s.networks) {
     if (!slug.test(n.name) || names.has(n.name)) throw new Error(`network name "${n.name}" invalid or duplicated`);
@@ -110,16 +129,75 @@ export function validateSettings(input) {
       if (e.kind !== undefined && !['http', 'dapi'].includes(e.kind)) throw new Error(`${n.name}: endpoint kind must be http or dapi`);
     }
     if (n.description !== undefined && (typeof n.description !== 'string' || n.description.length > 500)) throw new Error(`${n.name}: description too long`);
+    if (n.kind !== undefined && !['managed', 'dashnet'].includes(n.kind)) throw new Error(`${n.name}: kind must be managed or dashnet`);
+    delete n.lifecycle;
   }
   return s;
 }
 
+const IMAGE_TAG = /^(docker\.io\/)?[a-z0-9]+(?:[._-][a-z0-9]+)*\/[a-z0-9]+(?:[._-][a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|@sha256:[0-9a-f]{64})$/;
+export function validateDevnetDefaults(d) {
+  const req = (cond, msg) => { if (!cond) throw new Error(`devnets: ${msg}`); };
+  req(d && typeof d === 'object', 'defaults required');
+  req(/^vpc-[0-9a-f]+$/.test(d.vpcId) && /^subnet-[0-9a-f]+$/.test(d.subnetId), 'vpcId/subnetId invalid');
+  req(Array.isArray(d.securityGroupIds) && d.securityGroupIds.length >= 1 && d.securityGroupIds.length <= 5 && d.securityGroupIds.every((g) => /^sg-[0-9a-f]+$/.test(g)), 'securityGroupIds invalid');
+  req(/^[A-Za-z0-9_.-]{1,255}$/.test(d.keyName), 'keyName invalid');
+  req(d.ipamPoolId === '' || /^ipam-pool-[0-9a-f]+$/.test(d.ipamPoolId), 'ipamPoolId invalid');
+  req(Number.isInteger(d.rootVolumeGiB) && d.rootVolumeGiB >= 30 && d.rootVolumeGiB <= 1000, 'rootVolumeGiB 30..1000');
+  req(Number.isInteger(d.validators) && d.validators >= 13 && d.validators <= 25, 'validators 13..25');
+  for (const k of ['validatorType', 'walletType']) req(/^[a-z][a-z0-9-]*\.[a-z0-9]+$/.test(d[k]), `${k} invalid`);
+  for (const k of ['validatorArch', 'walletArch']) req(['arm64', 'amd64'].includes(d[k]), `${k} must be arm64 or amd64`);
+  req(Number.isInteger(d.protocol) && d.protocol >= 1 && d.protocol <= 100, 'protocol invalid');
+  for (const c of COMPONENTS) req(IMAGE_TAG.test(d.images?.[c] || '') && d.images[c].replace(/^docker\.io\//, '').split(/[@:]/)[0] === COMPONENT_REPOS[c], `images.${c} must be ${COMPONENT_REPOS[c]}:<tag>`);
+  const sv = d.services || {};
+  req(IMAGE_TAG.test(sv.quorumServer || '') && /^(docker\.io\/)?dashpay\/quorum-list-server[:@]/.test(sv.quorumServer), 'services.quorumServer must be dashpay/quorum-list-server:<tag>');
+  req(/^\d+\.\d+\.\d+$|^nightly$/.test(sv.explorerVersion || ''), 'services.explorerVersion like 2.5.3');
+  req(/^[0-9a-f]{40}$/.test(sv.faucetRef || ''), 'services.faucetRef must be a full dash-faucet commit');
+  req(typeof sv.faucetAmount === 'number' && sv.faucetAmount > 0 && sv.faucetAmount <= 1000, 'services.faucetAmount 0..1000');
+  req(Number.isInteger(sv.faucetRateLimit) && sv.faucetRateLimit >= 1 && sv.faucetRateLimit <= 10000, 'services.faucetRateLimit >= 1');
+  req(typeof sv.faucetFunding === 'number' && sv.faucetFunding >= 100, 'services.faucetFunding >= 100');
+  req(Number.isInteger(sv.epochSeconds) && sv.epochSeconds >= 60, 'services.epochSeconds >= 60');
+  req(/^Z[0-9A-Z]+$/.test(d.dnsZoneId) && /^[a-z0-9.-]+\.[a-z]+$/.test(d.dnsSuffix), 'dnsZoneId/dnsSuffix invalid');
+  return d;
+}
+
 export function loadSettings(path) {
-  try { return validateSettings(JSON.parse(readFileSync(path, 'utf8'))); }
+  let settings;
+  try { settings = validateSettings(JSON.parse(readFileSync(path, 'utf8'))); }
   catch (e) {
     if (e.code !== 'ENOENT') console.error(`settings: ${e.message}; using defaults`);
-    return structuredClone(DEFAULT_SETTINGS);
+    settings = structuredClone(DEFAULT_SETTINGS);
   }
+  return mergeDevnets(settings, readJSON(join(dirname(path), 'devnets.json'), {}));
+}
+
+// Devnets created from the console are registered by the agent in devnets.json
+// and appear as networks without anyone editing settings. Deleted ones drop out.
+export function mergeDevnets(settings, registry) {
+  settings.networks = settings.networks.filter((n) => registry[n.name]?.status !== 'deleted');
+  const names = new Set(settings.networks.map((n) => n.name));
+  for (const [name, reg] of Object.entries(registry)) {
+    if (reg.status === 'deleted' || names.has(name)) continue;
+    settings.networks.push(devnetEntry(name, reg));
+  }
+  for (const n of settings.networks) if (registry[n.name]) n.lifecycle = lifecycleOf(registry[n.name]);
+  return settings;
+}
+const lifecycleOf = (reg) => ({ status: reg.status, operation: reg.operation, createdBy: reg.createdBy, createdAt: reg.createdAt, readyAt: reg.readyAt || null, dns: reg.dns || null });
+
+export function devnetEntry(name, reg) {
+  const dns = reg.dns || {};
+  return {
+    name, displayName: reg.displayName || name, tag: name, chainType: 'devnet', coreNetwork: reg.coreNetwork || `devnet-${name.replace(/^devnet-/, '')}-g1`,
+    p2pPort: 20001, public: reg.public !== false, deployable: false, showBalances: true, kind: 'dashnet',
+    description: '',
+    endpoints: [
+      dns.quorums && { label: 'Quorums', url: `https://${dns.quorums.host}/health` },
+      dns.explorer && { label: 'Explorer', url: `https://${dns.explorer.host}/` },
+      dns.faucet && { label: 'Faucet', url: `https://${dns.faucet.host}/api/status` },
+    ].filter(Boolean),
+    observationWindow: '90s', operationTimeout: '110m',
+  };
 }
 
 export function saveSettings(path, settings) {

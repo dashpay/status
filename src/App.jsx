@@ -6,6 +6,7 @@ import Network from './pages/Network.jsx';
 import Deploy from './pages/Deploy.jsx';
 import Operation from './pages/Operation.jsx';
 import Settings from './pages/Settings.jsx';
+import NewDevnet from './pages/NewDevnet.jsx';
 
 export default function App() {
   const route = useRoute();
@@ -19,6 +20,7 @@ export default function App() {
   else if (parts[0] === 'n' && parts[1] && parts[2] === 'ops' && parts[3]) page = <Operation name={parts[1]} id={parts[3]} />;
   else if (parts[0] === 'n' && parts[1]) page = <Network name={parts[1]} tab={parts[2] || 'hosts'} />;
   else if (parts[0] === 'settings') page = <Settings />;
+  else if (parts[0] === 'devnets' && parts[1] === 'new') page = <NewDevnet />;
   else page = <Overview overview={overview} />;
   return (
     <div className="min-h-screen">
@@ -50,6 +52,7 @@ function Header({ networks, active, session }) {
           {newest && <span className="text-dim mono hidden sm:inline" title={`agent state written ${newest}`}><span className={`dot mr-1.5 ${now - Date.parse(newest) < 120_000 ? 'bg-lv-ok live' : 'bg-lv-down'}`} />{ago(newest, now)}</span>}
           {session.user ? (
             <>
+              {session.admin && <Link to="/devnets/new" className={`hover:text-fg ${active === 'devnets' ? 'text-fg' : 'text-dim'}`}>New devnet</Link>}
               {session.memberOf?.length > 0 && <Link to="/settings" className={`hover:text-fg ${active === 'settings' ? 'text-fg' : 'text-dim'}`}>Settings</Link>}
               <span className="flex items-center gap-1.5 text-dim"><img src={`https://avatars.githubusercontent.com/u/${session.user.id}?s=40`} alt="" className="w-5 h-5 rounded-full" />{session.user.login}{session.role && <span className="tag">{session.role}</span>}</span>
               <button className="text-dim hover:text-fg" onClick={logout}>Sign out</button>

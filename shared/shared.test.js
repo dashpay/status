@@ -68,3 +68,16 @@ test('roles: admins cover everything, viewers never operate, one admin must rema
   s.operators = [{ id: 1, login: 'a', networks: ['*'] }, { id: 1, login: 'a', networks: ['*'] }];
   assert.throws(() => validateSettings(s), /listed twice/);
 });
+
+test('console devnets merge into settings and deleted ones drop out', async () => {
+  const { mergeDevnets } = await import('./settings.js');
+  const s = structuredClone(settings);
+  const merged = mergeDevnets(s, { 'devnet-bonsai': { status: 'ready', displayName: 'Bonsai', coreNetwork: 'devnet-bonsai-g1', dns: { quorums: { host: 'quorums.bonsai.networks.dash.org' } } } });
+  const n = merged.networks.find((x) => x.name === 'devnet-bonsai');
+  assert.equal(n.kind, 'dashnet');
+  assert.equal(n.coreNetwork, 'devnet-bonsai-g1');
+  assert.equal(n.endpoints[0].url, 'https://quorums.bonsai.networks.dash.org/health');
+  assert.ok(validateSettings(merged));
+  const gone = mergeDevnets(structuredClone(merged), { 'devnet-bonsai': { status: 'deleted' } });
+  assert.equal(gone.networks.some((x) => x.name === 'devnet-bonsai'), false);
+});

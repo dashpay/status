@@ -98,9 +98,9 @@ export function createPool({ key, stateDir, region, accountId, log = console.log
     return promise;
   }
 
-  async function exec(host, command, stdin, timeoutMs = 60_000) {
+  async function exec(host, command, stdin, timeoutMs = 60_000, onStderr) {
     const client = await session(host);
-    try { return await run(client, command, stdin, timeoutMs); }
+    try { return await run(client, command, stdin, timeoutMs, onStderr); }
     catch (e) { if (e.channel) { sessions.delete(host.instanceId); client.end(); } throw e; }
   }
 
@@ -110,10 +110,10 @@ export function createPool({ key, stateDir, region, accountId, log = console.log
   }
 
   function close() { for (const s of sessions.values()) s.promise.then((c) => c.end()).catch(() => {}); sessions.clear(); }
-  return { exec, knownHosts, close, pins };
+  return { exec, knownHosts, close, pins, savePins };
 }
 
-function run(client, command, stdin, timeoutMs) {
+function run(client, command, stdin, timeoutMs, onStderr) {
   return new Promise((resolve, reject) => {
     client.exec(command, (err, stream) => {
       if (err) return reject(Object.assign(err, { channel: true }));
@@ -121,7 +121,14 @@ function run(client, command, stdin, timeoutMs) {
       let size = 0;
       const timer = setTimeout(() => { stream.close(); reject(new Error(`timed out after ${timeoutMs / 1000}s`)); }, timeoutMs);
       stream.on('data', (d) => { size += d.length; if (size < 16 << 20) out.push(d); });
-      stream.stderr.on('data', (d) => { if (errOut.length < 64) errOut.push(d); });
+      let pending = '';
+      stream.stderr.on('data', (d) => {
+        if (errOut.length < 64) errOut.push(d);
+        if (!onStderr) return;
+        pending += d.toString();
+        let i;
+        while ((i = pending.indexOf('\n')) >= 0) { onStderr(pending.slice(0, i)); pending = pending.slice(i + 1); }
+      });
       stream.on('close', (code) => {
         clearTimeout(timer);
         const stdout = Buffer.concat(out).toString(), stderr = Buffer.concat(errOut).toString();

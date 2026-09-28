@@ -8,7 +8,7 @@ const RANK = { info: 0, ok: 0, stopped: 1, warn: 2, down: 3, unreachable: 3 };
 const BY_REPO = Object.fromEntries(Object.entries(COMPONENT_REPOS).map(([c, r]) => [r, c]));
 // Older agents reported index.docker.io/ prefixes for digest-pulled images.
 const COMPONENT_OF = new Proxy(BY_REPO, { get: (t, k) => (typeof k === 'string' ? t[k.replace(/^(index\.)?docker\.io\//, '')] : undefined) });
-const CORE_ROLES = new Set(['validator', 'masternode', 'seed', 'web', 'wallet', 'miner', 'mixer']);
+const CORE_ROLES = new Set(['validator', 'masternode', 'seed', 'fullnode', 'web', 'wallet', 'miner', 'mixer']);
 
 export function tagOf(image) {
   if (!image) return null;
@@ -94,7 +94,19 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
         if (mem >= t.memWarnPercent) flag('warn', `memory ${mem}%`);
       }
       if (d.insight && (d.insight.syncStatus !== 'finished' || coreTip - (d.insight.blocks || 0) > t.coreLagBlocks)) flag('warn', `Insight ${d.insight.syncStatus || 'unknown'} at ${d.insight.blocks}`);
-      if (d.faucet && d.faucet.status >= 500) flag('down', `faucet HTTP ${d.faucet.status}`);
+      if (d.faucet?.kind === 'dash-faucet') {
+        if (d.faucet.state === 'low_balance') flag('warn', `faucet balance ${d.faucet.balance} below payout reserve`);
+        else if (d.faucet.status !== 200) flag('down', `faucet /api/status HTTP ${d.faucet.status}`);
+      } else if (d.faucet && d.faucet.status >= 500) flag('down', `faucet HTTP ${d.faucet.status}`);
+      if (d.quorumServer) {
+        if (d.quorumServer.status !== 200) flag('down', `quorum server /health HTTP ${d.quorumServer.status}`);
+        else if (!d.quorumServer.quorums) flag('warn', 'quorum server lists no quorums');
+      }
+      if (d.explorer) {
+        if (d.explorer.status !== 200) flag('down', `explorer API /status HTTP ${d.explorer.status}`);
+        else if (!d.explorer.indexerRunning) flag('down', 'explorer indexer not running');
+        else if ((d.explorer.chainHeight || 0) - (d.explorer.indexedHeight || 0) > t.platformLagBlocks) flag('warn', `explorer indexer ${(d.explorer.chainHeight || 0) - (d.explorer.indexedHeight || 0)} blocks behind`);
+      }
     }
     return { host: h, data: d, level, reasons };
   });
@@ -143,7 +155,7 @@ export function projectNetwork(network, evaluation, state, operator) {
       masternode: c.masternode ? { state: c.masternode.state, type: c.masternode.type, proTxHash: c.masternode.proTxHash, pose: c.masternode.posePenalty, lastPaid: c.masternode.lastPaidHeight, registered: c.masternode.registeredHeight, service: c.masternode.service } : null,
       platform: d.tenderdash ? { height: td.height, blockTime: td.blockTime, peers: td.peers, catchingUp: td.catchingUp, network: td.network, protocol: td.protocolApp, version: td.version, votingPower: td.votingPower, inValidatorSet: td.inValidatorSet, nodeId: td.nodeId } : null,
       dapi: d.dapi ? { ok: d.dapi.ok, latencyMs: d.dapi.latencyMs, height: d.dapi.height, dapiVersion: d.dapi.dapiVersion, driveVersion: d.dapi.driveVersion, error: operator ? d.dapi.error : undefined } : null,
-      insight: d.insight || null, faucet: d.faucet || null,
+      insight: d.insight || null, faucet: d.faucet || null, quorumServer: d.quorumServer || null, explorer: d.explorer || null,
       wallets: c.wallets && (network.showBalances || operator) ? c.wallets.filter((w) => w.name).map((w) => ({ name: w.name, trusted: w.trusted, pending: w.pending, immature: w.immature, coinjoin: w.coinjoin })) : c.wallets ? { count: c.wallets.filter((w) => w.name).length } : null,
       system: d.system ? { load: s.load, cpus: s.cpus, memPercent: pct(s.memTotal - s.memAvailable, s.memTotal), memTotal: s.memTotal, swapPercent: s.swapTotal ? pct(s.swapTotal - s.swapFree, s.swapTotal) : null, disks: (s.disks || []).map((x) => ({ mount: x.mount, percent: pct(x.used, x.size), size: x.size, avail: x.avail })), uptime: s.uptime, os: s.os, kernel: s.kernel } : null,
       containers: (d.containers || []).map((k) => ({ name: k.name, component: COMPONENT_OF[k.repo] || null, image: k.image, version: COMPONENT_OF[k.repo] ? versionOf(COMPONENT_OF[k.repo], k, d, evaluation.tags) : tagOf(k.image), digest: k.digest, state: k.state, running: k.running, restarts: k.restarts, startedAt: k.startedAt, health: k.health })),
@@ -155,7 +167,7 @@ export function projectNetwork(network, evaluation, state, operator) {
   });
   return {
     name: network.name, displayName: network.displayName, description: network.description || '', chainType: network.chainType, coreNetwork: network.coreNetwork,
-    public: network.public, deployable: network.deployable, observationWindow: network.observationWindow, operationTimeout: network.operationTimeout, level: evaluation.level, generatedAt: evaluation.generatedAt, ageSeconds: evaluation.ageSeconds,
+    public: network.public, deployable: network.deployable, kind: network.kind || 'managed', lifecycle: network.lifecycle || null, observationWindow: network.observationWindow, operationTimeout: network.operationTimeout, level: evaluation.level, generatedAt: evaluation.generatedAt, ageSeconds: evaluation.ageSeconds,
     pollSeconds: state?.pollSeconds || null, discovery: state?.discovery ? { at: state.discovery.at, error: operator ? state.discovery.error : state.discovery.error ? 'discovery failed' : null } : null,
     summary: evaluation.summary, endpoints: (state?.endpoints || []).map((e) => ({ label: e.label, kind: e.kind, url: e.url, status: e.status, ok: e.ok, ms: e.ms, error: e.error, height: e.height, version: e.version, chainId: e.chainId })),
     hosts, journal: operator ? state?.journal || null : undefined,

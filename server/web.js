@@ -123,16 +123,34 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   const request = (payload) => writeAtomic(join(dirs.requests, `${payload.id}${payload.type === 'create' ? '' : '.' + payload.type + '-' + randomUUID().slice(0, 8)}.json`), JSON.stringify(payload));
 
   app.get('/api/networks/:name/ops', requireMember, (req, res) => res.json({ ops: listOps(req.params.name).slice(0, 100) }));
+  const registry = () => readJSON(join(dataDir, 'devnets.json'), {});
   app.post('/api/networks/:name/ops', requireOperator, auth.csrf, (req, res) => {
     const n = settings.networks.find((x) => x.name === req.params.name);
+    if (!n) return res.status(404).json({ error: 'Network not found' });
     const body = req.body || {};
-    const q = { id: randomUUID(), network: n.name, action: body.action, nodes: body.nodes, components: body.components || [], images: body.images || {}, options: body.options || {} };
-    try { validateRequest(settings, q); } catch (e) { return res.status(400).json({ error: e.message }); }
+    if (body.action === 'delete-devnet' && !isAdmin(req)) return res.status(403).json({ error: 'Only admins delete devnets' });
+    const q = { id: randomUUID(), network: n.name, action: body.action, nodes: body.nodes || [], components: body.components || [], images: body.images || {}, options: body.options || {}, ...(body.confirmName ? { confirmName: body.confirmName } : {}) };
+    try { validateRequest(settings, q, registry()); } catch (e) { return res.status(400).json({ error: e.message }); }
     const busy = listOps(n.name).find((r) => ['queued', 'preparing', 'confirmed', 'running'].includes(r.status));
     if (busy) return res.status(409).json({ error: `operation ${busy.id.slice(0, 8)} (${busy.request.action}) is ${busy.status} on this network`, id: busy.id });
     request({ type: 'create', ...q, actor: req.session.user });
     res.status(202).json({ id: q.id });
   });
+  // New devnets (admins; billable). The agent prepares a plan that must be confirmed.
+  app.get('/api/devnets/defaults', (req, res) => {
+    if (!isAdmin(req)) return res.status(403).json({ error: 'Only admins create devnets' });
+    res.json({ defaults: reloadSettings().devnets, existing: [...settings.networks.map((n) => n.name), ...Object.keys(registry())] });
+  });
+  app.post('/api/devnets', (req, res, next) => { const s = auth.session(req); if (!s) return res.status(401).json({ error: 'Sign in required' }); req.session = s; next(); }, auth.csrf, (req, res) => {
+    if (!isAdmin(req)) return res.status(403).json({ error: 'Only admins create devnets' });
+    const body = req.body || {};
+    const q = { id: randomUUID(), network: body.name, action: 'create-devnet', nodes: [], devnet: body.devnet || {} };
+    try { validateRequest(reloadSettings(), q, registry()); } catch (e) { return res.status(400).json({ error: e.message }); }
+    if (listOps(q.network).some((r) => !['failed', 'cancelled', 'rejected', 'succeeded'].includes(r.status))) return res.status(409).json({ error: 'an operation for this name is already active' });
+    request({ type: 'create', ...q, actor: req.session.user });
+    res.status(202).json({ id: q.id, network: q.network });
+  });
+
   app.get('/api/ops/:id', requireMember, (req, res) => {
     const r = readJSON(join(dirs.ops, `${req.params.id}.json`));
     if (!r) return res.status(404).json({ error: 'Operation not found' });

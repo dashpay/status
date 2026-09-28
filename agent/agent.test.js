@@ -81,7 +81,7 @@ function fakeDashnet(calls) {
 
 test('operation lifecycle: request -> enroll -> plan -> review -> confirm -> upgrade', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ops-'));
-  const dirs = { requests: join(root, 'req'), ops: join(root, 'ops'), work: join(root, 'work'), state: join(root, 'state') };
+  const dirs = { data: root, private: join(root, 'private'), requests: join(root, 'req'), ops: join(root, 'ops'), work: join(root, 'work'), state: join(root, 'state') };
   const calls = [];
   const s = structuredClone(settings);
   const ops = createOps({ settings: () => s, dirs, key: { path: '/key' }, pool: { knownHosts: () => 'x\n', pins: new Proxy({}, { get: () => ({ type: 'ssh-ed25519', key: 'k' }) }) }, binary: 'dashnet', log: () => {}, spawnImpl: fakeDashnet(calls) });
@@ -112,10 +112,44 @@ test('operation lifecycle: request -> enroll -> plan -> review -> confirm -> upg
 
 test('requests from non-operators are dropped', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ops-'));
-  const dirs = { requests: join(root, 'req'), ops: join(root, 'ops'), work: join(root, 'work'), state: join(root, 'state') };
+  const dirs = { data: root, private: join(root, 'private'), requests: join(root, 'req'), ops: join(root, 'ops'), work: join(root, 'work'), state: join(root, 'state') };
   const ops = createOps({ settings: () => settings, dirs, key: { path: '/key' }, pool: { knownHosts: () => '', pins: {} }, binary: 'dashnet', log: () => {}, spawnImpl: fakeDashnet([]) });
   const id = '7c8139ad-e92f-40da-943d-1e001efaccb5';
   writeFileSync(join(dirs.requests, `${id}.json`), JSON.stringify({ type: 'create', id, network: 'testnet', action: 'doctor', nodes: ['seed-1'], actor: { id: 1, login: 'mallory' } }));
   ops.tick();
   assert.equal(existsSync(join(dirs.ops, `${id}.json`)), false);
+});
+
+test('devnet requests: admin-only fields, permanent names, placement from settings', async () => {
+  const { validateDevnetRequest, networkYaml, estimate } = await import('./devnets.js');
+  const s = structuredClone(settings);
+  const q = { id: '6c8139ad-e92f-40da-943d-1e001efaccb5', network: 'devnet-bonsai', action: 'create-devnet', devnet: { validators: 15 } };
+  const d = validateDevnetRequest(s, q, {});
+  assert.equal(d.validators, 15);
+  assert.equal(d.subnetId, s.devnets.subnetId);
+  assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { subnetId: 'subnet-evil' } }, {}), /not settable/);
+  assert.throws(() => validateDevnetRequest(s, { ...q, network: 'devnet-moutai' }, {}), /already exists/);
+  assert.throws(() => validateDevnetRequest(s, q, { 'devnet-bonsai': { status: 'deleted' } }), /already exists/);
+  assert.throws(() => validateDevnetRequest(s, { ...q, network: 'bonsai' }, {}), /devnet-<name>/);
+  assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { validators: 7 } }, {}), /13..25/);
+  assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { images: { drive: 'evil/drive:1' } } }, {}), /images.drive/);
+  const yaml = networkYaml(s, 'devnet-bonsai', d, { arm64: 'ami-1', amd64: 'ami-2' });
+  assert.match(yaml, /name: devnet-bonsai/);
+  assert.match(yaml, /count: 15/);
+  assert.match(yaml, /ipamPoolId: ipam-pool-/);
+  assert.match(yaml, /drive: docker.io\/dashpay\/drive:/);
+  assert.ok(estimate(d).hourly > 0.5);
+  assert.throws(() => validateRequest(s, { id: q.id, network: 'devnet-bonsai', action: 'delete-devnet', confirmName: 'devnet-bonsai' }, {}), /only devnets created/);
+  assert.throws(() => validateRequest(s, { id: q.id, network: 'devnet-bonsai', action: 'delete-devnet', confirmName: 'nope' }, { 'devnet-bonsai': { status: 'ready' } }), /type devnet-bonsai/);
+});
+
+test('discovery classifies dash-network-go instances by tag', async () => {
+  const { createDiscovery } = await import('./discover.js');
+  const tags = (o) => Object.entries(o).map(([Key, Value]) => ({ Key, Value }));
+  const client = { send: async () => ({ Reservations: [{ Instances: [
+    { InstanceId: 'i-01', State: { Name: 'running' }, Architecture: 'arm64', PublicIpAddress: '68.67.122.90', Tags: tags({ Name: 'devnet-bonsai-validators-001', DashNetwork: 'devnet-bonsai', 'dashnet:managed-by': 'dash-network-go', 'dashnet:network': 'devnet-bonsai', 'dashnet:role': 'validator', 'dashnet:node': 'validators-001' }) },
+    { InstanceId: 'i-02', State: { Name: 'running' }, Architecture: 'x86_64', PublicIpAddress: '68.67.122.91', Tags: tags({ Name: 'devnet-bonsai-wallet-001', DashNetwork: 'devnet-bonsai', 'dashnet:managed-by': 'dash-network-go', 'dashnet:network': 'devnet-bonsai', 'dashnet:role': 'wallet', 'dashnet:node': 'wallet-001' }) },
+  ] }] }) };
+  const found = await createDiscovery({ region: 'us-west-2', tagKey: 'DashNetwork' }, client)([{ name: 'devnet-bonsai', tag: 'devnet-bonsai' }]);
+  assert.deepEqual(found['devnet-bonsai'].map((h) => [h.name, h.role, h.arch]), [['validators-001', 'validator', 'arm64'], ['wallet-001', 'wallet', 'amd64']]);
 });

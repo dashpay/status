@@ -1,9 +1,9 @@
 import { Fragment, useMemo, useState } from 'react';
-import { ago, bytes, clock, dash, duration, num, short, useNow, useResource, useSession, ROLE_LABEL } from '../lib.js';
+import { ago, api, bytes, clock, dash, duration, navigate, num, short, useNow, useResource, useSession, ROLE_LABEL } from '../lib.js';
 import { Delta, Dot, Empty, Err, Level, Link, Meter, Section, Stat } from '../ui.jsx';
 import Operations from './Operations.jsx';
 
-const ROLE_ORDER = ['validator', 'masternode', 'seed', 'web', 'wallet', 'miner', 'mixer', 'quorums', 'metrics', 'logs', 'vpn', 'other'];
+const ROLE_ORDER = ['validator', 'masternode', 'seed', 'fullnode', 'web', 'wallet', 'miner', 'mixer', 'quorums', 'metrics', 'logs', 'vpn', 'other'];
 
 export default function Network({ name, tab }) {
   const now = useNow(1000);
@@ -31,6 +31,7 @@ export default function Network({ name, tab }) {
         )}
       </div>
       {n.description && <p className="text-dim mt-1 text-[12px]">{n.description}</p>}
+      {n.lifecycle && <Lifecycle n={n} member={member} admin={session.admin} />}
 
       {tab === 'ops' && member ? <Operations network={n} operator={operator} /> : (
         <>
@@ -134,7 +135,7 @@ const ver = (h, c) => h.containers.find((k) => k.component === c && k.running)?.
 const coreVer = (h) => h.core?.version?.replace(/^\/Dash Core:/, '').replace(/\/$/, '') || ver(h, 'core');
 const disk = (h) => Math.max(...(h.system?.disks || []).map((d) => d.percent ?? 0), -1);
 
-function columns(role, tips, now) {
+function columns(role, tips, now, hostsHaveServices) {
   const base = [
     { h: '', w: 18, c: (h) => <Dot level={h.level} /> },
     { h: 'host', c: (h) => <span className="mono">{h.name}</span> },
@@ -184,6 +185,7 @@ function columns(role, tips, now) {
     ...sys];
   if (role === 'wallet') return [...base, coreH,
     { h: 'core', c: (h) => <span className="mono">{coreVer(h)}</span> },
+    ...(hostsHaveServices ? [{ h: 'services', c: (h) => <Services h={h} /> }] : []),
     { h: 'wallets', c: (h) => Array.isArray(h.wallets) ? <span className="mono text-[11.5px]">{h.wallets.map((w) => `${w.name.replace(/^dashd-wallet-\d+-/, '')} ${dash(w.trusted)}`).join(' · ')}</span> : h.wallets ? `${h.wallets.count} loaded` : '—' },
     { h: 'peers', n: 1, c: (h) => h.core?.peers ?? '—' },
     ...sys];
@@ -202,7 +204,7 @@ function MnState({ h }) {
 }
 
 function RoleTable({ role, hosts, tips, now, open, setOpen, member, operator, network }) {
-  const cols = columns(role, tips, now);
+  const cols = columns(role, tips, now, hosts.some((h) => h.quorumServer || h.explorer || h.faucet?.kind === 'dash-faucet'));
   return (
     <table className="grid">
       <thead><tr>{cols.map((c, i) => <th key={i} className={c.n ? 'num' : ''} style={c.w ? { width: c.w } : undefined}>{c.h}</th>)}</tr></thead>
@@ -266,7 +268,9 @@ function HostDetail({ h, now, member, operator, network }) {
         {Array.isArray(h.wallets) && <><div className="label mt-3 mb-1">Wallets</div>
           <table className="text-[12px] mono"><tbody>{h.wallets.map((w) => <tr key={w.name}><td className="pr-4 text-dim">{w.name}</td><td className="text-right pr-3">{dash(w.trusted)}</td><td className="text-faint text-right pr-3">{w.pending ? `+${dash(w.pending)} pending` : ''}</td><td className="text-faint text-right">{w.immature ? `${dash(w.immature)} immature` : ''}</td></tr>)}</tbody></table></>}
         {h.insight && <><div className="label mt-3 mb-1">Insight</div><KV rows={[['sync', `${h.insight.syncStatus} ${h.insight.syncPercentage}%`], ['blocks', num(h.insight.blocks)], ['network', h.insight.network]]} /></>}
-        {h.faucet && <><div className="label mt-3 mb-1">Faucet</div><KV rows={[['HTTP', `${h.faucet.status} · ${h.faucet.latencyMs} ms`], ['title', h.faucet.title]]} /></>}
+        {h.faucet && <><div className="label mt-3 mb-1">Faucet</div><KV rows={h.faucet.kind === 'dash-faucet' ? [['/api/status', `${h.faucet.status} · ${h.faucet.state} · ${h.faucet.latencyMs} ms`], ['balance', dash(h.faucet.balance)], ['spendable UTXOs', h.faucet.utxos]] : [['HTTP', `${h.faucet.status} · ${h.faucet.latencyMs} ms`], ['title', h.faucet.title]]} /></>}
+        {h.quorumServer && <><div className="label mt-3 mb-1">Quorum list server</div><KV rows={[['/health', `${h.quorumServer.status} · ${h.quorumServer.latencyMs} ms`], ['platform quorums', h.quorumServer.quorums]]} /></>}
+        {h.explorer && <><div className="label mt-3 mb-1">Platform Explorer</div><KV rows={[['API /status', `${h.explorer.status} · ${h.explorer.latencyMs} ms · API ${h.explorer.apiVersion ?? '—'}`], ['indexed / chain', `${num(h.explorer.indexedHeight)} / ${num(h.explorer.chainHeight)}`], ['identities / transactions', `${h.explorer.identities ?? '—'} / ${h.explorer.transactions ?? '—'}`]]} /></>}
       </div>
       <div>
         {h.platform && <><div className="label mb-1">Platform</div><KV rows={[
@@ -300,6 +304,42 @@ function HostDetail({ h, now, member, operator, network }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function Services({ h }) {
+  const parts = [];
+  if (h.quorumServer) parts.push(<span key="q" className={h.quorumServer.status === 200 ? '' : 'lv-down'}>quorums {h.quorumServer.status === 200 ? h.quorumServer.quorums : `HTTP ${h.quorumServer.status}`}</span>);
+  if (h.explorer) parts.push(<span key="e" className={h.explorer.status === 200 ? '' : 'lv-down'}>explorer {h.explorer.status === 200 ? `${num(h.explorer.indexedHeight)}/${num(h.explorer.chainHeight)}` : `HTTP ${h.explorer.status}`}</span>);
+  if (h.faucet?.kind === 'dash-faucet') parts.push(<span key="f" className={h.faucet.state === 'ok' ? '' : 'lv-warn'}>faucet {dash(h.faucet.balance)}</span>);
+  return <span className="mono text-[11.5px] flex gap-3">{parts.length ? parts : '—'}</span>;
+}
+
+function Lifecycle({ n, member, admin }) {
+  const l = n.lifecycle;
+  const [confirm, setConfirm] = useState('');
+  const [open, setOpen] = useState(false);
+  const [error, setError] = useState(null);
+  const level = { ready: 'ok', creating: 'info', services: 'info', deleting: 'warn', failed: 'down' }[l.status] || 'stopped';
+  const remove = async () => {
+    setError(null);
+    try { const r = await api(`/api/networks/${n.name}/ops`, { method: 'POST', body: { action: 'delete-devnet', confirmName: confirm } }); navigate(`/n/${n.name}/ops/${r.id}`); }
+    catch (e) { setError(e); }
+  };
+  return (
+    <div className="panel mt-3 px-3 py-2 text-[12px] flex flex-wrap items-center gap-x-5 gap-y-2">
+      <span className="label">console devnet</span>
+      <span className={`lv-${level}`}>{l.status}</span>
+      <span className="text-dim">created by {l.createdBy} {l.createdAt ? ago(l.createdAt) + ' ago' : ''}</span>
+      {member && l.operation && <Link className="link" to={`/n/${n.name}/ops/${l.operation}`}>creation log</Link>}
+      {l.dns && Object.entries(l.dns).map(([k, v]) => <a key={k} className="link mono" href={`https://${v.host}/`} target="_blank" rel="noreferrer">{k}</a>)}
+      {admin && !open && <button className="btn btn-danger !py-0.5 ml-auto" onClick={() => setOpen(true)}>Delete devnet…</button>}
+      {admin && open && <span className="ml-auto flex items-center gap-2"><span className="text-dim">type <span className="mono">{n.name}</span></span>
+        <input className="input mono w-56" value={confirm} onChange={(e) => setConfirm(e.target.value.trim())} />
+        <button className="btn btn-danger !py-0.5" disabled={confirm !== n.name} onClick={remove}>Prepare deletion</button>
+        <button className="btn !py-0.5" onClick={() => setOpen(false)}>cancel</button></span>}
+      {error && <span className="lv-down w-full">{error.message}</span>}
     </div>
   );
 }

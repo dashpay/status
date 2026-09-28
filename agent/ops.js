@@ -6,7 +6,8 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { COMPONENTS, COMPONENT_REPOS, operatorFor, readJSON, writeAtomic } from '../shared/settings.js';
+import { COMPONENTS, COMPONENT_REPOS, adminFor, operatorFor, readJSON, writeAtomic } from '../shared/settings.js';
+import { createDevnets, validateDevnetRequest } from './devnets.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ACTIONS = new Set(['upgrade', 'deploy', 'enroll', 'doctor']);
@@ -45,8 +46,17 @@ export function manifestFor(settings, network, state) {
   };
 }
 
-export function validateRequest(settings, q) {
+export const LIFECYCLE = new Set(['create-devnet', 'delete-devnet']);
+
+export function validateRequest(settings, q, registry = {}) {
   if (!q || !UUID.test(q.id)) throw new Error('invalid request id');
+  if (q.action === 'create-devnet') { validateDevnetRequest(settings, q, registry); return { lifecycle: true }; }
+  if (q.action === 'delete-devnet') {
+    const reg = registry[q.network];
+    if (!reg || reg.status === 'deleted') throw new Error('only devnets created from this console can be deleted');
+    if (q.confirmName !== q.network) throw new Error(`type ${q.network} to confirm deletion`);
+    return { lifecycle: true };
+  }
   const network = settings.networks.find((n) => n.name === q.network);
   if (!network?.deployable) throw new Error('network is not deployable');
   if (!ACTIONS.has(q.action)) throw new Error('unsupported action');
@@ -66,7 +76,7 @@ export function validateRequest(settings, q) {
   return { network, window, timeout, components, images };
 }
 
-export function createOps({ settings: getSettings, dirs, key, pool, binary, onChange = () => {}, log = console.log, spawnImpl = spawn }) {
+export function createOps({ settings: getSettings, dirs, key, pool, binary, onChange = () => {}, log = console.log, spawnImpl = spawn, devnetsImpl }) {
   const { requests, ops, work } = dirs;
   for (const d of [requests, ops, work]) mkdirSync(d, { recursive: true });
   const running = new Map();
@@ -251,7 +261,11 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
 
   async function run(r) {
     try {
-      if (r.status === 'queued') {
+      if (LIFECYCLE.has(r.request.action)) {
+        const create = r.request.action === 'create-devnet';
+        if (r.status === 'queued') { await (create ? devnets.prepareCreate(r) : devnets.prepareDelete(r)); r.status = 'review'; }
+        else if (r.status === 'confirmed') { await (create ? devnets.executeCreate(r) : devnets.executeDelete(r)); r.status = 'succeeded'; r.finishedAt = new Date().toISOString(); }
+      } else if (r.status === 'queued') {
         const { dir } = await prepare(r);
         if (r.request.action === 'doctor') { await doctor(r, dir); r.status = r.result.healthy ? 'succeeded' : 'failed'; }
         else if (r.request.action === 'enroll') r.status = 'succeeded';
@@ -269,6 +283,8 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     save(r);
     if (['succeeded', 'failed', 'cancelled'].includes(r.status)) onChange(r, true);
   }
+
+  const devnets = devnetsImpl || createDevnets({ ctx: { dashnet, step, save, write }, dirs, key, pool, getSettings, region: getSettings().aws.region, log });
 
   // Poll the request directory: create, confirm, cancel, resume.
   function tick() {
@@ -290,12 +306,13 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
 
   function handle(s, q) {
     const actor = q.actor && Number.isInteger(q.actor.id) ? { id: q.actor.id, login: String(q.actor.login).slice(0, 39) } : null;
-    if (!actor || !operatorFor(s, actor, q.network)) throw new Error('actor is not an operator for this network');
+    const lifecycle = LIFECYCLE.has(q.action) || LIFECYCLE.has(load(q.id)?.request?.action);
+    if (!actor || !(lifecycle ? adminFor(s, actor) : operatorFor(s, actor, q.network))) throw new Error(lifecycle ? 'only admins create or delete devnets' : 'actor is not an operator for this network');
     if (q.type === 'create') {
-      const request = { id: q.id, network: q.network, action: q.action, nodes: q.nodes, components: q.components || [], images: q.images || {}, options: q.options || {} };
+      const request = { id: q.id, network: q.network, action: q.action, nodes: q.nodes || [], components: q.components || [], images: q.images || {}, options: q.options || {}, ...(q.devnet ? { devnet: q.devnet } : {}), ...(q.confirmName ? { confirmName: q.confirmName } : {}) };
       let r = { id: q.id, network: q.network, actor, createdAt: new Date().toISOString(), request, status: 'queued', steps: [] };
       if (existsSync(recordPath(q.id))) throw new Error('duplicate request id');
-      try { validateRequest(s, request); } catch (e) { r = { ...r, status: 'rejected', error: e.message }; }
+      try { validateRequest(s, request, devnets.registry()); } catch (e) { r = { ...r, status: 'rejected', error: e.message }; }
       save(r); write(r.id, `requested by ${actor.login}: ${request.action} ${request.nodes.join(',')} ${request.components.join(',')} ${Object.values(request.images).join(' ')}`);
       return;
     }
@@ -319,7 +336,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     }
   }
 
-  return { tick, running, isTerminal: (s) => TERMINAL.has(s), manifestFor };
+  return { tick, running, isTerminal: (s) => TERMINAL.has(s), manifestFor, devnets };
 }
 
 export function toMs(d) {
