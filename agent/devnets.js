@@ -13,12 +13,14 @@ import { join } from 'node:path';
 import { EC2Client, DescribeInstancesCommand, DescribeVolumesCommand, TerminateInstancesCommand, DeleteVolumeCommand } from '@aws-sdk/client-ec2';
 import { Route53Client, ChangeResourceRecordSetsCommand, ListResourceRecordSetsCommand } from '@aws-sdk/client-route-53';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
-import { COMPONENTS, COMPONENT_REPOS, readJSON, writeAtomic } from '../shared/settings.js';
+import { COMPONENTS, COMPONENT_REPOS, readJSON, validateDevnetDefaults, writeAtomic } from '../shared/settings.js';
 import { deployServices, serviceNames, shortName } from './services.js';
 
 const NAME = /^devnet-[a-z][a-z0-9-]{1,30}$/;
 const PRICES = { 't4g.small': 0.0168, 't4g.medium': 0.0336, 't4g.large': 0.0672, 't4g.xlarge': 0.1344, 't3.medium': 0.0416, 't3.large': 0.0832, 't3.xlarge': 0.1664, 'm7g.medium': 0.0408, 'm7g.large': 0.0816, 'm6a.large': 0.0864, 'm7i.large': 0.1008, 'c7g.large': 0.0725 };
 const GP3_GIB_MONTH = 0.08;
+const SERVICE_KEYS = ['quorumServer', 'explorerVersion', 'faucetRef', 'faucetAmount', 'faucetRateLimit', 'faucetFunding', 'epochSeconds'];
+const TEXT = /^[A-Za-z0-9 .,_()-]+$/;
 
 export { shortName };
 export const coreNetwork = (name, generation = 1) => `devnet-${shortName(name)}-g${generation}`;
@@ -30,6 +32,8 @@ export function validateDevnetRequest(settings, q, registry) {
   const allowed = ['displayName', 'description', 'public', 'validators', 'validatorType', 'validatorArch', 'walletType', 'walletArch', 'rootVolumeGiB', 'protocol'];
   const extra = Object.keys(q.devnet || {}).filter((k) => !allowed.includes(k) && k !== 'images' && k !== 'services');
   if (extra.length) throw new Error(`not settable per devnet: ${extra.join(', ')}`);
+  const services = Object.keys(q.devnet?.services || {}).filter((k) => !SERVICE_KEYS.includes(k));
+  if (services.length) throw new Error(`not settable per devnet: services.${services.join(', services.')}`);
   const d = { ...settings.devnets, ...(q.devnet || {}) };
   if (!Number.isInteger(d.rootVolumeGiB) || d.rootVolumeGiB < 30 || d.rootVolumeGiB > 1000) throw new Error('root disk 30..1000 GiB');
   d.images = { ...settings.devnets.images, ...(q.devnet?.images || {}) };
@@ -42,7 +46,12 @@ export function validateDevnetRequest(settings, q, registry) {
     if (ref.split(/[@:]/)[0] !== COMPONENT_REPOS[c] || !/^[a-z0-9/-]+(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|@sha256:[0-9a-f]{64})$/.test(ref)) throw new Error(`images.${c} must be ${COMPONENT_REPOS[c]}:<tag>`);
   }
   if (!Number.isInteger(d.protocol) || d.protocol < 1 || d.protocol > 100) throw new Error('protocol must be the Platform protocol number (e.g. 14 for 4.2.x)');
-  if (typeof d.displayName !== 'string' || !d.displayName.trim() || d.displayName.length > 60) d.displayName = shortName(q.network).replace(/(^|-)([a-z])/g, (_, a, b) => (a ? ' ' : '') + b.toUpperCase());
+  if (typeof d.displayName !== 'string' || !d.displayName.trim()) d.displayName = shortName(q.network).replace(/(^|-)([a-z])/g, (_, a, b) => (a ? ' ' : '') + b.toUpperCase());
+  // Shown on the faucet page and in the network file: plain text only.
+  if (!TEXT.test(d.displayName) || d.displayName.length > 60) throw new Error('display name: letters, digits, spaces and . , _ ( ) - only, up to 60');
+  if (d.description != null && (typeof d.description !== 'string' || d.description.length > 200 || !TEXT.test(d.description || 'x'))) throw new Error('description: plain text up to 200 characters');
+  // Same rules as Settings, so a bad service value fails before anything is billable.
+  validateDevnetDefaults(d);
   return d;
 }
 
@@ -145,10 +154,13 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     // Records created before stage tracking: derive completed stages from their steps.
     r.done ??= [['provision', 'dashnet provision)'], ['bootstrap', 'dashnet bootstrap)'], ['deploy', 'dashnet deploy)']]
       .filter(([, tag]) => r.steps.some((st) => st.name.endsWith(tag) && st.status === 'ok')).map(([k]) => k);
+    const reg = registry()[name];
+    if (reg && ['deleting', 'deleted'].includes(reg.status)) throw new Error(`${name} is ${reg.status}; this creation cannot resume`);
     r.status = 'running'; save(r);
     // Resume continues at the first stage that has not completed.
     const once = async (key, fn) => { if (r.done.includes(key)) return; await fn(); r.done.push(key); save(r); };
-    if (!r.done.includes('deploy')) register(name, { status: 'creating', displayName: d.displayName, createdBy: r.actor.login, createdAt: r.createdAt, operation: r.id, coreNetwork: coreNetwork(name), public: d.public !== false, dns: serviceNames(name, d), services: d.services });
+    if (reg?.status === 'failed') register(name, { status: r.done.includes('deploy') ? 'services' : 'creating' });
+    if (!r.done.includes('deploy')) register(name, { status: 'creating', displayName: d.displayName, createdBy: r.actor.login, createdAt: r.createdAt, operation: r.id, coreNetwork: coreNetwork(name), public: d.public !== false, dns: serviceNames(name, d), services: d.services, dnsZoneId: d.dnsZoneId });
 
     let done;
     await once('provision', async () => {
@@ -168,6 +180,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       done = step(r, 'Host keys from EC2 console (dashnet host-trust)');
       let ok = false;
       for (let attempt = 1; attempt <= 20 && !ok; attempt++) {
+        if (r.cancelRequested) throw new Error('cancelled by operator');
         const out = join(dir, `known_hosts.${stamp()}`);
         ok = (await run(r, 'host-trust', ['host-trust', '--bootstrap-plan', join(dir, 'bootstrap-plan.json'), '--timeout', '3m', '--out', out], { allowFail: true, timeoutMs: 4 * 60_000 })) === 0;
         if (ok) writeFileSync(join(dir, 'known_hosts'), readFileSync(out), { mode: 0o600 });
@@ -176,7 +189,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       if (!ok) { done('failed'); throw new Error('host keys unavailable from EC2 console output'); }
       done('ok');
     }
-    pinHostKeys(readFileSync(join(dir, 'known_hosts'), 'utf8'));
+    pinHostKeys(r, readFileSync(join(dir, 'known_hosts'), 'utf8'));
 
     await once('bootstrap', async () => {
       done = step(r, 'Prepare hosts: Docker, images (dashnet bootstrap)');
@@ -239,17 +252,26 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       if (!utxo) { write(r.id, `revive ${t.name}: no spendable fee UTXO yet`); continue; }
       const key = (await pool.exec({ name: t.name, instanceId: t.instanceId, publicIp: t.sshAddress }, `sudo python3 -c 'import json;print(json.load(open("/var/lib/dashnet/secrets.json"))["operatorPrivateKey"])'`, null, 30_000)).trim();
       if (!/^[0-9a-f]{64}$/.test(key)) throw new Error(`unexpected operator key format on ${t.name}`);
-      const tx = (await pool.exec(w, `read k; ${core} -rpcwallet=dashnet protx update_service_evo ${mn.proTxHash} ${s.service} "$k" ${s.platformNodeID} ${s.platformP2PPort} ${s.platformHTTPPort} "" ${utxo.address}`, `${key}\n`, 60_000)).trim();
+      // The key and everything after it go on stdin (dash-cli -stdin), never on a
+      // command line that sudo logs or ps shows.
+      const tx = (await pool.exec(w, `${core} -rpcwallet=dashnet -stdin protx update_service_evo ${mn.proTxHash} ${s.service}`, [key, s.platformNodeID, s.platformP2PPort, s.platformHTTPPort, '', utxo.address].join('\n') + '\n', 60_000)).trim();
       write(r.id, `revived PoSe-banned ${t.name} (ban height ${s.PoSeBanHeight}) with ProUpServTx ${tx.slice(0, 16)}…`);
     }
   }
 
-  function pinHostKeys(text) {
+  // Keys from the EC2 console are authoritative. The collector may already have
+  // pinned a key on first contact; a matching pin is marked verified, and a
+  // different one is replaced and its session dropped.
+  function pinHostKeys(r, text) {
     for (const line of text.split('\n')) {
       const [alias, type, value] = line.trim().split(/\s+/);
       const id = alias?.split('.')[0];
       if (!/^i-[0-9a-f]+$/.test(id || '') || type !== 'ssh-ed25519') continue;
-      if (!pool.pins[id]) pool.pins[id] = { type, key: value, address: null, pinnedAt: new Date().toISOString(), source: 'EC2 console (dashnet host-trust)' };
+      const had = pool.pins[id];
+      if (had?.source && had.type === type && had.key === value) continue;
+      if (had && (had.type !== type || had.key !== value)) write(r.id, `WARNING: first-contact host key for ${id} differs from the EC2 console key; replaced with the console key`);
+      pool.pins[id] = { type, key: value, address: had?.address ?? null, pinnedAt: new Date().toISOString(), source: 'EC2 console (dashnet host-trust)' };
+      if (had && (had.type !== type || had.key !== value)) pool.drop?.(id);
     }
     pool.savePins();
   }
@@ -333,6 +355,8 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
 
   async function executeServices(r) {
     const name = r.network, dir = workDir(name);
+    const reg = registry()[name];
+    if (!reg || ['deleting', 'deleted'].includes(reg.status)) throw new Error(`${name} is ${reg?.status || 'unknown'}; services not changed`);
     const d = readJSON(join(dir, 'request.json'));
     d.services = r.review.to;
     const dplan = readJSON(join(dir, 'deployment.json'));
@@ -369,11 +393,14 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     let done = step(r, 'Remove DNS records');
     const reg = registry()[name] || {};
     const hosts = Object.values(reg.dns || {}).map((x) => x.host).filter(Boolean);
-    const zone = getSettings().devnets.dnsZoneId;
-    const existing = hosts.length ? (await r53.send(new ListResourceRecordSetsCommand({ HostedZoneId: zone, StartRecordName: hosts.sort()[0], MaxItems: '300' }))).ResourceRecordSets : [];
+    const zone = reg.dnsZoneId || getSettings().devnets.dnsZoneId;
+    const records = async () => (hosts.length ? (await r53.send(new ListResourceRecordSetsCommand({ HostedZoneId: zone, StartRecordName: [...hosts].sort()[0], MaxItems: '300' }))).ResourceRecordSets : []);
+    const existing = await records();
     const changes = existing.filter((x) => x.Type === 'A' && hosts.includes(x.Name.replace(/\.$/, ''))).map((x) => ({ Action: 'DELETE', ResourceRecordSet: x }));
     if (changes.length) await r53.send(new ChangeResourceRecordSetsCommand({ HostedZoneId: zone, ChangeBatch: { Changes: changes } }));
-    done('ok', `${changes.length} removed`);
+    const left = (await records()).filter((x) => x.Type === 'A' && hosts.includes(x.Name.replace(/\.$/, '')));
+    if (left.length) { done('failed'); throw new Error(`DNS records still present: ${left.map((x) => x.Name).join(', ')}`); }
+    done('ok', `${changes.length} removed, none left`);
     done = step(r, 'Terminate instances');
     let instances = await owned(name);
     if (instances.length) await ec2.send(new TerminateInstancesCommand({ InstanceIds: instances.map((i) => i.InstanceId) }));
@@ -387,20 +414,27 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       done('ok');
     }
     done = step(r, 'Delete retained root volumes');
-    let vols = [];
+    const volumes = async () => ((await ec2.send(new DescribeVolumesCommand({ Filters: [{ Name: 'tag:dashnet:network', Values: [name] }, { Name: 'tag:dashnet:managed-by', Values: ['dash-network-go'] }] }))).Volumes || []).filter((v) => v.State !== 'deleted');
+    let deleted = 0, vols = [];
     for (let i = 0; i < 30; i++) {
-      vols = ((await ec2.send(new DescribeVolumesCommand({ Filters: [{ Name: 'tag:dashnet:network', Values: [name] }, { Name: 'tag:dashnet:managed-by', Values: ['dash-network-go'] }] }))).Volumes || []);
-      const free = vols.filter((v) => v.State === 'available');
-      for (const v of free) await ec2.send(new DeleteVolumeCommand({ VolumeId: v.VolumeId }));
-      if (vols.length === free.length) break;
+      vols = await volumes();
+      if (!vols.length) break;
+      for (const v of vols.filter((x) => x.State === 'available')) { await ec2.send(new DeleteVolumeCommand({ VolumeId: v.VolumeId })); deleted++; }
       await sleep(10_000);
     }
-    done('ok', `${vols.length} deleted`);
+    vols = await volumes();
+    if (vols.length) { done('failed'); throw new Error(`${vols.length} volume(s) remain: ${vols.map((v) => `${v.VolumeId} ${v.State}`).join(', ')}`); }
+    done('ok', `${deleted} deleted, none left`);
     register(name, { status: 'deleted', deletedAt: new Date().toISOString() });
     log(`devnet ${name} deleted by ${r.actor.login}`);
   }
 
-  return { prepareCreate, executeCreate, prepareServices, executeServices, prepareUpgrade, executeUpgrade, doctor, prepareDelete, executeDelete, registry };
+  // A creation that stopped leaves the devnet visibly failed, not "deploying".
+  function markFailed(name) {
+    if (['creating', 'services'].includes(registry()[name]?.status)) register(name, { status: 'failed', failedAt: new Date().toISOString() });
+  }
+
+  return { prepareCreate, executeCreate, prepareServices, executeServices, prepareUpgrade, executeUpgrade, doctor, prepareDelete, executeDelete, registry, markFailed };
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

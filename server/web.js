@@ -203,7 +203,9 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   // Settings (admins edit everything; any operator may read).
   app.get('/api/settings', (req, res) => {
     if (!memberOf(settings, user(req))) return res.status(403).json({ error: 'Sign in with an account that has access' });
-    res.json({ settings: reloadSettings(), admin: isAdmin(req) });
+    const s = reloadSettings();
+    // Non-admins see only the networks they were granted.
+    res.json({ settings: isAdmin(req) ? s : { ...s, networks: s.networks.filter((n) => memberOf(s, user(req), n.name)) }, admin: isAdmin(req) });
   });
   app.put('/api/settings', (req, res, next) => { const s = auth.session(req); if (!s) return res.status(401).json({ error: 'Sign in required' }); req.session = s; next(); }, auth.csrf, (req, res) => {
     if (!isAdmin(req)) return res.status(403).json({ error: 'Only admins can change settings' });

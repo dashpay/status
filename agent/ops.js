@@ -322,6 +322,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
       r.error = e.message.slice(0, 500);
       for (const st of r.steps) if (st.status === 'running') { st.status = 'failed'; st.finishedAt = new Date().toISOString(); st.detail ??= r.error.slice(0, 200); }
       write(r.id, `error: ${r.error}`);
+      if (r.request.action === 'create-devnet' && r.confirmedAt) devnets.markFailed?.(r.network);
     }
     r.cancelRequested = undefined;
     live.delete(r.id);
@@ -386,7 +387,10 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     } else if (q.type === 'resume') {
       if (!['failed', 'interrupted', 'cancelled'].includes(r.status)) throw new Error('only a stopped operation can be resumed');
       // Never confirmed: prepare a fresh plan. Confirmed: continue the exact reviewed plan.
-      if (!r.confirmedAt) { r.status = 'queued'; r.steps = []; r.review = undefined; }
+      if (!r.confirmedAt) {
+        // Nothing reviewed survives: stage results, anchors and targets are retaken.
+        Object.assign(r, { status: 'queued', steps: [], review: undefined, stages: undefined, anchor: undefined, targets: undefined, execId: `${r.id}.${Date.now()}` });
+      }
       else r.status = 'confirmed';
       r.error = undefined; save(r); write(r.id, `resume requested by ${actor.login}`);
     }

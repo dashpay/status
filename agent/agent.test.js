@@ -133,6 +133,12 @@ test('devnet requests: admin-only fields, permanent names, placement from settin
   assert.throws(() => validateDevnetRequest(s, { ...q, network: 'bonsai' }, {}), /devnet-<name>/);
   assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { validators: 7 } }, {}), /13..25/);
   assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { images: { drive: 'evil/drive:1' } } }, {}), /images.drive/);
+  assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { services: { faucetAmount: '1\nDASH_RPC_HOST=evil' } } }, {}), /faucetAmount/);
+  assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { services: { quorumServer: 'evil/image:1' } } }, {}), /quorumServer/);
+  assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { services: { explorerVersion: '--orphan=x' } } }, {}), /explorerVersion/);
+  assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { services: { dnsZoneId: 'Z1' } } }, {}), /not settable/);
+  assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { displayName: '<script>' } }, {}), /display name/);
+  assert.equal(validateDevnetRequest(s, { ...q, devnet: { services: { faucetAmount: 25 } } }, {}).services.faucetAmount, 25);
   const yaml = networkYaml(s, 'devnet-bonsai', d, { arm64: 'ami-1', amd64: 'ami-2' });
   assert.match(yaml, /name: devnet-bonsai/);
   assert.match(yaml, /count: 15/);
@@ -225,4 +231,6 @@ test('platform reset: review from non-destructive stages; a failed wipe stops be
   await reset.executeReset(r);
   assert.equal(calls.filter((c) => c === 'wipe:hp-masternode-1').length, 1, 'successful targets are not wiped twice on resume');
   assert.ok(calls.includes('verify:seed-1') && r.result.healthy === true);
+  // Per-host results are recorded as each host finishes.
+  assert.ok(r.stages.start['hp-masternode-2'].ok && r.stages.verify['seed-1'].ok);
 });

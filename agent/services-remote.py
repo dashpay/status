@@ -13,7 +13,7 @@ Input: argv[1] is base64 JSON or @file (no secrets). The Core RPC password is re
 this host from /var/lib/dashnet/secrets.json and written only to 0600 files here.
 Prints one JSON line with results.
 """
-import base64, json, os, secrets, subprocess, sys, time, urllib.request
+import base64, fcntl, json, os, secrets, subprocess, sys, time, urllib.request
 from pathlib import Path
 
 arg = sys.argv[1]
@@ -225,6 +225,13 @@ def wait(url, seconds=180):
         time.sleep(3)
     return last
 
+
+# One run at a time per host: the cron top-up skips while an install runs.
+lock = open('/run/lock/devnet-services.lock', 'w')
+try:
+    fcntl.flock(lock, fcntl.LOCK_EX | (fcntl.LOCK_NB if cfg.get('topupOnly') else 0))
+except BlockingIOError:
+    sys.exit(0)
 
 if cfg.get('topupOnly'):
     print(json.dumps(dict(faucetBalance=faucet_wallet())))

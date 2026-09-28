@@ -82,6 +82,19 @@ test('console devnets merge into settings and deleted ones drop out', async () =
   assert.equal(gone.networks.some((x) => x.name === 'devnet-bonsai'), false);
 });
 
+test('saving settings never freezes console devnet entries', async () => {
+  const { mergeDevnets, saveSettings } = await import('./settings.js');
+  const { mkdtempSync, readFileSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'settings-'));
+  const registry = { 'devnet-bonsai': { status: 'creating', coreNetwork: 'devnet-bonsai-g1' } };
+  writeFileSync(join(dir, 'devnets.json'), JSON.stringify(registry));
+  const saved = saveSettings(join(dir, 'settings.json'), mergeDevnets(structuredClone(settings), registry));
+  assert.ok(saved.networks.some((n) => n.name === 'devnet-bonsai'), 'still merged in memory');
+  assert.ok(!JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf8')).networks.some((n) => n.name === 'devnet-bonsai'), 'not written to settings.json');
+});
+
 test('hidden balances never reach the public projection', () => {
   const s = structuredClone(settings);
   const n = { ...s.networks[2], showBalances: false };

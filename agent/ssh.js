@@ -110,7 +110,9 @@ export function createPool({ key, stateDir, region, accountId, log = console.log
   }
 
   function close() { for (const s of sessions.values()) s.promise.then((c) => c.end()).catch(() => {}); sessions.clear(); }
-  return { exec, knownHosts, close, pins, savePins };
+  // Drop a session whose host key pin was replaced; the next exec reconnects and verifies.
+  function drop(instanceId) { sessions.get(instanceId)?.promise.then((c) => c.end()).catch(() => {}); sessions.delete(instanceId); }
+  return { exec, knownHosts, close, drop, pins, savePins };
 }
 
 function run(client, command, stdin, timeoutMs, onStderr) {

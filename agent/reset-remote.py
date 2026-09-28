@@ -7,13 +7,15 @@ Prints one JSON object. Core, wallets, registrations, node identities and
 certificates are preserved; only Platform state is reset. Secrets never leave
 the host: backups stay under /var/lib/dash-status-reset/<exec>/ (root, 0700).
 """
-import base64, hashlib, json, os, pwd, re, shutil, subprocess, sys, tempfile, time, urllib.request
+import base64, fcntl, hashlib, json, os, pwd, re, shutil, subprocess, sys, tempfile, time, urllib.request
 from pathlib import Path
 
 STAGE = sys.argv[1]
 Q = json.loads(base64.b64decode(sys.argv[2]))
 CFG = Q['config']                      # dashmate config name, e.g. devnet-moutai
 ROLE = Q['role']                       # 'hpmn' or 'seed'
+if not re.fullmatch(r'[0-9a-f-]{36}(\.[0-9]{1,16})?', Q['exec']):
+    raise SystemExit('invalid execution id')
 STATE = Path('/var/lib/dash-status-reset') / Q['exec']
 DM_HOME = Path('/home/dashmate/.dashmate')
 SEED = Path('/dash/tenderdash')
@@ -32,13 +34,15 @@ def need(cond, msg):
         raise Fail(msg)
 
 
-def run(args, timeout=300, env=None, cwd=None, check=True, user=None):
+def run(args, timeout=300, env=None, cwd=None, check=True, user=None, secret=False):
     if user:
         args = ['sudo', '-H', '-u', user, *(['env'] + [f'{k}={v}' for k, v in (env or {}).items()] if env else []), *args]
         env = None
     p = subprocess.run(args, capture_output=True, timeout=timeout, env={**os.environ, **(env or {})}, cwd=cwd)
     if check and p.returncode:
-        raise Fail(f"{' '.join(args[:6])}: exit {p.returncode}: {(p.stderr or p.stdout).decode(errors='replace').strip()[-300:]}")
+        # Secret-bearing commands (config envs) never echo their output.
+        detail = '' if secret else ': ' + (p.stderr or p.stdout).decode(errors='replace').strip()[-300:]
+        raise Fail(f"{' '.join(args[:6])}: exit {p.returncode}{detail}")
     return p.stdout.decode(errors='replace')
 
 
@@ -244,7 +248,7 @@ def _render(base, apply_back):
     (home / 'config.json').write_text(json.dumps(doc, indent=2))
     os.lchown(home / 'config.json', dm.pw_uid, dm.pw_gid)
     run(['dashmate', 'config', 'render', f'--config={CFG}'], user='dashmate', env=env, cwd='/home/dashmate', timeout=300)
-    envs = run(['dashmate', 'config', 'envs', f'--config={CFG}'], user='dashmate', env=env, cwd='/home/dashmate', timeout=120)
+    envs = run(['dashmate', 'config', 'envs', f'--config={CFG}'], user='dashmate', env=env, cwd='/home/dashmate', timeout=120, secret=True)
     epoch_env = re.search(r'^PLATFORM_DRIVE_ABCI_EPOCH_TIME=(\S+)$', envs, re.M)
     after_cfg = dm_config(home)
     after = after_cfg['configs'][CFG]
@@ -274,6 +278,7 @@ def _render(base, apply_back):
         rel = Path('platform') / tpl.relative_to('/usr/lib/dashmate/templates/platform').with_suffix('')
         if (home / CFG / rel).exists():
             rendered.append(str(rel))
+    need('platform/drive/tenderdash/genesis.json' in rendered and 'platform/drive/tenderdash/config.toml' in rendered, 'dashmate templates not found; Platform files would not be rendered')
     if apply_back:
         core_before = core_files()
         shutil.copy2(home / 'config.json', DM_HOME / 'config.json')
@@ -307,7 +312,11 @@ def preserved(b):
 
 def wipe():
     b = load_json('baseline.json')
+    # Refuse before touching anything if Core changed since the baseline.
+    preserved(b)
     if ROLE == 'hpmn':
+        mn = core_cli(core_container(), 'masternode', 'status')
+        need(mn.get('state') == 'READY', f"masternode state {mn.get('state')}; not wiping")
         run(['dashmate', 'reset', '--platform', '--force', f'--config={CFG}'], user='dashmate', cwd='/home/dashmate', timeout=900)
         left = platform_containers()
         need(not left, f'platform containers still present: {sorted(left)}')
@@ -353,7 +362,11 @@ def apply():
 def start():
     b = load_json('baseline.json')
     if ROLE == 'hpmn':
-        run(['dashmate', 'start', '--platform', f'--config={CFG}'], user='dashmate', cwd='/home/dashmate', timeout=900)
+        # Resume-safe: a host already running every Platform service is left as is.
+        plat = platform_containers()
+        expected = set(b.get('platform') or {}) or set(PLATFORM)
+        if not (expected <= {k for k, v in plat.items() if v['running']}):
+            run(['dashmate', 'start', '--platform', f'--config={CFG}'], user='dashmate', cwd='/home/dashmate', timeout=900)
     else:
         run(['docker', 'compose', '-f', str(SEED_COMPOSE), 'up', '-d', '--no-deps', 'tenderdash'], timeout=300)
     preserved(b)
@@ -378,6 +391,9 @@ def verify():
     info = core_cli(c, 'getblockchaininfo')
     sync = core_cli(c, 'mnsync', 'status')
     out = dict(core=dict(unchanged=True, id=ident['id'][:12], synced=bool(sync.get('IsSynced')), height=info['blocks']))
+    genesis = json.loads(((DM_HOME / CFG / 'platform' / 'drive' / 'tenderdash') if ROLE == 'hpmn' else (SEED / 'tenderdash' / 'config')).joinpath('genesis.json').read_text())
+    out['anchor'] = genesis.get('initial_core_chain_locked_height')
+    need(int(out['anchor'] or 0) == int(Q['anchorHeight']), f"live genesis anchor {out['anchor']}, expected {Q['anchorHeight']}")
     if ROLE == 'seed':
         td = inspect('tenderdash') or next((x for x in containers() if 'tenderdash' in x['Config']['Image']), None)
         need(td and td['State']['Running'], 'seed tenderdash not running')
@@ -428,6 +444,13 @@ STAGES = {'baseline': baseline, 'stage': stage_images, 'anchor': anchor, 'anchor
           'wipe': wipe, 'apply': apply, 'start': start, 'verify': verify}
 os.umask(0o077)
 try:
+    # One stage at a time per host, so a resumed operation never overlaps a
+    # previous run that is still in progress.
+    lock = open('/run/lock/dash-status-reset.lock', 'w')
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise Fail('another reset stage is still running on this host')
     result = STAGES[STAGE]()
     print(json.dumps(dict(ok=result.get('ok', True) if isinstance(result, dict) else True, stage=STAGE, result=result)))
 except Fail as e:

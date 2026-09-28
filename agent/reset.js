@@ -38,7 +38,8 @@ export function createReset({ ctx, dirs, pool, getSettings }) {
   async function stage(r, name, hosts, extra = {}, { parallel = 8, timeoutMs = 20 * 60_000 } = {}) {
     const dir = join(dirs.private, 'resets', r.id);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const base = { config: r.network, exec: r.id, coreChain: r.review?.coreChain || r.coreChain, images: r.request.images, epochSeconds: r.epoch, ...extra };
+    // A re-prepare gets a new execution id, so the baseline is retaken.
+    const base = { config: r.network, exec: r.execId || r.id, coreChain: r.review?.coreChain || r.coreChain, images: r.request.images, epochSeconds: r.epoch, ...extra };
     r.stages ??= {};
     r.stages[name] ??= {};
     const results = await mapLimit(hosts, parallel, async (h) => {
@@ -48,6 +49,8 @@ export function createReset({ ctx, dirs, pool, getSettings }) {
       try { v = JSON.parse((await pool.exec(h, `sudo -n python3 - ${name} ${q}`, SCRIPT, timeoutMs)).trim().split('\n').pop()); }
       catch (e) { v = { ok: false, stage: name, error: `unreachable or no result: ${e.message.slice(0, 200)}` }; }
       writeAtomic(join(dir, `${name}.${h.name}.json`), JSON.stringify(v), 0o600);
+      // Record each host as it finishes, so a resume skips hosts that completed.
+      r.stages[name][h.name] = v; save(r);
       write(r.id, `${name} ${h.name}: ${v.ok ? 'ok' : `FAILED ${v.error || (v.result?.problems || []).join('; ')}`}`);
       return v;
     });
@@ -115,7 +118,7 @@ export function createReset({ ctx, dirs, pool, getSettings }) {
     const deadline = Date.now() + 25 * 60_000;
     let failed = [];
     for (let attempt = 1; ; attempt++) {
-      ({ failed } = await stage(r, 'verify', all));
+      ({ failed } = await stage(r, 'verify', all, anchor));
       r.progress.completed = all.filter((h) => !failed.includes(h.name)).map((h) => h.name); save(r);
       if (!failed.length || Date.now() > deadline) break;
       write(r.id, `verify attempt ${attempt}: waiting on ${failed.join(', ')}`);

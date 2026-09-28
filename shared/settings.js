@@ -202,8 +202,11 @@ export function devnetEntry(name, reg) {
 
 export function saveSettings(path, settings) {
   const valid = validateSettings(settings);
+  // Console devnets live in devnets.json; saving must not freeze their entries.
+  const registry = readJSON(join(dirname(path), 'devnets.json'), {});
+  valid.networks = valid.networks.filter((n) => !(n.kind === 'dashnet' && registry[n.name]));
   writeAtomic(path, JSON.stringify(valid, null, 2));
-  return valid;
+  return mergeDevnets(valid, registry);
 }
 
 export function writeAtomic(path, data, mode = 0o640) {
