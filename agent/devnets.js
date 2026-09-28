@@ -97,6 +97,23 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     const p = spawnSync(bin, ['upgrade-plan', '-h'], { encoding: 'utf8', timeout: 10_000 });
     return /or core \(Core only/.test(`${p.stdout}${p.stderr}`) ? ['platform', 'tenderdash', 'core'] : ['platform', 'tenderdash'];
   }
+  // An upgrade runs with the binary that planned it, but a resume may move to a
+  // strictly newer build whose recipes the plans still accept (same upgrade
+  // and node recipes), e.g. to pick up a runner fix.
+  function refreshSnapshot(r, dir, plan) {
+    const dep = readJSON(join(dir, 'deployment.json'));
+    if (!binary || !existsSync(binary) || !r.artifacts.bin || !dep) return;
+    const p = spawnSync(binary, ['recipes'], { encoding: 'utf8', timeout: 10_000 });
+    let rec; try { rec = JSON.parse(p.stdout); } catch { return; }
+    if (rec.upgrade !== plan.recipeSha256 || rec.node !== dep.recipeSha256) return;
+    const [was, now] = [versionOf(r.artifacts.bin), versionOf(binary)];
+    if (!dated(now) || (dated(was) && dated(was) >= dated(now))) return;
+    copyFileSync(binary, `${r.artifacts.bin}.next`); chmodSync(`${r.artifacts.bin}.next`, 0o700); renameSync(`${r.artifacts.bin}.next`, r.artifacts.bin);
+    write(r.id, `resuming with dashnet ${now.slice(0, 16)} (same upgrade and node recipes as the reviewed plan)`);
+  }
+  const versionOf = (bin) => spawnSync(bin, ['version'], { encoding: 'utf8', timeout: 10_000 }).stdout.trim();
+  const dated = (v) => /^(\d{8}T\d{6}Z)-[0-9a-f]{40}$/.exec(v || '')?.[1];
+
   // A devnet is pinned to the dashnet that created it: its plans bind that
   // binary's recipes. A newer binary reporting the same node and bootstrap
   // recipes (dashnet recipes) can operate it, so fixes reach existing devnets.
@@ -109,9 +126,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     if (rec.node !== dep.recipeSha256 || rec.bootstrap !== boot.recipeSha256) return;
     // Versions are <commit date>-<commit>; adopt only a strictly newer build
     // (never downgrade on an agent rollback; undated pins are older).
-    const version = (bin) => spawnSync(bin, ['version'], { encoding: 'utf8', timeout: 10_000 }).stdout.trim();
-    const [was, now] = [version(pinned), version(binary)];
-    const dated = (v) => /^(\d{8}T\d{6}Z)-[0-9a-f]{40}$/.exec(v || '')?.[1];
+    const [was, now] = [versionOf(pinned), versionOf(binary)];
     if (!dated(now) || (dated(was) && dated(was) >= dated(now))) return;
     copyFileSync(binary, `${pinned}.next`); chmodSync(`${pinned}.next`, 0o700); renameSync(`${pinned}.next`, pinned);
     register(name, { upgradeScopes: upgradeScopes(name), dashnet: now });
@@ -387,6 +402,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       if (!phase.plan) { phase = await planPhase(r, dir, phase, n); r.artifacts.phases[n] = phase; save(r); }
       const plan = readJSON(join(dir, phase.plan));
       if (!plan || plan.id !== phase.planId || (n === 0 && plan.id !== r.review?.planId)) throw new Error('reviewed upgrade plan missing');
+      refreshSnapshot(r, dir, plan);
       const who = plan.scope === 'core' ? 'every node one at a time (Core: validators, then the mining node)' : 'validators one at a time';
       const done = step(r, `Upgrade ${who} (dashnet upgrade, scope ${plan.scope})`);
       r.progress = { phase: plan.scope, completed: [], current: null }; save(r);
