@@ -24,7 +24,8 @@ log = lambda m: print(m, file=sys.stderr, flush=True)
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 RPC_PORT = int(cfg['coreRpcPort'])
 ZMQ_PORT = int(cfg.get('coreZmqPort', 29998))
-PASSWORD = json.loads(Path('/var/lib/dashnet/secrets.json').read_text())['rpcPassword']
+# A prebuild runs while dashnet is still deploying Core, before this exists.
+PASSWORD = None if cfg.get('prebuildOnly') else json.loads(Path('/var/lib/dashnet/secrets.json').read_text())['rpcPassword']
 AUX = {'dashnet.auxiliary': cfg.get('auxiliary', '')}
 
 
@@ -333,6 +334,17 @@ except BlockingIOError:
 
 if cfg.get('topupOnly'):
     print(json.dumps(dict(faucetBalance=faucet_wallet())))
+    sys.exit(0)
+
+if cfg.get('prebuildOnly'):
+    # Nothing here needs the chain: build and pull while dashnet deploys it, so
+    # the install after deployment only funds, configures and starts services.
+    ev = cfg['explorerVersion']
+    images = [cfg['quorumServerImage'], cfg['insightImage'], 'postgres:17', 'caddy:2',
+              f'ghcr.io/pshenmic/platform-explorer-api:{ev}', f'ghcr.io/pshenmic/platform-explorer-indexer:{ev}']
+    for image in images:
+        sh('docker', 'pull', '--quiet', image, timeout=1200)
+    print(json.dumps(dict(faucetImage=build_faucet(), frontendImage=build_explorer_frontend(), pulled=len(images))))
     sys.exit(0)
 
 balance = faucet_wallet()

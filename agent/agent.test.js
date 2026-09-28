@@ -356,3 +356,27 @@ test('a resumed upgrade moves to a newer dashnet only when the reviewed plan sti
   await d.executeUpgrade(r());
   assert.match(used.pop(), /20260929T000000Z/);
 });
+
+test('service images are prebuilt on the wallet host without the chain, best effort', async () => {
+  const { prebuildServices } = await import('./services.js');
+  const dplan = { coreNetwork: 'console-9-g1', platformChainId: 'dash-devnet-console-9', ports: {},
+    targets: [{ name: 'wallet-001', role: 'wallet', instanceId: 'i-0aaaaaaaaaaaaaaa1', sshAddress: '198.51.100.9' },
+      { name: 'validators-001', role: 'validator', instanceId: 'i-0aaaaaaaaaaaaaaa2', sshAddress: '198.51.100.10', peerAddress: '198.51.100.10', privateAddress: '10.0.0.10' }] };
+  const d = { displayName: 'Console 9', dnsSuffix: 'networks.dash.org', services: { quorumServer: 'dashpay/quorum-list-server:0.7.0', insightImage: 'dashpay/insight:4.0.10', explorerVersion: '2.5.3', faucetRef: 'b'.repeat(40) } };
+  const lines = [], calls = [];
+  const pool = { exec: async (h, cmd) => {
+    calls.push([h.name, cmd]);
+    const run = cmd.match(/python3 \/opt\/devnet-services\/services\.py (\S+)/);
+    if (!run) return '';
+    const cfg = JSON.parse(Buffer.from(run[1], 'base64').toString());
+    assert.equal(cfg.prebuildOnly, true);
+    assert.equal(cfg.hosts.explorer, 'explorer.console-9.networks.dash.org');
+    return JSON.stringify({ faucetImage: 'devnet-faucet:x', frontendImage: 'devnet-explorer-frontend:y', pulled: 6 });
+  } };
+  await prebuildServices({ r: { id: 'op' }, write: (_, l) => lines.push(l), dplan, d, name: 'devnet-console-9', pool });
+  assert.ok(calls.every(([n]) => n === 'wallet-001'), 'only the wallet host');
+  assert.match(lines.at(-1), /built devnet-faucet:x and devnet-explorer-frontend:y, pulled 6 images/);
+  const failing = { exec: async () => { throw new Error('ssh: connection reset'); } };
+  await prebuildServices({ r: { id: 'op' }, write: (_, l) => lines.push(l), dplan, d, name: 'devnet-console-9', pool: failing });
+  assert.match(lines.at(-1), /connection reset; the install builds them instead/);
+});

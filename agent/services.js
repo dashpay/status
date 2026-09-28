@@ -32,16 +32,57 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // dashnet devnets use fixed default ports (internal/node DefaultPorts).
 const PORTS = { coreRPC: 20002, coreZMQ: 29998, platformRPC: 26657, gateway: 1443 };
 
+// Public-address plans keep the VPC address separately; the Elastic IP is
+// not bound on the instance's interface.
+const vpc = (t) => t.privateAddress || t.peerAddress;
+const host = (t) => ({ name: t.name, instanceId: t.instanceId, publicIp: t.sshAddress, role: t.role });
+
+function servicesConfig(name, d, dplan) {
+  const ports = { ...PORTS, ...(dplan.ports || {}) };
+  const wallet = dplan.targets.find((t) => t.role === 'wallet');
+  const validators = dplan.targets.filter((t) => t.role === 'validator');
+  const relay = validators[0];
+  const names = serviceNames(name, d);
+  return {
+    short: shortName(name), displayName: d.displayName, auxiliary: `${name}/${wallet.name}`, coreNetwork: dplan.coreNetwork, platformChainId: dplan.platformChainId,
+    coreRpcPort: ports.coreRPC, coreZmqPort: ports.coreZMQ, hosts: Object.fromEntries(Object.entries(names).map(([k, v]) => [k, v.host])),
+    quorumServerImage: d.services.quorumServer.startsWith('docker.io/') ? d.services.quorumServer : `docker.io/${d.services.quorumServer}`,
+    insightImage: (d.services.insightImage || 'dashpay/insight:4.0.9').replace(/^(?!docker\.io\/)/, 'docker.io/'),
+    explorerVersion: d.services.explorerVersion, faucetRef: d.services.faucetRef, faucetAmount: d.services.faucetAmount,
+    faucetRateLimit: d.services.faucetRateLimit, faucetFunding: d.services.faucetFunding, epochSeconds: d.services.epochSeconds,
+    tenderdashUrl: `http://${vpc(relay)}:${RELAY_PORT}`,
+    // Validators with Let's Encrypt certificates are verified; self-signed ones are not.
+    trustedGateways: !!dplan.gatewayTls,
+    dapiUrls: validators.slice(0, 5).map((t) => `https://${t.sshAddress}:${ports.gateway}`),
+  };
+}
+
+async function runRemote(pool, wallet, cfg, onLine) {
+  const arg = Buffer.from(JSON.stringify(cfg)).toString('base64');
+  await pool.exec(host(wallet), 'sudo install -d -m 0700 /opt/devnet-services && sudo tee /opt/devnet-services/services.py >/dev/null && sudo chmod 0700 /opt/devnet-services/services.py', REMOTE, 60_000);
+  const out = await pool.exec(host(wallet), `set -o pipefail; { sudo python3 /opt/devnet-services/services.py ${arg} 2>&1 1>&3 | tee /tmp/devnet-services.log >&2; } 3>&1`, null, 100 * 60_000, onLine);
+  return JSON.parse(out.trim().split('\n').pop());
+}
+
+// Build the faucet and explorer frontend and pull every service image while
+// dashnet deploys the chain (about seven minutes the install would otherwise
+// spend afterwards). Best effort: the install builds whatever is missing.
+export async function prebuildServices({ r, write, dplan, d, name, pool }) {
+  const wallet = dplan.targets.find((t) => t.role === 'wallet');
+  try {
+    const result = await runRemote(pool, wallet, { ...servicesConfig(name, d, dplan), prebuildOnly: true }, (line) => write(r.id, `  services (early): ${line}`));
+    write(r.id, `services (early): built ${result.faucetImage} and ${result.frontendImage}, pulled ${result.pulled} images`);
+  } catch (e) {
+    write(r.id, `services (early): ${e.message.slice(0, 300)}; the install builds them instead`);
+  }
+}
+
 export async function deployServices({ r, write, dplan, d, name, pool, r53 }) {
   const ports = { ...PORTS, ...(dplan.ports || {}) };
   const wallet = dplan.targets.find((t) => t.role === 'wallet');
   const validators = dplan.targets.filter((t) => t.role === 'validator');
   const relay = validators[0];
-  // Public-address plans keep the VPC address separately; the Elastic IP is
-  // not bound on the instance's interface.
-  const vpc = (t) => t.privateAddress || t.peerAddress;
   const names = serviceNames(name, d);
-  const host = (t) => ({ name: t.name, instanceId: t.instanceId, publicIp: t.sshAddress, role: t.role });
 
   write(r.id, `services: DNS ${Object.values(names).map((x) => x.host).join(', ')} -> ${wallet.sshAddress}`);
   const change = await r53.send(new ChangeResourceRecordSetsCommand({
@@ -60,23 +101,8 @@ export async function deployServices({ r, write, dplan, d, name, pool, r53 }) {
   const relayLabel = `dashnet.auxiliary=${name}/${relay.name}`;
   await pool.exec(host(relay), `[ "$(sudo docker inspect -f '{{index .Config.Labels "dashnet.auxiliary"}}' devnet-td-relay 2>/dev/null)" = "${name}/${relay.name}" ] || { sudo docker rm -f devnet-td-relay >/dev/null 2>&1; sudo docker run -d --name devnet-td-relay --label ${relayLabel} --restart unless-stopped --network host --log-driver local alpine/socat:1.8.0.3 TCP-LISTEN:${RELAY_PORT},bind=${vpc(relay)},fork,reuseaddr TCP:127.0.0.1:${ports.platformRPC}; }`, null, 180_000);
 
-  const cfg = {
-    short: shortName(name), displayName: d.displayName, auxiliary: `${name}/${wallet.name}`, coreNetwork: dplan.coreNetwork, platformChainId: dplan.platformChainId,
-    coreRpcPort: ports.coreRPC, coreZmqPort: ports.coreZMQ, hosts: Object.fromEntries(Object.entries(names).map(([k, v]) => [k, v.host])),
-    quorumServerImage: d.services.quorumServer.startsWith('docker.io/') ? d.services.quorumServer : `docker.io/${d.services.quorumServer}`,
-    insightImage: (d.services.insightImage || 'dashpay/insight:4.0.9').replace(/^(?!docker\.io\/)/, 'docker.io/'),
-    explorerVersion: d.services.explorerVersion, faucetRef: d.services.faucetRef, faucetAmount: d.services.faucetAmount,
-    faucetRateLimit: d.services.faucetRateLimit, faucetFunding: d.services.faucetFunding, epochSeconds: d.services.epochSeconds,
-    tenderdashUrl: `http://${vpc(relay)}:${RELAY_PORT}`,
-    // Validators with Let's Encrypt certificates are verified; self-signed ones are not.
-    trustedGateways: !!dplan.gatewayTls,
-    dapiUrls: validators.slice(0, 5).map((t) => `https://${t.sshAddress}:${ports.gateway}`),
-  };
-  write(r.id, 'services: installing on wallet host (builds faucet and explorer frontend; first run takes several minutes)');
-  const arg = Buffer.from(JSON.stringify(cfg)).toString('base64');
-  await pool.exec(host(wallet), 'sudo install -d -m 0700 /opt/devnet-services && sudo tee /opt/devnet-services/services.py >/dev/null && sudo chmod 0700 /opt/devnet-services/services.py', REMOTE, 60_000);
-  const out = await pool.exec(host(wallet), `set -o pipefail; { sudo python3 /opt/devnet-services/services.py ${arg} 2>&1 1>&3 | tee /tmp/devnet-services.log >&2; } 3>&1`, null, 100 * 60_000, (line) => write(r.id, `  ${line}`));
-  const result = JSON.parse(out.trim().split('\n').pop());
+  write(r.id, 'services: installing on wallet host (builds faucet and explorer frontend unless already built)');
+  const result = await runRemote(pool, wallet, servicesConfig(name, d, dplan), (line) => write(r.id, `  ${line}`));
   const { promoCodes, ...shown } = result;
   write(r.id, `services: ${JSON.stringify(shown)}`);
   const bad = ['quorums', 'insight', 'faucet', 'explorerApi', 'explorerFrontend'].filter((k) => !result[k] || result[k] >= 500);

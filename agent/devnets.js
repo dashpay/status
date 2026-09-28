@@ -15,7 +15,7 @@ import { EC2Client, DescribeInstancesCommand, DescribeVolumesCommand, TerminateI
 import { Route53Client, ChangeResourceRecordSetsCommand, ListResourceRecordSetsCommand } from '@aws-sdk/client-route-53';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { COMPONENTS, COMPONENT_REPOS, devnetChain, readJSON, validateDevnetDefaults, writeAtomic } from '../shared/settings.js';
-import { deployServices, serviceNames, shortName } from './services.js';
+import { deployServices, prebuildServices, serviceNames, shortName } from './services.js';
 
 const NAME = /^devnet-[a-z][a-z0-9-]{1,30}$/;
 const PRICES = { 't4g.small': 0.0168, 't4g.medium': 0.0336, 't4g.large': 0.0672, 't4g.xlarge': 0.1344, 't3.medium': 0.0416, 't3.large': 0.0832, 't3.xlarge': 0.1664, 'm7g.medium': 0.0408, 'm7g.large': 0.0816, 'm6a.large': 0.0864, 'm7i.large': 0.1008, 'c7g.large': 0.0725 };
@@ -264,7 +264,11 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     // forming; dashnet then waits forever for it. Revive such nodes meanwhile.
     const watcher = setInterval(() => reviveBanned(r, name, dplan).catch((e) => write(r.id, `revive: ${e.message}`)), 60_000);
     try {
+      // Service images need no chain: build them on the wallet host meanwhile.
+      // Best effort (it never rejects); the install builds whatever is missing.
+      const early = prebuildServices({ r, write, dplan, d, name, pool });
       await run(r, 'deploy', ['deploy', '--plan', join(dir, 'deployment.json'), '--confirm', dplan.id, ...access(dir), '--timeout', '100m', '--observation-window', '90s', '--out', join(dir, `deployed.${stamp()}.json`)], { timeoutMs: 101 * 60_000 });
+      await early;
     } finally { clearInterval(watcher); }
     done('ok');
     register(name, { status: 'services' });
