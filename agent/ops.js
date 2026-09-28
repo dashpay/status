@@ -277,6 +277,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     } catch (e) {
       r.status = r.cancelRequested ? 'cancelled' : 'failed';
       r.error = e.message.slice(0, 500);
+      for (const st of r.steps) if (st.status === 'running') { st.status = 'failed'; st.finishedAt = new Date().toISOString(); st.detail ??= r.error.slice(0, 200); }
       write(r.id, `error: ${r.error}`);
     }
     r.cancelRequested = undefined;
