@@ -28,7 +28,11 @@ export function serviceEndpoints(name, d) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// dashnet devnets use fixed default ports (internal/node DefaultPorts).
+const PORTS = { coreRPC: 20002, platformRPC: 26657, gateway: 1443 };
+
 export async function deployServices({ r, write, dplan, d, name, pool, r53 }) {
+  const ports = { ...PORTS, ...(dplan.ports || {}) };
   const wallet = dplan.targets.find((t) => t.role === 'wallet');
   const validators = dplan.targets.filter((t) => t.role === 'validator');
   const relay = validators[0];
@@ -48,17 +52,17 @@ export async function deployServices({ r, write, dplan, d, name, pool, r53 }) {
 
   // Tenderdash RPC stays on loopback on validators; the explorer indexer needs a
   // full-history RPC, so relay one validator's RPC to its VPC address only.
-  write(r.id, `services: Tenderdash RPC relay ${relay.name} ${relay.peerAddress}:${RELAY_PORT} -> 127.0.0.1:${dplan.ports.platformRPC || 26657}`);
-  await pool.exec(host(relay), `sudo docker inspect devnet-td-relay >/dev/null 2>&1 || sudo docker run -d --name devnet-td-relay --restart unless-stopped --network host --log-driver local alpine/socat:1.8.0.3 TCP-LISTEN:${RELAY_PORT},bind=${relay.peerAddress},fork,reuseaddr TCP:127.0.0.1:${dplan.ports.platformRPC || 26657}`, null, 180_000);
+  write(r.id, `services: Tenderdash RPC relay ${relay.name} ${relay.peerAddress}:${RELAY_PORT} -> 127.0.0.1:${ports.platformRPC}`);
+  await pool.exec(host(relay), `sudo docker inspect devnet-td-relay >/dev/null 2>&1 || sudo docker run -d --name devnet-td-relay --restart unless-stopped --network host --log-driver local alpine/socat:1.8.0.3 TCP-LISTEN:${RELAY_PORT},bind=${relay.peerAddress},fork,reuseaddr TCP:127.0.0.1:${ports.platformRPC}`, null, 180_000);
 
   const cfg = {
     short: shortName(name), displayName: d.displayName, coreNetwork: dplan.coreNetwork, platformChainId: dplan.platformChainId,
-    coreRpcPort: dplan.ports.coreRPC || 20002, hosts: Object.fromEntries(Object.entries(names).map(([k, v]) => [k, v.host])),
+    coreRpcPort: ports.coreRPC, hosts: Object.fromEntries(Object.entries(names).map(([k, v]) => [k, v.host])),
     quorumServerImage: d.services.quorumServer.startsWith('docker.io/') ? d.services.quorumServer : `docker.io/${d.services.quorumServer}`,
     explorerVersion: d.services.explorerVersion, faucetRef: d.services.faucetRef, faucetAmount: d.services.faucetAmount,
     faucetRateLimit: d.services.faucetRateLimit, faucetFunding: d.services.faucetFunding, epochSeconds: d.services.epochSeconds,
     tenderdashUrl: `http://${relay.peerAddress}:${RELAY_PORT}`,
-    dapiUrls: validators.slice(0, 5).map((t) => `https://${t.sshAddress}:${dplan.ports.gateway || 1443}`),
+    dapiUrls: validators.slice(0, 5).map((t) => `https://${t.sshAddress}:${ports.gateway}`),
   };
   write(r.id, 'services: installing on wallet host (builds faucet and explorer frontend; first run takes several minutes)');
   const arg = Buffer.from(JSON.stringify(cfg)).toString('base64');
