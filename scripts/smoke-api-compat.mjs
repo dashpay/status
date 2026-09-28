@@ -10,9 +10,10 @@ import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createConsole } from '../server/console.js';
 import { checkLegacyAPI } from './check-legacy-api.mjs';
+import { chromium } from 'playwright';
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'status-api-'));
-let collector, proxy, consoleServer;
+let collector, proxy, consoleServer, browser;
 const stop = async (child) => {
   if (!child || child.exitCode !== null) return;
   const exited = once(child, 'exit'); child.kill('SIGTERM'); await exited;
@@ -34,7 +35,7 @@ try {
   const config = JSON.parse(fs.readFileSync('examples/networks.json'));
   config.origin = `http://127.0.0.1:${publicPort}`; config.operationsDir = path.join(temp, 'operations');
   for (const n of config.networks) for (const field of ['snapshot', 'health', 'collection', 'plan']) n[field] = path.join(temp, n.name + '-' + field + '.json');
-  consoleServer = createConsole(config).listen(consolePort, '127.0.0.1'); await once(consoleServer, 'listening');
+  consoleServer = createConsole(config, { auth: { clientId: 'fixture-client', clientSecret: 'fixture-secret' } }).listen(consolePort, '127.0.0.1'); await once(consoleServer, 'listening');
   const key = path.join(temp, 'fixture-key');
   execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', key]);
   const inventory = path.join(temp, 'inventory');
@@ -49,6 +50,9 @@ http {
   access_log off;
   client_body_temp_path ${temp}/client;
   proxy_temp_path ${temp}/proxy;
+  fastcgi_temp_path ${temp}/fastcgi;
+  uwsgi_temp_path ${temp}/uwsgi;
+  scgi_temp_path ${temp}/scgi;
   server {
     listen 127.0.0.1:${publicPort};
     include ${temp}/legacy-api.conf;
@@ -76,10 +80,27 @@ http {
     }
     const result = await checkLegacyAPI(config.origin, { expectedNodes: 1, token });
     console.log(JSON.stringify({ authentication: token ? 'bearer' : 'public', ...result }));
+    // Exercise the actual frontend through the production proxy. Direct console
+    // tests cannot catch mode detection accidentally reading the legacy API.
+    browser ||= await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    const pageErrors = [];
+    page.on('pageerror', (error) => pageErrors.push(error.message));
+    await page.goto(config.origin);
+    await page.getByRole('link', { name: 'Sign in with GitHub' }).waitFor();
+    await page.getByRole('navigation', { name: 'Networks' }).getByRole('link', { name: /Moutai/ }).click();
+    await page.waitForURL('**/networks/devnet-moutai');
+    assert.ok((await page.locator('body').innerText()).includes('Moutai'));
+    const health = await page.evaluate(() => fetch('/api/health').then((r) => r.json()));
+    assert.equal(health.totalNodes, 1);
+    assert.equal(health.service, undefined, 'Original API must not become a console capability endpoint');
+    assert.deepEqual(pageErrors, []);
+    await page.close();
     await stop(collector); collector = null;
   }
 } finally {
   await stop(collector); await stop(proxy);
+  if (browser) await browser.close();
   if (consoleServer) await new Promise((resolve) => consoleServer.close(resolve));
   fs.rmSync(temp, { recursive: true, force: true });
 }
