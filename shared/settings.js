@@ -26,8 +26,9 @@ export const DEFAULT_SETTINGS = {
       name: 'testnet', displayName: 'Testnet', tag: 'testnet', chainType: 'testnet', coreNetwork: 'test', p2pPort: 19999,
       public: true, deployable: true, showBalances: true,
       endpoints: endpoints('testnet', [
-        { label: 'Quorums', url: 'https://quorums.testnet.networks.dash.org/' },
-        { label: 'DAPI seed-1', url: 'https://seed-1.testnet.networks.dash.org:1443/' },
+        { label: 'Quorums', url: 'https://quorums.testnet.networks.dash.org/health' },
+        { label: 'DAPI seed-1', url: 'https://seed-1.testnet.networks.dash.org:1443/', kind: 'dapi' },
+        { label: 'DAPI seed-2', url: 'https://seed-2.testnet.networks.dash.org:1443/', kind: 'dapi' },
       ]),
       observationWindow: '4m', operationTimeout: '110m',
     },
@@ -37,8 +38,8 @@ export const DEFAULT_SETTINGS = {
       endpoints: [
         { label: 'Insight', url: 'https://insight.moutai.networks.dash.org/insight/' },
         { label: 'Faucet', url: 'https://faucet.moutai.networks.dash.org/' },
-        { label: 'Quorums', url: 'https://quorums.moutai.networks.dash.org/' },
-        { label: 'DAPI seed-1', url: 'https://seed-1.moutai.networks.dash.org:1443/' },
+        { label: 'Quorums', url: 'https://quorums.moutai.networks.dash.org/health' },
+        { label: 'DAPI seed-1', url: 'https://seed-1.moutai.networks.dash.org:1443/', kind: 'dapi' },
       ],
       observationWindow: '4m', operationTimeout: '110m',
     },
@@ -46,8 +47,7 @@ export const DEFAULT_SETTINGS = {
       name: 'mainnet', displayName: 'Mainnet', tag: 'mainnet-support', chainType: 'mainnet', coreNetwork: 'main', p2pPort: 9999,
       public: true, deployable: false, showBalances: false,
       endpoints: [
-        { label: 'Insight', url: 'https://insight.mainnet-support.networks.dash.org/insight/' },
-        { label: 'Quorums', url: 'https://quorums.mainnet.networks.dash.org/' },
+        { label: 'Quorums', url: 'https://quorums.mainnet.networks.dash.org/health' },
       ],
       observationWindow: '4m', operationTimeout: '110m',
     },
@@ -96,6 +96,7 @@ export function validateSettings(input) {
       if (typeof e.label !== 'string' || !e.label.trim() || e.label.length > 40) throw new Error(`${n.name}: endpoint label required`);
       let url; try { url = new URL(e.url); } catch { throw new Error(`${n.name}: endpoint URL invalid`); }
       if (url.protocol !== 'https:' || url.username || url.password) throw new Error(`${n.name}: endpoints must be credential-free https URLs`);
+      if (e.kind !== undefined && !['http', 'dapi'].includes(e.kind)) throw new Error(`${n.name}: endpoint kind must be http or dapi`);
     }
     if (n.description !== undefined && (typeof n.description !== 'string' || n.description.length > 500)) throw new Error(`${n.name}: description too long`);
   }

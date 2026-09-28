@@ -40,6 +40,51 @@ export async function httpCheck(url, timeoutMs = 8000) {
   }
 }
 
+// Public port of the dashmate gateway (DAPI), e.g. "0.0.0.0:1443->10000/tcp".
+export function gatewayPublicPort(data) {
+  const gw = (data?.containers || []).find((c) => c.repo === 'dashpay/envoy' && c.running);
+  for (const p of gw?.ports || []) {
+    const m = /^(0\.0\.0\.0|):(\d+)->(10000|443)\/tcp$/.exec(p);
+    if (m) return Number(m[2]);
+  }
+  return null;
+}
+
+function protobuf(buf) {
+  const fields = {};
+  let i = 0;
+  const varint = () => { let shift = 0n, v = 0n; for (;;) { const b = buf[i++]; v |= BigInt(b & 0x7f) << shift; if (b < 0x80) return v; shift += 7n; } };
+  while (i < buf.length) {
+    const key = Number(varint()), n = key >> 3, wire = key & 7;
+    if (wire === 0) fields[n] = varint();
+    else if (wire === 2) { const len = Number(varint()); fields[n] = buf.subarray(i, i + len); i += len; }
+    else if (wire === 1) { fields[n] = buf.subarray(i, i + 8); i += 8; }
+    else if (wire === 5) { fields[n] = buf.subarray(i, i + 4); i += 4; }
+    else throw new Error('protobuf wire type');
+  }
+  return fields;
+}
+
+// DAPI Platform.getStatus over gRPC-Web, as a browser SDK would call it.
+export async function dapiCheck(url, timeoutMs = 8000) {
+  const start = Date.now();
+  try {
+    const r = await fetch(new URL('/org.dash.platform.dapi.v0.Platform/getStatus', url), {
+      method: 'POST', headers: { 'content-type': 'application/grpc-web+proto', 'x-grpc-web': '1' },
+      body: Buffer.from([0, 0, 0, 0, 2, 0x0a, 0]), signal: AbortSignal.timeout(timeoutMs),
+    });
+    const body = Buffer.from(await r.arrayBuffer());
+    if (r.status !== 200 || body.length < 5 || body[0] !== 0) return { url, status: r.status, ok: false, ms: Date.now() - start, error: r.headers.get('grpc-message') || 'no gRPC message' };
+    const v0 = protobuf(protobuf(body.subarray(5, 5 + body.readUInt32BE(1)))[1]);
+    const version = protobuf(v0[1] || Buffer.alloc(0)), software = protobuf(version[1] || Buffer.alloc(0));
+    const chain = protobuf(v0[3] || Buffer.alloc(0)), net = protobuf(v0[4] || Buffer.alloc(0));
+    return { url, status: 200, ok: true, ms: Date.now() - start, height: chain[4] != null ? Number(chain[4]) : null,
+      version: software[1] ? software[1].toString() : null, chainId: net[1] ? net[1].toString() : null };
+  } catch (e) {
+    return { url, status: null, ok: false, ms: Date.now() - start, error: e.cause?.code || e.name || e.message };
+  }
+}
+
 export function createCollector({ pool, stateDir, log = console.log }) {
   const previous = new Map();
 
@@ -65,7 +110,8 @@ export function createCollector({ pool, stateDir, log = console.log }) {
       const port = probe.data?.core?.masternode?.service?.split(':').pop();
       const p2p = host.state === 'running' && host.publicIp && ['validator', 'masternode', 'seed'].includes(host.role)
         ? await tcpCheck(host.publicIp, Number(port) || network.p2pPort) : null;
-      const dapiPublic = host.role === 'validator' && host.state === 'running' && host.publicIp ? await tcpCheck(host.publicIp, 443) : null;
+      const gatewayPort = gatewayPublicPort(probe.data || previous.get(`${network.name}/${host.instanceId}`)?.data);
+      const dapiPublic = host.role === 'validator' && host.state === 'running' && host.publicIp && gatewayPort ? await tcpCheck(host.publicIp, gatewayPort) : null;
       const key = `${network.name}/${host.instanceId}`;
       // Keep the last successful data next to a failed attempt: the failure is
       // still the host's current status, the old values are labelled with their time.
@@ -73,7 +119,7 @@ export function createCollector({ pool, stateDir, log = console.log }) {
       const last = probe.ok ? null : previous.get(key) || null;
       return { ...host, probe, lastGood: last ? { at: last.at, data: last.data } : null, p2p, dapiPublic };
     });
-    const endpoints = await Promise.all((network.endpoints || []).map(async (e) => ({ label: e.label, ...(await httpCheck(e.url)) })));
+    const endpoints = await Promise.all((network.endpoints || []).map(async (e) => ({ label: e.label, kind: e.kind || 'http', ...(await (e.kind === 'dapi' ? dapiCheck(e.url) : httpCheck(e.url))) })));
     const state = { network: network.name, generatedAt: new Date().toISOString(), ...meta, endpoints, hosts: results };
     writeAtomic(join(stateDir, `${network.name}.json`), JSON.stringify(state));
     const failed = results.filter((h) => h.probe.error).length;

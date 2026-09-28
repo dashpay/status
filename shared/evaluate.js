@@ -3,7 +3,8 @@
 import { COMPONENT_REPOS } from './settings.js';
 
 export const LEVELS = ['ok', 'warn', 'down', 'unreachable', 'stopped'];
-const RANK = { ok: 0, stopped: 1, warn: 2, down: 3, unreachable: 3 };
+// `info` facts are shown with the host but never change its status.
+const RANK = { info: 0, ok: 0, stopped: 1, warn: 2, down: 3, unreachable: 3 };
 const COMPONENT_OF = Object.fromEntries(Object.entries(COMPONENT_REPOS).map(([c, r]) => [r, c]));
 const CORE_ROLES = new Set(['validator', 'masternode', 'seed', 'web', 'wallet', 'miner', 'mixer']);
 
@@ -45,7 +46,7 @@ export function evaluateNetwork(network, state, settings, now = Date.now()) {
     else {
       const c = d.core;
       if (CORE_ROLES.has(h.role)) {
-        if (!c) flag('down', 'Core RPC not answering');
+        if (!c) flag('down', (d.containers || []).some((k) => k.running) ? 'Core RPC not answering' : 'no Dash services running on host');
         else {
           if (c.chain && network.coreNetwork && !chainMatches(c.chain, network)) flag('down', `Core on chain "${c.chain}"`);
           if (c.ibd) flag('warn', `Core initial sync ${Math.round((c.progress || 0) * 1000) / 10}%`);
@@ -59,7 +60,7 @@ export function evaluateNetwork(network, state, settings, now = Date.now()) {
             if (mn?.posePenalty > 0) flag('warn', `PoSe penalty ${mn.posePenalty}`);
           }
           for (const w of c.wallets || []) {
-            if (/faucet/i.test(w.name) && (w.trusted ?? 0) < t.balanceWarn) flag('warn', `wallet ${w.name} balance ${w.trusted}`);
+            if (h.role === 'wallet' && /faucet/i.test(w.name) && (w.trusted ?? 0) < t.balanceWarn) flag('warn', `wallet ${w.name} balance ${w.trusted}`);
           }
         }
       }
@@ -76,7 +77,10 @@ export function evaluateNetwork(network, state, settings, now = Date.now()) {
       }
       if (h.p2p && !h.p2p.ok) flag('warn', `P2P :${h.p2p.port} not reachable from status host (${h.p2p.error})`);
       for (const k of d.containers || []) {
-        if (!k.running && !/rate_limiter_metrics/.test(k.name)) flag(k.state === 'exited' && k.exitCode === 0 ? 'warn' : 'down', `container ${k.name} ${k.state}${k.exitCode ? ` (exit ${k.exitCode})` : ''}`);
+        const why = `container ${k.name} ${k.state}${k.exitCode ? ` (exit ${k.exitCode})` : ''}`;
+        // A stopped container is an orphan when a running one serves the same image repo.
+        const replaced = (d.containers || []).some((o) => o !== k && o.running && o.repo === k.repo);
+        if (!k.running) flag(replaced || k.state === 'created' ? 'info' : 'down', replaced ? `${why}; superseded by a running ${k.repo} container` : why);
         else if (k.health === 'unhealthy') flag('warn', `container ${k.name} unhealthy`);
       }
       const s = d.system;
@@ -149,7 +153,7 @@ export function projectNetwork(network, evaluation, state, operator) {
     name: network.name, displayName: network.displayName, description: network.description || '', chainType: network.chainType, coreNetwork: network.coreNetwork,
     public: network.public, deployable: network.deployable, level: evaluation.level, generatedAt: evaluation.generatedAt, ageSeconds: evaluation.ageSeconds,
     pollSeconds: state?.pollSeconds || null, discovery: state?.discovery ? { at: state.discovery.at, error: operator ? state.discovery.error : state.discovery.error ? 'discovery failed' : null } : null,
-    summary: evaluation.summary, endpoints: (state?.endpoints || []).map((e) => ({ label: e.label, url: e.url, status: e.status, ok: e.ok, ms: e.ms, error: e.error })),
+    summary: evaluation.summary, endpoints: (state?.endpoints || []).map((e) => ({ label: e.label, kind: e.kind, url: e.url, status: e.status, ok: e.ok, ms: e.ms, error: e.error, height: e.height, version: e.version, chainId: e.chainId })),
     hosts, journal: operator ? state?.journal || null : undefined,
   };
 }
