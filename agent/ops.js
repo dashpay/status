@@ -105,6 +105,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
   for (const d of [requests, ops, work]) mkdirSync(d, { recursive: true });
   const running = new Map();
   const live = new Map(); // id -> record object owned by a running run()
+  let shuttingDown = false; // set by shutdown(): stopped operations are interrupted, not failed
   const seen = new Map(); // op file -> { mtime, status } so tick() skips unchanged records
   const recordPath = (id) => join(ops, `${id}.json`);
   const logPath = (id) => join(ops, `${id}.log`);
@@ -318,11 +319,11 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
         r.status = 'succeeded'; r.finishedAt = new Date().toISOString();
       }
     } catch (e) {
-      r.status = r.cancelRequested ? 'cancelled' : 'failed';
+      r.status = r.cancelRequested ? 'cancelled' : shuttingDown ? 'interrupted' : 'failed';
       r.error = e.message.slice(0, 500);
       for (const st of r.steps) if (st.status === 'running') { st.status = 'failed'; st.finishedAt = new Date().toISOString(); st.detail ??= r.error.slice(0, 200); }
       write(r.id, `error: ${r.error}`);
-      if (r.request.action === 'create-devnet' && r.confirmedAt) devnets.markFailed?.(r.network);
+      if (r.request.action === 'create-devnet' && r.confirmedAt && !shuttingDown) devnets.markFailed?.(r.network);
     }
     r.cancelRequested = undefined;
     live.delete(r.id);
@@ -399,6 +400,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
   // SIGTERM each running dashnet and wait, so it journals its state and
   // releases its claim instead of being killed mid-step.
   async function shutdown(ms = 25_000) {
+    shuttingDown = true;
     const children = [...running.values()].map((x) => x.child).filter(Boolean);
     for (const c of children) c.kill('SIGTERM');
     await Promise.race([Promise.all(children.map((c) => new Promise((res) => (c.exitCode !== null ? res() : c.once('close', res))))), new Promise((res) => setTimeout(res, ms))]);

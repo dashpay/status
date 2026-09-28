@@ -68,7 +68,7 @@ export async function deployServices({ r, write, dplan, d, name, pool, r53 }) {
   write(r.id, 'services: installing on wallet host (builds faucet and explorer frontend; first run takes several minutes)');
   const arg = Buffer.from(JSON.stringify(cfg)).toString('base64');
   await pool.exec(host(wallet), 'sudo install -d -m 0700 /opt/devnet-services && sudo tee /opt/devnet-services/services.py >/dev/null && sudo chmod 0700 /opt/devnet-services/services.py', REMOTE, 60_000);
-  const out = await pool.exec(host(wallet), `sudo python3 /opt/devnet-services/services.py ${arg} 2>/tmp/devnet-services.log; rc=$?; sudo tail -c 4000 /tmp/devnet-services.log >&2; exit $rc`, null, 100 * 60_000, (line) => write(r.id, `  ${line}`));
+  const out = await pool.exec(host(wallet), `set -o pipefail; { sudo python3 /opt/devnet-services/services.py ${arg} 2>&1 1>&3 | tee /tmp/devnet-services.log >&2; } 3>&1`, null, 100 * 60_000, (line) => write(r.id, `  ${line}`));
   const result = JSON.parse(out.trim().split('\n').pop());
   write(r.id, `services: ${JSON.stringify(result)}`);
   const bad = ['quorums', 'faucet', 'explorerApi', 'explorerFrontend'].filter((k) => !result[k] || result[k] >= 500);

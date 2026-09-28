@@ -12,7 +12,9 @@ export default function Operation({ name, id }) {
   const [pending, setPending] = useState(false);
   if (!session.loaded) return null;
   if (!session.memberOf?.includes(name)) return <div className="mt-6"><Empty>Access to this network required.</Empty></div>;
-  const operator = session.operatorOf?.includes(name);
+  // Lifecycle operations (devnet create/delete/services, Platform reset) are admin-only.
+  const lifecycle = ['create-devnet', 'delete-devnet', 'devnet-services', 'platform-reset'].includes(op?.request?.action);
+  const operator = lifecycle ? !!session.admin : session.operatorOf?.includes(name);
   if (error) return <div className="mt-6"><Err error={error} /></div>;
   if (!op) return <div className="mt-6 text-dim">Loading…</div>;
   const q = op.request;

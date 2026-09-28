@@ -96,7 +96,10 @@ async function loop() {
   const nextKey = JSON.stringify([settings.aws.region, settings.aws.tagKey]);
   if (nextKey !== awsKey) { awsKey = nextKey; discover = createDiscovery({ region: settings.aws.region, tagKey: settings.aws.tagKey }); lastDiscovery = 0; log('aws settings changed; discovery rebuilt'); }
   const names = new Set(settings.networks.map((n) => n.name));
-  if (Date.now() - lastDiscovery > settings.discoverySeconds * 1000 || !inventory.at || settings.networks.some((n) => !inventory.networks[n.name])) {
+  // Missing inventory retries sooner than the schedule, but never in a tight loop.
+  const missing = !inventory.at || settings.networks.some((n) => !inventory.networks[n.name]);
+  const since = Date.now() - lastDiscovery;
+  if (since > settings.discoverySeconds * 1000 || (missing && since > 30_000)) {
     lastDiscovery = Date.now();
     await refreshInventory();
   }

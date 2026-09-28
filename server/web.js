@@ -14,6 +14,8 @@ import { validateRequest } from '../agent/ops.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
+const LIFECYCLE_ACTIONS = ['create-devnet', 'delete-devnet', 'devnet-services', 'platform-reset'];
+
 export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, clock = Date.now } = {}) {
   const settingsPath = join(dataDir, 'settings.json');
   const dirs = { state: join(dataDir, 'state'), requests: join(dataDir, 'requests'), ops: join(dataDir, 'ops') };
@@ -140,7 +142,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     const n = settings.networks.find((x) => x.name === req.params.name);
     if (!n) return res.status(404).json({ error: 'Network not found' });
     const body = req.body || {};
-    if (['delete-devnet', 'devnet-services', 'platform-reset'].includes(body.action) && !isAdmin(req)) return res.status(403).json({ error: 'Only admins manage devnet lifecycle, services and Platform resets' });
+    if (LIFECYCLE_ACTIONS.includes(body.action) && !isAdmin(req)) return res.status(403).json({ error: 'Only admins manage devnet lifecycle, services and Platform resets' });
     const q = { id: randomUUID(), network: n.name, action: body.action, nodes: body.nodes || [], components: body.components || [], images: body.images || {}, options: body.options || {}, ...(body.confirmName ? { confirmName: body.confirmName } : {}), ...(body.services ? { services: body.services } : {}) };
     try { validateRequest(settings, q, registry()); } catch (e) { return res.status(400).json({ error: e.message }); }
     const busy = listOps(n.name).find((r) => ['queued', 'preparing', 'confirmed', 'running'].includes(r.status));
@@ -195,6 +197,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
       if (!UUID.test(req.params.id)) return res.status(400).json({ error: 'invalid id' });
       const r = readJSON(join(dirs.ops, `${req.params.id}.json`));
       if (type === 'confirm' && (r?.status !== 'review' || req.body?.planId !== r.review?.planId)) return res.status(409).json({ error: 'The plan changed or is not awaiting review' });
+      if (LIFECYCLE_ACTIONS.includes(r?.request?.action) && !isAdmin(req)) return res.status(403).json({ error: 'Only admins confirm, cancel or resume devnet lifecycle and Platform resets' });
       request({ type, id: req.params.id, network: req.network, planId: req.body?.planId, actor: req.session.user });
       res.status(202).json({ ok: true });
     });

@@ -135,3 +135,18 @@ test('operation ids are validated before touching the filesystem', async () => {
     assert.equal((await w.req('/api/ops/not-a-uuid/log')).status, 404);
   } finally { w.close(); }
 });
+
+test('network operators cannot confirm, cancel or resume lifecycle operations', async () => {
+  const w = await start(88, [{ id: 88, login: 'op', role: 'operator', networks: ['testnet'] }]);
+  try {
+    const csrf = await w.login();
+    const id = '0b6f3a52-6d0e-4a36-9d7e-6f1c2b3a4d5e';
+    mkdirSync(join(w.dataDir, 'ops'), { recursive: true });
+    writeFileSync(join(w.dataDir, 'ops', `${id}.json`), JSON.stringify({ id, network: 'testnet', status: 'review', request: { action: 'platform-reset' }, review: { planId: 'p1' }, steps: [] }));
+    for (const type of ['confirm', 'cancel', 'resume']) {
+      const r = await w.req(`/api/ops/${id}/${type}`, { method: 'POST', body: JSON.stringify({ planId: 'p1' }), headers: { 'content-type': 'application/json', 'x-csrf-token': csrf } });
+      assert.equal(r.status, 403, type);
+    }
+    assert.ok(!readdirSync(join(w.dataDir, 'requests')).length, 'no request reaches the agent');
+  } finally { w.close(); }
+});
