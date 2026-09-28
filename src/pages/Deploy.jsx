@@ -1,10 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, navigate, useResource, useSession, ROLE_LABEL, ago } from '../lib.js';
 import { Dot, Empty, Err, Link, Section } from '../ui.jsx';
-import { cmp, newestRelease, reported } from '../releases.js';
+import { COMPONENTS, OPERABLE, REPOS, cmp, newestRelease, reported } from '../releases.js';
 
-const COMPONENTS = ['core', 'drive', 'tenderdash', 'dapi', 'gateway', 'helper'];
-const REPOS = { core: 'dashpay/dashd', drive: 'dashpay/drive', tenderdash: 'dashpay/tenderdash', dapi: 'dashpay/rs-dapi', gateway: 'dashpay/envoy', helper: 'dashpay/dashmate-helper' };
 // Plain-language actions; the dashnet command runs underneath (shown in the header).
 const ACTIONS = [
   { id: 'upgrade', title: 'Upgrade images', text: 'Change the version of selected components. Each image is pinned by digest and swapped one host at a time; the next host waits until the whole fleet passes the health check.' },
@@ -12,7 +10,6 @@ const ACTIONS = [
   { id: 'doctor', title: 'Health check', text: 'Read-only. Observes each host twice across the observation window: services running, Core synced and advancing with ChainLocks, masternode READY, Platform advancing in agreement, DAPI answering.' },
   { id: 'enroll', title: 'Enroll hosts', text: 'One-time, changes nothing running: records each host\'s container setup (images, commands, mounts) as a root-only recovery file and in the shared dashnet journal. Upgrades and restarts need it; they enroll new hosts automatically.' },
 ];
-const OPERABLE = ['validator', 'masternode', 'seed'];
 const ROLE_COMPONENTS = { validator: COMPONENTS, masternode: ['core'], seed: ['core', 'tenderdash'] };
 
 export default function Deploy({ name }) {

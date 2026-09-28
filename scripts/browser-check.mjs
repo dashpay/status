@@ -85,6 +85,16 @@ try {
   const [file] = readdirSync(join(dataDir, 'requests')).filter((f) => f.endsWith('.json'));
   const q = JSON.parse(readFileSync(join(dataDir, 'requests', file), 'utf8'));
   assert.deepEqual([q.action, q.nodes, q.components, q.images, q.options.autoRun], ['upgrade', ['hp-masternode-1'], ['helper'], { helper: 'dashpay/dashmate-helper:4.2.0-beta.5' }, true]);
+  rmSync(join(dataDir, 'requests', file));
+  // From the network page: newer releases are offered, one click rolls them out.
+  await page.goto(origin + '/n/devnet-moutai');
+  await page.getByText('updates available').waitFor();
+  await page.getByRole('button', { name: 'Upgrade now' }).click();
+  await page.waitForURL('**/n/devnet-moutai/ops/*');
+  const [one] = readdirSync(join(dataDir, 'requests')).filter((f) => f.endsWith('.json'));
+  const u = JSON.parse(readFileSync(join(dataDir, 'requests', one), 'utf8'));
+  assert.deepEqual([u.components, u.images, u.options.autoRun, u.nodes.sort()], [['helper'], { helper: 'dashpay/dashmate-helper:4.2.0-beta.5' }, true, ['hp-masternode-1', 'hp-masternode-2', 'hp-masternode-3', 'hp-masternode-4']]);
+  rmSync(join(dataDir, 'requests', one));
   // Admin: prepare (non-destructive) a Platform wipe/redeploy of a dashmate devnet.
   await page.goto(origin + '/n/devnet-moutai/reset');
   await page.getByText('Wipe and redeploy Platform').waitFor();

@@ -1,4 +1,7 @@
 // Release selection for one-click upgrades (pure; shared by the UI and tests).
+export const COMPONENTS = ['core', 'drive', 'tenderdash', 'dapi', 'gateway', 'helper'];
+export const REPOS = { core: 'dashpay/dashd', drive: 'dashpay/drive', tenderdash: 'dashpay/tenderdash', dapi: 'dashpay/rs-dapi', gateway: 'dashpay/envoy', helper: 'dashpay/dashmate-helper' };
+export const OPERABLE = ['validator', 'masternode', 'seed'];
 // Running release per component, from what the nodes report.
 const SEMVER = /^v?(\d+)\.(\d+)\.(\d+)(?:-([a-z]+)\.(\d+))?$/;
 export function reported(h, c) {
