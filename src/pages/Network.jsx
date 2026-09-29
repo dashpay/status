@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
-import { ago, api, bytes, canOperate, canSee, clock, dash, duration, navigate, num, short, useNow, useResource, useSession, ROLE_LABEL } from '../lib.js';
+import { ago, api, bytes, canOperate, canSee, clock, dash, duration, navigate, num, short, span, useNow, useResource, useSession, ROLE_LABEL } from '../lib.js';
 import { Delta, Dot, Empty, Err, Level, Link, Meter, Section, Stat } from '../ui.jsx';
 import Operations from './Operations.jsx';
 import { COMPONENTS, OPERABLE, REPOS, cmp, newestRelease, reported } from '../releases.js';
@@ -346,7 +346,7 @@ function Lifecycle({ n, member, admin }) {
       <span className={`lv-${level}`}>{l.status}</span>
       {l.status === 'ready' && l.platform === 'starting' && <span className="lv-info">Platform starts as soon as the quorums form</span>}
       {l.status === 'ready' && l.platform === 'stopped' && <span className="lv-down">Platform has not started: resume its operation</span>}
-      <span className="text-dim">Core block every {l.blockTimeSeconds}s</span>
+      <span className="text-dim">Core block every {l.blockTimeSeconds}s{l.platformEpochSeconds ? ` · Platform epoch ${span(l.platformEpochSeconds)}` : ''}</span>
       <span className="text-dim">created by {l.createdBy} {l.createdAt ? ago(l.createdAt) + ' ago' : ''}</span>
       {member && l.operation && <Link className="link" to={`/n/${n.name}/ops/${l.operation}`}>creation log</Link>}
       {l.dns && Object.entries(l.dns).map(([k, v]) => <a key={k} className="link mono" href={`https://${v.host}/`} target="_blank" rel="noreferrer">{k}</a>)}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, ago, canOperate, canSee, clock, useNow, useResource, useSession, short } from '../lib.js';
+import { api, ago, canOperate, canSee, clock, span, useNow, useResource, useSession, short } from '../lib.js';
 import { Empty, Err, Link, OpBadge, Section } from '../ui.jsx';
 
 const ACTIVE = new Set(['queued', 'preparing', 'confirmed', 'running']);
@@ -182,7 +182,7 @@ function CreateReview({ op, review, operator, pending, act, expiresIn }) {
             </div>
           </div>
           <div className="panel px-3 py-2 text-[12px] space-y-1">
-            <div><span className="text-dim">Core chain </span><span className="mono">{review.coreNetwork}</span> · <span className="text-dim">Platform </span><span className="mono">{review.platformChainId}</span> · <span className="text-dim">protocol </span><span className="mono">{review.protocol}</span></div>
+            <div><span className="text-dim">Core chain </span><span className="mono">{review.coreNetwork}</span> · <span className="text-dim">Platform </span><span className="mono">{review.platformChainId}</span> · <span className="text-dim">protocol </span><span className="mono">{review.protocol}</span>{review.platformEpochSeconds ? <> · <span className="text-dim">epoch </span><span className="mono">{span(review.platformEpochSeconds)}</span></> : null}{review.blockTimeSeconds ? <> · <span className="text-dim">Core block </span><span className="mono">{review.blockTimeSeconds} s</span></> : null}</div>
             <div><span className="text-dim">Placement </span><span className="mono">{review.network.vpc} / {review.network.subnet} / {review.network.securityGroups.join(',')}</span></div>
             <div><span className="text-dim">AMIs (Ubuntu 24.04) </span><span className="mono">{Object.entries(review.amis).map(([a, id]) => `${a} ${id}`).join(' · ')}</span></div>
             <div className="pt-1 text-dim">Services on the wallet host</div>

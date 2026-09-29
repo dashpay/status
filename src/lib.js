@@ -133,6 +133,14 @@ export function duration(sec) {
   const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
   return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`;
 }
+// 3600 -> "1 h", 600 -> "10 min", 90 -> "90 s"
+export function span(sec) {
+  if (sec == null) return '—';
+  if (sec % 86400 === 0) return `${sec / 86400} d`;
+  if (sec % 3600 === 0) return `${sec / 3600} h`;
+  if (sec % 60 === 0) return `${sec / 60} min`;
+  return `${sec} s`;
+}
 export function clock(ts) {
   if (!ts) return '—';
   return new Date(ts).toISOString().replace('T', ' ').slice(0, 19) + 'Z';

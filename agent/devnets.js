@@ -25,6 +25,8 @@ const SERVICE_KEYS = ['quorumServer', 'insightImage', 'explorerVersion', 'faucet
 const TEXT = /^[A-Za-z0-9 .,_()-]+$/;
 // Core block interval in seconds; devnets created before it was settable use 10.
 const blockSeconds = (d) => d?.blockTimeSeconds || 10;
+// Platform epoch length; dashnet builds without --epoch-time run 3600.
+const epochSeconds = (d) => d?.platformEpochSeconds || 3600;
 // Each health sample must see a new Core block.
 const observeSeconds = (d) => Math.max(90, Math.ceil(2.5 * blockSeconds(d)));
 // A resumed deploy waits for the quorums (well under 60 blocks), then Platform.
@@ -37,7 +39,7 @@ export function validateDevnetRequest(settings, q, registry) {
   if (!NAME.test(q.network || '')) throw new Error('name must look like devnet-<name> (lowercase, 2-31 characters after devnet-)');
   if (settings.networks.some((n) => n.name === q.network) || registry[q.network]) throw new Error(`${q.network} already exists; journal records are permanent, pick a new name`);
   // Placement (VPC, subnet, groups, key, IPAM, DNS zone) always comes from Settings.
-  const allowed = ['displayName', 'description', 'public', 'validators', 'validatorType', 'validatorArch', 'walletType', 'walletArch', 'rootVolumeGiB', 'protocol', 'blockTimeSeconds'];
+  const allowed = ['displayName', 'description', 'public', 'validators', 'validatorType', 'validatorArch', 'walletType', 'walletArch', 'rootVolumeGiB', 'protocol', 'blockTimeSeconds', 'platformEpochSeconds'];
   const extra = Object.keys(q.devnet || {}).filter((k) => !allowed.includes(k) && k !== 'images' && k !== 'services');
   if (extra.length) throw new Error(`not settable per devnet: ${extra.join(', ')}`);
   const services = Object.keys(q.devnet?.services || {}).filter((k) => !SERVICE_KEYS.includes(k));
@@ -187,6 +189,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     rmSync(join(dir, 'ec2-plan.json'), { force: true });
     await run(r, 'provision-plan', ['provision-plan', '--network', join(dir, 'network.yaml'), '--out', join(dir, 'ec2-plan.json')], { timeoutMs: 5 * 60_000 });
     if (blockSeconds(d) !== 10 && !supports(r.network, 'deployment-plan', 'block-time')) throw new Error('this devnet\'s pinned dash-network-go has no --block-time; create it with 10-second blocks or after the agent update');
+    if (epochSeconds(d) !== 3600 && !supports(r.network, 'deployment-plan', 'epoch-time')) throw new Error('this devnet\'s pinned dash-network-go has no --epoch-time; create it with one-hour Platform epochs or after the agent update');
     const plan = readJSON(join(dir, 'ec2-plan.json'));
     const lock = readJSON(join(dir, 'lock.json'));
     done('ok', `plan ${plan.id.slice(0, 12)}`);
@@ -197,7 +200,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       footprint: Object.entries(groups).map(([k, count]) => { const [group, type, arch] = k.split('|'); return { group, type, arch, count }; }),
       instances: plan.targets.length, storageGiB: plan.targets.length * d.rootVolumeGiB, estimate: estimate(d),
       images: Object.fromEntries([...COMPONENTS, ...(d.images.acme ? ['acme'] : [])].map((c) => [c, { ref: d.images[c], digests: lockDigests(lock, c) }])),
-      protocol: d.protocol, coreNetwork: coreNetwork(name), platformChainId: `dash-${coreNetwork(name)}`,
+      protocol: d.protocol, blockTimeSeconds: blockSeconds(d), platformEpochSeconds: epochSeconds(d), coreNetwork: coreNetwork(name), platformChainId: `dash-${coreNetwork(name)}`,
       dns: serviceNames(name, d), services: d.services, amis, network: { vpc: d.vpcId, subnet: d.subnetId, securityGroups: d.securityGroupIds, ipamPool: d.ipamPoolId },
     };
   }
@@ -271,11 +274,11 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       // Public IPAM addresses and Let's Encrypt gateway certificates, as
       // long-running devnets have; explicit so a missing prerequisite fails.
       const tls = d.images.acme && d.ipamPoolId ? ['--gateway-tls', 'letsencrypt', '--acme-email', d.acmeEmail] : ['--gateway-tls', 'self-signed'];
-      await run(r, 'deployment-plan', ['deployment-plan', '--bootstrap-plan', join(dir, 'bootstrap-plan.json'), '--protocol', String(d.protocol), '--advertise', d.ipamPoolId ? 'public' : 'private', ...tls, ...(supports(name, 'deployment-plan', 'block-time') ? ['--block-time', String(blockSeconds(d))] : []), '--out', join(dir, 'deployment.json')]);
+      await run(r, 'deployment-plan', ['deployment-plan', '--bootstrap-plan', join(dir, 'bootstrap-plan.json'), '--protocol', String(d.protocol), '--advertise', d.ipamPoolId ? 'public' : 'private', ...tls, ...(supports(name, 'deployment-plan', 'block-time') ? ['--block-time', String(blockSeconds(d))] : []), ...(supports(name, 'deployment-plan', 'epoch-time') ? ['--epoch-time', String(epochSeconds(d))] : []), '--out', join(dir, 'deployment.json')]);
       done('ok');
     }
     const dplan = readJSON(join(dir, 'deployment.json'));
-    register(name, { coreNetwork: devnetChain(dplan.coreNetwork), platformChainId: dplan.platformChainId });
+    register(name, { coreNetwork: devnetChain(dplan.coreNetwork), platformChainId: dplan.platformChainId, platformEpochSeconds: dplan.platformEpochSeconds || 3600 });
 
     // Platform does not hold up creation: it starts in a follow-up operation as
     // soon as the quorums form, as legacy devnets did. Devnets pinned to a
