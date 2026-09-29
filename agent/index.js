@@ -11,6 +11,7 @@ import { createPool, loadOrCreateKey } from './ssh.js';
 import { createCollector } from './collector.js';
 import { createOps, manifestFor } from './ops.js';
 import { createAwsInventory } from './aws.js';
+import { createConfigWriter } from './devnet-config.js';
 
 const DATA = process.env.STATUS_DATA_DIR || '/var/lib/dash-status';
 const PRIVATE = process.env.AGENT_PRIVATE_DIR || '/var/lib/dash-status-agent';
@@ -26,6 +27,8 @@ let discover = createDiscovery({ region: settings.aws.region, tagKey: settings.a
 let awsKey = JSON.stringify([settings.aws.region, settings.aws.tagKey]);
 const collector = createCollector({ pool, stateDir: dirs.state, log });
 const aws = createAwsInventory({ dataDir: DATA, home: settings.aws.region, log });
+// Connection facts for console devnets (members' Connect tab), from the workdirs.
+const devnetConfigs = createConfigWriter({ privateDir: PRIVATE, dataDir: DATA, registry: () => readJSON(join(DATA, 'devnets.json'), {}), log });
 const wake = new Set();
 const ops = createOps({
   settings: () => settings, dirs, key, pool, binary: BINARY, log,
@@ -127,6 +130,7 @@ async function main() {
   const inventoryTick = () => aws.collect().catch((e) => log('aws inventory failed:', e.message));
   setTimeout(inventoryTick, 20_000);
   setInterval(inventoryTick, 10 * 60_000);
+  setInterval(() => { try { devnetConfigs(); } catch (e) { log('devnet configs:', e.message); } }, 30_000);
   for (;;) {
     await loop().catch((e) => log('loop:', e.message));
     await new Promise((r) => setTimeout(r, 2000));
