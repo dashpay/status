@@ -156,7 +156,8 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
       };
       child.stderr.on('data', onData);
       child.stdout.on('data', () => {}); // JSON results go to --out files
-      const timer = timeoutMs ? setTimeout(() => child.kill('SIGTERM'), timeoutMs) : null;
+      // Node clamps delays above 2^31-1 ms to 1 ms: never let a long budget kill at once.
+      const timer = timeoutMs ? setTimeout(() => child.kill('SIGTERM'), Math.min(timeoutMs, 2 ** 31 - 1)) : null;
       child.on('error', (e) => { write(r.id, `failed to start dashnet: ${e.message}`); });
       child.on('close', (code, signal) => {
         clearTimeout(timer);
@@ -281,10 +282,18 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
       if (m) { p.completed.push(m[1]); p.current = null; }
       m = /^managed health gate waiting: (.*)$/.exec(line);
       p.waiting = m ? m[1].slice(0, 300) : undefined;
+      // A replaced node may take minutes to serve again (a new Core can migrate
+      // its indexes on first start); dashnet waits on that node alone.
+      m = /^managed target (\S+) starting: (.*)$/.exec(line);
+      if (m) { p.phase = 'node-startup'; p.starting = `${m[1]}: ${m[2]}`.slice(0, 300); }
+      if (/^managed target \S+ (ready|applied)$/.test(line)) p.starting = undefined;
       save(r);
     };
-    const ms = toMs(timeout);
-    const c = await dashnet(r, [`managed-${plan.operation}`, '--plan', join(dir, 'plan.json'), '--confirm', plan.id, ...access(dir), '--observation-window', window, '--timeout', timeout, '--out', join(dir, `result-${Date.now()}.json`)], { timeoutMs: ms + 60_000, onLine });
+    // The configured timeout is a per-node budget: nodes are replaced one at a
+    // time, each behind its own startup wait and fleet health gate.
+    const budget = operationBudget(timeout, r.review?.targets?.length || r.request.nodes.length);
+    const c = await dashnet(r, [`managed-${plan.operation}`, '--plan', join(dir, 'plan.json'), '--confirm', plan.id, ...access(dir), '--observation-window', window, '--timeout', budget.flag, '--out', join(dir, `result-${Date.now()}.json`)], { timeoutMs: budget.ms + 60_000, onLine });
+    if (r.progress.starting) { r.progress.starting = undefined; save(r); }
     if (c !== 0) { done('failed'); throw new Error(r.cancelRequested ? 'cancelled by operator' : 'operation stopped; the journal keeps progress. Resume continues the same plan.'); }
     done('ok');
     // Remember which tag each pinned digest came from so the board can show it.
@@ -297,7 +306,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
   async function doctor(r, dir) {
     const { window } = validateRequest(getSettings(), r.request);
     const done = step(r, 'Health check (managed-doctor)');
-    const c = await dashnet(r, ['managed-doctor', '--snapshot', join(dir, 'snapshot.json'), ...access(dir), '--observation-window', window, '--timeout', '20m', '--out', join(dir, 'health.json')], { timeoutMs: 21 * 60_000 });
+    const c = await dashnet(r, ['managed-doctor', '--snapshot', join(dir, 'snapshot.json'), ...access(dir), '--observation-window', window, '--timeout', '40m', '--out', join(dir, 'health.json')], { timeoutMs: 41 * 60_000 });
     const h = readJSON(join(dir, 'health.json'));
     const nodes = Object.fromEntries(r.request.nodes.map((n) => [n, h?.nodes?.[n] ? { healthy: !!h.nodes[n].healthy, status: h.nodes[n].status, problems: h.nodes[n].problems || [] } : null]));
     r.result = { healthy: r.request.nodes.every((n) => nodes[n]?.healthy), nodes };
@@ -441,4 +450,10 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
 export function toMs(d) {
   const m = /^(\d+)(s|m|h)$/.exec(d);
   return Number(m[1]) * { s: 1000, m: 60_000, h: 3_600_000 }[m[2]];
+}
+// A week at most: longer is a typo, and Node timers top out near 24.8 days.
+const MAX_BUDGET_MS = 7 * 24 * 3_600_000;
+export function operationBudget(perNode, nodes) {
+  const ms = Math.min(MAX_BUDGET_MS, toMs(perNode) * Math.max(1, nodes || 1));
+  return { ms, flag: ms % 60_000 ? `${Math.ceil(ms / 1000)}s` : `${ms / 60_000}m` };
 }
