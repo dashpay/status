@@ -465,3 +465,38 @@ test('the operation timeout is a per-node budget', () => {
   assert.equal(operationBudget('2h', 0).flag, '120m');
   assert.deepEqual(operationBudget('4h', 200), { ms: 7 * 24 * 3_600_000, flag: '10080m' });
 });
+
+test('deleting a devnet releases its addresses only once EC2 has detached them', async () => {
+  const { createDevnets } = await import('./devnets.js');
+  const root = mkdtempSync(join(tmpdir(), 'del-'));
+  const dirs = { data: join(root, 'data'), private: join(root, 'private') };
+  mkdirSync(join(dirs.private, 'devnets', 'devnet-gone'), { recursive: true });
+  mkdirSync(dirs.data, { recursive: true });
+  writeFileSync(join(dirs.data, 'devnets.json'), JSON.stringify({ 'devnet-gone': { status: 'ready', dns: {}, dnsZoneId: 'Z1' } }));
+  writeFileSync(join(dirs.private, 'devnets', 'devnet-gone', 'ec2-plan.json'), JSON.stringify({ id: 'p'.repeat(64) }));
+  // EC2 keeps the address attached for two polls after the instance is gone.
+  let terminated = false, attachedPolls = 2, volumes = ['vol-1', 'vol-2'];
+  const events = [];
+  const ec2 = { send: async (cmd) => {
+    const n = cmd.constructor.name;
+    if (n === 'DescribeInstancesCommand') return { Reservations: terminated ? [] : [{ Instances: [{ InstanceId: 'i-1', State: { Name: 'running' } }] }] };
+    if (n === 'TerminateInstancesCommand') { terminated = true; return {}; }
+    if (n === 'DescribeAddressesCommand') { const on = attachedPolls-- > 0; events.push(on ? 'attached' : 'detached'); return { Addresses: [{ PublicIp: '198.51.100.9', AllocationId: 'eipalloc-1', ...(on ? { AssociationId: 'eipassoc-1' } : {}) }] }; }
+    if (n === 'DescribeVolumesCommand') return { Volumes: volumes.map((v) => ({ VolumeId: v, State: 'available' })) };
+    if (n === 'DeleteVolumeCommand') { volumes = volumes.filter((v) => v !== cmd.input.VolumeId); return {}; }
+    throw new Error(n);
+  } };
+  const r53 = { send: async () => ({ ResourceRecordSets: [] }) };
+  const steps = [];
+  const ctx = {
+    dashnet: async (r, args, opts) => { events.push(args[0]); assert.equal(opts.bin, '/usr/local/bin/dashnet', 'cleanup uses the current dashnet'); return 0; },
+    step: (r, name) => { const s = { name }; steps.push(s); return (status) => { s.status = status; }; },
+    save: () => {}, write: () => {}, pinBinary: () => 'pinned/dashnet', binary: '/usr/local/bin/dashnet',
+  };
+  const devnets = createDevnets({ ctx, dirs, key: { path: '/k' }, pool: {}, getSettings: () => settings, region: 'us-west-2', log: () => {}, clients: { ec2, r53, ssm: {} }, wait: async () => {} });
+  await devnets.executeDelete({ id: 'op', network: 'devnet-gone', actor: { login: 'ktechmidas' } });
+  assert.deepEqual(events, ['attached', 'attached', 'detached', 'release-addresses']);
+  assert.deepEqual(steps.map((s) => [s.name, s.status]), [['Remove DNS records', 'ok'], ['Terminate instances', 'ok'], ['Wait for addresses to detach', 'ok'],
+    ['Release BYOIP addresses (dashnet release-addresses)', 'ok'], ['Delete retained root volumes', 'ok']]);
+  assert.equal(JSON.parse(readFileSync(join(dirs.data, 'devnets.json'), 'utf8'))['devnet-gone'].status, 'deleted');
+});
