@@ -146,7 +146,8 @@ export function validateDevnetDefaults(d) {
   for (const k of ['validatorType', 'walletType']) req(/^[a-z][a-z0-9-]*\.[a-z0-9]+$/.test(d[k]), `${k} invalid`);
   for (const k of ['validatorArch', 'walletArch']) req(['arm64', 'amd64'].includes(d[k]), `${k} must be arm64 or amd64`);
   req(Number.isInteger(d.protocol) && d.protocol >= 1 && d.protocol <= 100, 'protocol invalid');
-  req(d.blockTimeSeconds === undefined || (Number.isInteger(d.blockTimeSeconds) && d.blockTimeSeconds >= 5 && d.blockTimeSeconds <= 600), 'blockTimeSeconds 5..600');
+  // Under 8 s a restarted node never completes Core's blockchain sync.
+  req(d.blockTimeSeconds === undefined || (Number.isInteger(d.blockTimeSeconds) && d.blockTimeSeconds >= 8 && d.blockTimeSeconds <= 600), 'blockTimeSeconds 8..600');
   for (const c of COMPONENTS) req(IMAGE_TAG.test(d.images?.[c] || '') && d.images[c].replace(/^docker\.io\//, '').split(/[@:]/)[0] === COMPONENT_REPOS[c], `images.${c} must be ${COMPONENT_REPOS[c]}:<tag>`);
   req(!d.images?.acme || (IMAGE_TAG.test(d.images.acme) && d.images.acme.replace(/^docker\.io\//, '').split(/[@:]/)[0] === 'goacme/lego'), 'images.acme must be goacme/lego:<tag> (or empty for self-signed gateways)');
   req(!d.images?.acme || /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,24}$/.test(d.acmeEmail || ''), 'acmeEmail required for trusted gateway certificates');

@@ -34,7 +34,7 @@ export default function Network({ name, tab }) {
       </div>
       {n.description && <p className="text-dim mt-1 text-[12px]">{n.description}</p>}
       {n.lifecycle && <Lifecycle n={n} member={member} admin={session.admin} />}
-      {operator && n.deployable && <Updates n={n} />}
+      {operator && n.deployable && !['starting', 'stopped'].includes(n.lifecycle?.platform) && <Updates n={n} />}
 
       {tab === 'ops' && member ? <Operations network={n} operator={operator} /> : (
         <>
@@ -345,7 +345,7 @@ function Lifecycle({ n, member, admin }) {
       <span className="label">console devnet</span>
       <span className={`lv-${level}`}>{l.status}</span>
       {l.status === 'ready' && l.platform === 'starting' && <span className="lv-info">Platform starts as soon as the quorums form</span>}
-      {l.status === 'ready' && l.platform === 'failed' && <span className="lv-down">Platform start failed; resume its operation</span>}
+      {l.status === 'ready' && l.platform === 'stopped' && <span className="lv-down">Platform has not started: resume its operation</span>}
       <span className="text-dim">Core block every {l.blockTimeSeconds}s</span>
       <span className="text-dim">created by {l.createdBy} {l.createdAt ? ago(l.createdAt) + ' ago' : ''}</span>
       {member && l.operation && <Link className="link" to={`/n/${n.name}/ops/${l.operation}`}>creation log</Link>}

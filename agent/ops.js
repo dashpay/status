@@ -78,6 +78,8 @@ export function validateRequest(settings, q, registry = {}) {
     const components = q.components || [], images = q.images || {};
     if (q.action === 'upgrade') {
       // Core needs a devnet whose pinned dash-network-go supports --scope core.
+      // dashnet upgrades a network-ready deployment only.
+      if (['starting', 'stopped'].includes(registry[q.network].platform)) throw new Error('Platform has not started on this devnet yet; upgrade once its Platform operation has finished');
       const core = (registry[q.network].upgradeScopes || []).includes('core');
       const allowed = ['drive', 'dapi', 'gateway', 'helper', 'tenderdash', ...(core ? ['core'] : [])];
       if (components.includes('core') && !core) throw new Error('this devnet was created with a dash-network-go that cannot upgrade Core; devnets created since Core upgrades landed can');
@@ -346,7 +348,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
       for (const st of r.steps) if (st.status === 'running') { st.status = 'failed'; st.finishedAt = new Date().toISOString(); st.detail ??= r.error.slice(0, 200); }
       write(r.id, `error: ${r.error}`);
       if (r.request.action === 'create-devnet' && r.confirmedAt && !shuttingDown) devnets.markFailed?.(r.network);
-      if (r.request.action === 'devnet-platform' && !shuttingDown) devnets.markPlatformFailed?.(r.network);
+      if (r.request.action === 'devnet-platform') devnets.markPlatformFailed?.(r.network);
     }
     r.cancelRequested = undefined;
     live.delete(r.id);
@@ -409,7 +411,10 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
         // The running copy owns the record: flag it there so the next save keeps it.
         mine.cancelRequested = true; save(mine); write(r.id, `cancel requested by ${actor.login}`);
         active.child?.kill('SIGTERM');
-      } else if (['queued', 'review', 'confirmed'].includes(r.status)) { r.status = 'cancelled'; save(r); write(r.id, `cancelled by ${actor.login}`); }
+      } else if (['queued', 'review', 'confirmed'].includes(r.status)) {
+        r.status = 'cancelled'; save(r); write(r.id, `cancelled by ${actor.login}`);
+        if (r.request.action === 'devnet-platform') devnets.markPlatformFailed?.(r.network);
+      }
     } else if (q.type === 'resume') {
       if (!['failed', 'interrupted', 'cancelled'].includes(r.status)) throw new Error('only a stopped operation can be resumed');
       // Never confirmed: prepare a fresh plan. Confirmed: continue the exact reviewed plan.

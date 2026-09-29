@@ -404,7 +404,7 @@ test('block time is part of a devnet request and bounded', async () => {
   const s = structuredClone(settings);
   const q = (blockTimeSeconds) => ({ id: '6c8139ad-e92f-40da-943d-1e001efacc03', network: 'devnet-blocks', action: 'create-devnet', devnet: { blockTimeSeconds } });
   assert.equal(validateDevnetRequest(s, q(150), {}).blockTimeSeconds, 150);
-  for (const bad of [4, 601, 2.5]) assert.throws(() => validateDevnetRequest(s, q(bad), {}), /blockTimeSeconds/);
+  for (const bad of [5, 7, 601, 2.5]) assert.throws(() => validateDevnetRequest(s, q(bad), {}), /blockTimeSeconds/);
 });
 
 test('services before Platform skip only the Platform-dependent checks', async () => {
@@ -427,4 +427,13 @@ test('services before Platform skip only the Platform-dependent checks', async (
   assert.equal(sent.platformPending, true);
   assert.match(out.summary, /Platform Explorer follows Platform/);
   await assert.rejects(deployServices(args), /explorerApi/, 'full checks once Platform runs');
+});
+
+test('upgrades wait until a new devnet has started Platform', () => {
+  const s = structuredClone(settings);
+  s.networks.push({ ...s.networks[0], name: 'devnet-fresh', kind: 'dashnet', chainType: 'devnet', deployable: true });
+  const q = { id: '6c8139ad-e92f-40da-943d-1e001efacc04', network: 'devnet-fresh', action: 'upgrade', nodes: [], components: ['drive'], images: { drive: 'dashpay/drive:4.2.0-beta.6' } };
+  for (const platform of ['starting', 'stopped']) {
+    assert.throws(() => validateRequest(s, q, { 'devnet-fresh': { status: 'ready', platform, upgradeScopes: ['platform', 'tenderdash', 'core'] } }), /Platform has not started/);
+  }
 });
