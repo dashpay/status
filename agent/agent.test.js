@@ -454,10 +454,16 @@ test('services publish DAPI seeds and the quorum host SDKs derive from the Core 
   const { validateDevnetRequest } = await import('./devnets.js');
   const names = serviceNames('devnet-bonsia', { dnsSuffix: 'networks.dash.org' }, 'devnet-bonsia-g1');
   assert.equal(names.quorums_sdk.host, 'quorums.bonsia-g1.networks.dash.org');
-  assert.deepEqual(Object.keys(names).filter((k) => k.startsWith('seed-')), ['seed-1', 'seed-2', 'seed-3', 'seed-4', 'seed-5']);
+  assert.deepEqual(Object.keys(names).filter((k) => k.startsWith('seed-')), ['seed-1', 'seed-2', 'seed-3']);
   assert.equal(names['seed-3'].url, 'https://seed-3.bonsia.networks.dash.org:1443');
-  assert.deepEqual(serviceNames('devnet-bonsia', {}), names, 'generation 1 by default');
+  const plain = serviceNames('devnet-sakura', {}, 'devnet-sakura');
+  assert.equal(plain.quorums.host, 'quorums.sakura.networks.dash.org');
+  assert.equal(plain.quorums_sdk, undefined, 'a chain named after the devnet needs no alias');
+  assert.deepEqual(serviceNames('devnet-sakura', {}), plain, 'the devnet name by default');
   assert.equal(serviceNames('devnet-bonsia', {}, 'bonsia-g2').quorums_sdk.host, 'quorums.bonsia-g2.networks.dash.org');
+  const { coreNetwork } = await import('./devnets.js');
+  assert.equal(coreNetwork('devnet-sakura'), 'devnet-sakura', 'no generation suffix on a first chain');
+  assert.equal(coreNetwork('devnet-sakura', 2), 'devnet-sakura-g2');
   // An alias like quorums.<x>-g1 must never be another devnet's own name.
   assert.throws(() => validateDevnetRequest(structuredClone(settings), { id: '6c8139ad-e92f-40da-943d-1e001efacc06', network: 'devnet-bonsia-g1', action: 'create-devnet', devnet: {} }, {}), /-g<number>/);
 
@@ -476,7 +482,7 @@ test('services publish DAPI seeds and the quorum host SDKs derive from the Core 
   } };
   const out = await deployServices({ r: { id: 'op' }, write: () => {}, dplan, d, name: 'devnet-console-9', pool, r53 });
   assert.ok(upserts.every(([, ip]) => ip === '198.51.100.9'), 'every name points at the wallet host');
-  for (const host of ['quorums.console-9-g1.networks.dash.org', 'seed-1.console-9.networks.dash.org', 'seed-5.console-9.networks.dash.org']) assert.ok(upserts.some(([n]) => n === host), host);
+  for (const host of ['quorums.console-9-g1.networks.dash.org', 'seed-1.console-9.networks.dash.org', 'seed-3.console-9.networks.dash.org']) assert.ok(upserts.some(([n]) => n === host), host);
   assert.deepEqual(sent.gateways, ['https://198.51.100.10:1443', 'https://198.51.100.11:1443', 'https://198.51.100.12:1443'], 'seeds spread over every validator');
   assert.equal(sent.hosts.quorums_sdk, 'quorums.console-9-g1.networks.dash.org');
   assert.ok(out.dns['seed-2'] && out.dns.quorums_sdk, 'registered, so deleting the devnet removes them');

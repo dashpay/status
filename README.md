@@ -66,8 +66,8 @@ Platform) → services → `doctor`. Every stage resumes after interruption, wit
 exact dashnet binary the plans were made with. The devnet appears on the board
 while it is built. Each devnet's wallet host also runs:
 
-- `quorum-list-server` → `https://quorums.<name>.networks.dash.org`, also as `quorums.<name>-g<generation>` (the Core devnet name SDKs take as `devnetName`)
-- DAPI seeds `seed-1..5.<name>.networks.dash.org` (443 and 1443): Caddy on the wallet host with hostname certificates, spread over every validator's gateway
+- `quorum-list-server` → `https://quorums.<name>.networks.dash.org` (SDKs take the Core devnet name, `<name>`, as `devnetName`; chains older dashnet named `<name>-g1` also get `quorums.<name>-g1`)
+- DAPI seeds `seed-1..3.<name>.networks.dash.org` (443 and 1443): Caddy on the wallet host with hostname certificates, spread over every validator's gateway
 - Platform Explorer (Postgres, indexer, API, per-devnet frontend) → `https://explorer.<name>…`
 - dash-faucet from source, with its own funded wallet topped up every 15 minutes → `https://faucet.<name>…`
 - Caddy with Let's Encrypt for all three.

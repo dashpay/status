@@ -8,11 +8,14 @@ export const shortName = (name) => name.replace(/^devnet-/, '');
 const REMOTE = readFileSync(new URL('./services-remote.py', import.meta.url), 'utf8');
 const RELAY_PORT = 26667;
 
-export const SEEDS = 5;
+// Every seed name reaches every validator (one Caddy); three keep Let's
+// Encrypt's weekly certificates per registered domain in reserve.
+export const SEEDS = 3;
 
-// core: the Core devnet name (<short>-g<generation>), which SDKs take as
-// devnetName and derive https://quorums.<devnetName>.networks.dash.org from.
-export function serviceNames(name, d, core = `${shortName(name)}-g1`) {
+// core: the Core devnet name, which SDKs take as devnetName and derive
+// https://quorums.<devnetName>.networks.dash.org from. It is the devnet's own
+// name except on chains named <name>-g1 by older dashnet (or reset chains).
+export function serviceNames(name, d, core = shortName(name)) {
   const short = shortName(name), suffix = d.dnsSuffix || 'networks.dash.org', chain = shortName(core);
   return {
     insight: { host: `insight.${short}.${suffix}`, url: `https://insight.${short}.${suffix}/insight/` },
