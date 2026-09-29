@@ -195,7 +195,7 @@ function Workflows({ rows }) {
           <tbody>
             {rows.map((w) => (
               <tr key={`${w.repo}|${w.workflow}`}>
-                <td className="max-w-[320px] truncate"><span className="mono text-dim">{w.repo || '—'}</span> · {w.workflow}</td>
+                <td className="max-w-[320px] truncate">{w.repo || w.workflow ? <><span className="mono text-dim">{w.repo || '—'}</span> · {w.workflow || '—'}</> : <span className="text-dim" title="the runner kept no worker log for these jobs">unattributed jobs</span>}</td>
                 <td className="mono text-right">{w.jobs}</td>
                 <td className={`mono text-right ${w.failed / w.jobs > 0.2 ? 'lv-warn' : ''}`}>{w.failed}{w.jobs ? <span className="text-faint"> ({Math.round((w.failed / w.jobs) * 100)}%)</span> : null}</td>
                 <td className="mono text-right">{secs(w.medianSec)}</td>
