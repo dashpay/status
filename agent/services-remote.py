@@ -24,7 +24,8 @@ log = lambda m: print(m, file=sys.stderr, flush=True)
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 RPC_PORT = int(cfg['coreRpcPort'])
 ZMQ_PORT = int(cfg.get('coreZmqPort', 29998))
-PASSWORD = json.loads(Path('/var/lib/dashnet/secrets.json').read_text())['rpcPassword']
+# A prebuild runs while dashnet is still deploying Core, before this exists.
+PASSWORD = None if cfg.get('prebuildOnly') else json.loads(Path('/var/lib/dashnet/secrets.json').read_text())['rpcPassword']
 AUX = {'dashnet.auxiliary': cfg.get('auxiliary', '')}
 
 
@@ -102,6 +103,18 @@ def checkout(url, ref, dest):
     return d
 
 
+def buildkit():
+    """Build with BuildKit only. The legacy builder (Ubuntu's docker.io without
+    the buildx plugin) runs every step in an unlabelled container, and dashnet
+    refuses a host with unknown containers (unexpected-container): a build next
+    to a running dashnet operation would fail it, and a failed build would leave
+    such a container behind. BuildKit's steps are not Docker containers."""
+    if subprocess.run(['docker', 'buildx', 'version'], capture_output=True).returncode != 0:
+        sh('env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', 'install', '-y', '-q', '--no-install-recommends',
+           '-o', 'DPkg::Lock::Timeout=300', 'docker-buildx', timeout=900)
+    return ['env', 'DOCKER_BUILDKIT=1', 'docker', 'build']
+
+
 def image_exists(tag):
     return subprocess.run(['docker', 'image', 'inspect', tag], capture_output=True).returncode == 0
 
@@ -119,7 +132,7 @@ def build_faucet():
     # Identity creation in this release is hardcoded to public testnet Platform.
     html = html.replace('</head>', '<style>#identityCard{display:none!important}</style></head>', 1)
     (d / 'static/index.html').write_text(html)
-    sh('docker', 'build', '--quiet', '-t', tag, '.', cwd=d)
+    sh(*buildkit(), '--quiet', '-t', tag, '.', cwd=d)
     return tag
 
 
@@ -136,7 +149,7 @@ def build_explorer_frontend():
         'ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL NEXT_PUBLIC_BASE_URL=$NEXT_PUBLIC_BASE_URL NEXT_PUBLIC_TESTNET_BASE_URL=$NEXT_PUBLIC_BASE_URL NEXT_TELEMETRY_DISABLED=1',
         'RUN npm install --no-audit --no-fund && npm run build',
         'CMD ["npx", "next", "start", "-H", "127.0.0.1", "-p", "3000"]', '']))
-    sh('docker', 'build', '--quiet', '-f', 'Dockerfile.devnet', '-t', tag,
+    sh(*buildkit(), '--quiet', '-f', 'Dockerfile.devnet', '-t', tag,
        '--build-arg', f"NEXT_PUBLIC_API_URL=https://{cfg['hosts']['explorer']}/backend",
        '--build-arg', f"NEXT_PUBLIC_BASE_URL=https://{cfg['hosts']['explorer']}", '.', cwd=front, timeout=5400)
     return tag
@@ -333,6 +346,17 @@ except BlockingIOError:
 
 if cfg.get('topupOnly'):
     print(json.dumps(dict(faucetBalance=faucet_wallet())))
+    sys.exit(0)
+
+if cfg.get('prebuildOnly'):
+    # Nothing here needs the chain: build and pull while dashnet deploys it, so
+    # the install after deployment only funds, configures and starts services.
+    ev = cfg['explorerVersion']
+    images = [cfg['quorumServerImage'], cfg['insightImage'], 'postgres:17', 'caddy:2',
+              f'ghcr.io/pshenmic/platform-explorer-api:{ev}', f'ghcr.io/pshenmic/platform-explorer-indexer:{ev}']
+    for image in images:
+        sh('docker', 'pull', '--quiet', image, timeout=1200)
+    print(json.dumps(dict(faucetImage=build_faucet(), frontendImage=build_explorer_frontend(), pulled=len(images))))
     sys.exit(0)
 
 balance = faucet_wallet()

@@ -1,6 +1,8 @@
 #!/bin/sh
 # Build the given ref on the status host and roll the web + agent containers.
 # Usage: sudo /opt/dash-status/src/deploy/deploy.sh [git-ref]   (default origin/master)
+#        DEPLOY_ONLY=web sudo -E ... rolls only the web container, leaving the
+#        agent (and any devnet operation it is running) untouched.
 set -eu
 src=/opt/dash-status/src
 cd "$src"
@@ -14,7 +16,11 @@ previous=$(docker image inspect dash-status:current --format '{{.Id}}' 2>/dev/nu
 install -d -o 1000 -g 1000 -m 0750 /srv/dash-status/data
 install -d -o 1000 -g 1000 -m 0700 /srv/dash-status/agent /srv/dash-status/agent/devnets
 docker tag "dash-status:${rev}" dash-status:current
-docker compose -f deploy/compose.yml up -d --remove-orphans
+case "${DEPLOY_ONLY:-}" in
+  "") docker compose -f deploy/compose.yml up -d --remove-orphans ;;
+  web) docker compose -f deploy/compose.yml up -d --no-deps web ;;
+  *) echo "DEPLOY_ONLY must be empty or web" >&2; exit 2 ;;
+esac
 for i in $(seq 1 30); do
   if curl -fsS -m 3 http://127.0.0.1:3006/api/health >/dev/null 2>&1; then
     echo "web healthy on ${rev}"; docker compose -f deploy/compose.yml ps --format '{{.Service}} {{.Status}}'
@@ -33,5 +39,8 @@ for i in $(seq 1 30); do
   sleep 2
 done
 echo "web did not become healthy; rolling back" >&2
-if [ -n "$previous" ]; then docker tag "$previous" dash-status:current; docker compose -f deploy/compose.yml up -d; fi
+if [ -n "$previous" ]; then
+  docker tag "$previous" dash-status:current
+  if [ "${DEPLOY_ONLY:-}" = web ]; then docker compose -f deploy/compose.yml up -d --no-deps web; else docker compose -f deploy/compose.yml up -d; fi
+fi
 exit 1
