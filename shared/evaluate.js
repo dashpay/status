@@ -143,11 +143,13 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
   });
 
   const counts = Object.fromEntries(LEVELS.map((l) => [l, rows.filter((r) => r.level === l).length]));
+  let reportStale = false;
   if (network.source === 'report') {
     const observed = Date.parse(state?.generatedAt || '');
     const window = /^([0-9]+)(s|m|h)$/.exec(network.observationWindow || '30m');
     const maxAge = window ? Number(window[1]) * (window[2] === 'h' ? 3600_000 : window[2] === 'm' ? 60_000 : 1000) : 30 * 60_000;
     const stale = !Number.isFinite(observed) || now - observed > maxAge || observed > now + 60_000;
+    reportStale = stale;
     if (stale) {
       const row = rows.find((r) => r.host.role === 'fullnode');
       if (row) { row.level = 'unreachable'; row.reasons.push({ level: 'unreachable', text: 'mainnet observer report is stale' }); }
@@ -190,7 +192,7 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
     };
   }
   const level = rows.reduce((a, r) => (r.host.duplicate || r.host.role === 'vpn' ? a : RANK[r.level] > RANK[a] ? r.level : a), 'ok');
-  return { level: building ? 'deploying' : level === 'stopped' ? 'ok' : level, rows, summary, tags, generatedAt: state?.generatedAt || null, ageSeconds: state?.generatedAt ? Math.round((now - Date.parse(state.generatedAt)) / 1000) : null };
+  return { level: reportStale ? 'unreachable' : building ? 'deploying' : level === 'stopped' ? 'ok' : level, rows, summary, tags, generatedAt: state?.generatedAt || null, ageSeconds: state?.generatedAt ? Math.round((now - Date.parse(state.generatedAt)) / 1000) : null };
 }
 
 function chainMatches(chain, network) {
