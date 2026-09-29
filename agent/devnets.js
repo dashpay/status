@@ -231,7 +231,8 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       let ok = false;
       // New instances publish their host keys to the console within a minute
       // or two; poll often so bootstrap starts as soon as they are complete.
-      for (let attempt = 1; attempt <= 60 && !ok; attempt++) {
+      const deadline = Date.now() + 15 * 60_000;
+      for (let attempt = 1; attempt <= 60 && !ok && Date.now() < deadline; attempt++) {
         if (r.cancelRequested) throw new Error('cancelled by operator');
         const out = join(dir, `known_hosts.${stamp()}`);
         ok = (await run(r, 'host-trust', ['host-trust', '--bootstrap-plan', join(dir, 'bootstrap-plan.json'), '--timeout', '3m', '--out', out], { allowFail: true, timeoutMs: 4 * 60_000 })) === 0;
@@ -269,8 +270,9 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       // Service images need no chain: build them on the wallet host meanwhile.
       // Best effort (it never rejects); the install builds whatever is missing.
       const early = prebuildServices({ r, write, dplan, d, name, pool });
-      await run(r, 'deploy', ['deploy', '--plan', join(dir, 'deployment.json'), '--confirm', dplan.id, ...access(dir), '--timeout', '100m', '--observation-window', '90s', '--out', join(dir, `deployed.${stamp()}.json`)], { timeoutMs: 101 * 60_000 });
-      await early;
+      try {
+        await run(r, 'deploy', ['deploy', '--plan', join(dir, 'deployment.json'), '--confirm', dplan.id, ...access(dir), '--timeout', '100m', '--observation-window', '90s', '--out', join(dir, `deployed.${stamp()}.json`)], { timeoutMs: 101 * 60_000 });
+      } finally { await early; } // never leave it running past this operation
     } finally { clearInterval(watcher); }
     done('ok');
     register(name, { status: 'services' });

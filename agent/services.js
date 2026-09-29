@@ -57,10 +57,10 @@ function servicesConfig(name, d, dplan) {
   };
 }
 
-async function runRemote(pool, wallet, cfg, onLine) {
+async function runRemote(pool, wallet, cfg, onLine, timeoutMs = 100 * 60_000) {
   const arg = Buffer.from(JSON.stringify(cfg)).toString('base64');
   await pool.exec(host(wallet), 'sudo install -d -m 0700 /opt/devnet-services && sudo tee /opt/devnet-services/services.py >/dev/null && sudo chmod 0700 /opt/devnet-services/services.py', REMOTE, 60_000);
-  const out = await pool.exec(host(wallet), `set -o pipefail; { sudo python3 /opt/devnet-services/services.py ${arg} 2>&1 1>&3 | tee /tmp/devnet-services.log >&2; } 3>&1`, null, 100 * 60_000, onLine);
+  const out = await pool.exec(host(wallet), `set -o pipefail; { sudo python3 /opt/devnet-services/services.py ${arg} 2>&1 1>&3 | tee /tmp/devnet-services.log >&2; } 3>&1`, null, timeoutMs, onLine);
   return JSON.parse(out.trim().split('\n').pop());
 }
 
@@ -70,7 +70,7 @@ async function runRemote(pool, wallet, cfg, onLine) {
 export async function prebuildServices({ r, write, dplan, d, name, pool }) {
   const wallet = dplan.targets.find((t) => t.role === 'wallet');
   try {
-    const result = await runRemote(pool, wallet, { ...servicesConfig(name, d, dplan), prebuildOnly: true }, (line) => write(r.id, `  services (early): ${line}`));
+    const result = await runRemote(pool, wallet, { ...servicesConfig(name, d, dplan), prebuildOnly: true }, (line) => write(r.id, `  services (early): ${line}`), 30 * 60_000);
     write(r.id, `services (early): built ${result.faucetImage} and ${result.frontendImage}, pulled ${result.pulled} images`);
   } catch (e) {
     write(r.id, `services (early): ${e.message.slice(0, 300)}; the install builds them instead`);
