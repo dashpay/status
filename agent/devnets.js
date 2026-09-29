@@ -38,6 +38,8 @@ export const coreNetwork = (name, generation = 1) => `devnet-${shortName(name)}-
 export function validateDevnetRequest(settings, q, registry) {
   if (!NAME.test(q.network || '')) throw new Error('name must look like devnet-<name> (lowercase, 2-31 characters after devnet-)');
   if (settings.networks.some((n) => n.name === q.network) || registry[q.network]) throw new Error(`${q.network} already exists; journal records are permanent, pick a new name`);
+  // Core names the chain <name>-g<generation>; its SDK DNS alias must not be another devnet's name.
+  if (/-g\d+$/.test(q.network)) throw new Error('name must not end in -g<number>: that is how Core names each chain generation');
   // Placement (VPC, subnet, groups, key, IPAM, DNS zone) always comes from Settings.
   const allowed = ['displayName', 'description', 'public', 'validators', 'validatorType', 'validatorArch', 'walletType', 'walletArch', 'rootVolumeGiB', 'protocol', 'blockTimeSeconds', 'platformEpochSeconds'];
   const extra = Object.keys(q.devnet || {}).filter((k) => !allowed.includes(k) && k !== 'images' && k !== 'services');
@@ -201,7 +203,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       instances: plan.targets.length, storageGiB: plan.targets.length * d.rootVolumeGiB, estimate: estimate(d),
       images: Object.fromEntries([...COMPONENTS, ...(d.images.acme ? ['acme'] : [])].map((c) => [c, { ref: d.images[c], digests: lockDigests(lock, c) }])),
       protocol: d.protocol, blockTimeSeconds: blockSeconds(d), platformEpochSeconds: epochSeconds(d), coreNetwork: coreNetwork(name), platformChainId: `dash-${coreNetwork(name)}`,
-      dns: serviceNames(name, d), services: d.services, amis, network: { vpc: d.vpcId, subnet: d.subnetId, securityGroups: d.securityGroupIds, ipamPool: d.ipamPoolId },
+      dns: serviceNames(name, d, coreNetwork(name)), services: d.services, amis, network: { vpc: d.vpcId, subnet: d.subnetId, securityGroups: d.securityGroupIds, ipamPool: d.ipamPoolId },
     };
   }
 
@@ -530,7 +532,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     // Current Settings defaults are the desired service versions for every console devnet.
     const services = { ...d.services, ...getSettings().devnets.services, ...(r.request.services || {}) };
     r.status = 'preparing'; save(r);
-    r.review = { kind: 'devnet-services', planId: `services-${name}-${Date.now()}`, preparedAt: new Date().toISOString(), from: d.services, to: services, dns: serviceNames(name, d) };
+    r.review = { kind: 'devnet-services', planId: `services-${name}-${Date.now()}`, preparedAt: new Date().toISOString(), from: d.services, to: services, dns: serviceNames(name, d, reg.coreNetwork) };
   }
 
   async function executeServices(r) {

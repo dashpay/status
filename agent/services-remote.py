@@ -7,7 +7,8 @@
                                                 -> 127.0.0.1:3000/3005 -> https://explorer.<name>...
   dash-faucet         dedicated legacy wallet "faucet", funded from the dashnet wallet
                                                 -> 127.0.0.1:8000  -> https://faucet.<name>...
-  caddy               Let's Encrypt TLS for the three names, X-Forwarded-For overwritten
+  caddy               Let's Encrypt TLS for the service names, X-Forwarded-For overwritten;
+                      DAPI seeds seed-N.<name>... (443 and 1443) -> every validator gateway
 
 Input: argv[1] is base64 JSON or @file (no secrets). The Core RPC password is read on
 this host from /var/lib/dashnet/secrets.json and written only to 0600 files here.
@@ -301,13 +302,7 @@ def compose(faucet_image, frontend_image):
         'CONTESTED_RESOURCE_VOTE_DEADLINE=5400000', 'TCP_CONNECT_TIMEOUT=400',
         *([] if cfg.get('trustedGateways') else ['NODE_TLS_REJECT_UNAUTHORIZED=0']), '']))
     write('postgres.env', f'POSTGRES_DB=explorer\nPOSTGRES_USER=explorer\nPOSTGRES_PASSWORD={pg}\n')
-    h = cfg['hosts']
-    write('Caddyfile', '\n'.join([
-        '{', '  email infrastructure@dash.org', '}',
-        f"{h['insight']} {{", '  redir / /insight/', '  reverse_proxy 127.0.0.1:3001', '}',
-        f"{h['quorums']} {{", '  reverse_proxy 127.0.0.1:8080', '}',
-        f"{h['explorer']} {{", '  handle_path /backend/* {', '    reverse_proxy 127.0.0.1:3005', '  }', '  reverse_proxy 127.0.0.1:3000', '}',
-        f"{h['faucet']} {{", '  reverse_proxy 127.0.0.1:8000', '}', '']), 0o644)
+    write('Caddyfile', caddyfile(cfg), 0o644)
     # dash-network-go preflight ignores only containers labelled for this exact host.
     svc = lambda image, **kw: dict(image=image, network_mode='host', restart='unless-stopped', logging=dict(driver='local'), labels=AUX, **kw)
     idx = f'ghcr.io/pshenmic/platform-explorer-indexer:{ev}'
@@ -337,6 +332,29 @@ def compose(faucet_image, frontend_image):
     pending = ['explorer-indexer', 'explorer-api'] if cfg.get('platformPending') else []
     sh('docker', 'compose', '-f', str(ROOT / 'compose.json'), 'up', '-d', '--remove-orphans',
        *[name for name in spec['services'] if name not in pending], timeout=1200)
+
+
+def caddyfile(cfg):
+    h = cfg['hosts']
+    quorums = ', '.join([h['quorums']] + ([h['quorums_sdk']] if h.get('quorums_sdk') else []))
+    lines = [
+        '{', '  email infrastructure@dash.org', '}',
+        f"{h['insight']} {{", '  redir / /insight/', '  reverse_proxy 127.0.0.1:3001', '}',
+        f"{quorums} {{", '  reverse_proxy 127.0.0.1:8080', '}',
+        f"{h['explorer']} {{", '  handle_path /backend/* {', '    reverse_proxy 127.0.0.1:3005', '  }', '  reverse_proxy 127.0.0.1:3000', '}',
+        f"{h['faucet']} {{", '  reverse_proxy 127.0.0.1:8000', '}']
+    seeds = [h[k] for k in sorted(h) if k.startswith('seed-')]
+    if seeds and cfg.get('gateways'):
+        # DAPI seeds on 443 and the gateway port. Envoy on each validator keeps
+        # CORS and grpc-web; streams are flushed as they arrive, and a gateway
+        # that refuses connections is skipped for 30 s.
+        port = cfg['gatewayPort']
+        lines += [', '.join(f'{s}, {s}:{port}' for s in seeds) + ' {',
+                  '  reverse_proxy ' + ' '.join(cfg['gateways']) + ' {',
+                  '    lb_policy round_robin', '    lb_try_duration 5s', '    fail_duration 30s', '    flush_interval -1',
+                  *([] if cfg.get('trustedGateways') else ['    transport http {', '      tls_insecure_skip_verify', '    }']),
+                  '  }', '}']
+    return '\n'.join(lines + [''])
 
 
 def topup_cron():

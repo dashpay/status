@@ -351,7 +351,11 @@ function Lifecycle({ n, member, admin }) {
       <span className="text-dim">Core block every {l.blockTimeSeconds}s{l.platformEpochSeconds ? ` · Platform epoch ${span(l.platformEpochSeconds)}` : ''}</span>
       <span className="text-dim">created by {l.createdBy} {l.createdAt ? ago(l.createdAt) + ' ago' : ''}</span>
       {member && l.operation && <Link className="link" to={`/n/${n.name}/ops/${l.operation}`}>creation log</Link>}
-      {l.dns && Object.entries(l.dns).map(([k, v]) => <a key={k} className="link mono" href={`https://${v.host}/`} target="_blank" rel="noreferrer">{k}</a>)}
+      {l.dns && Object.entries(l.dns).filter(([k]) => !k.startsWith('seed-')).map(([k, v]) => <a key={k} className="link mono" href={`https://${v.host}/`} target="_blank" rel="noreferrer">{k}</a>)}
+      {l.dns?.['seed-1'] && (() => {
+        const seeds = Object.entries(l.dns).filter(([k]) => k.startsWith('seed-')).map(([, v]) => v.url);
+        return <span className="mono text-dim" title={seeds.join('\n')}>DAPI seeds {seeds[0].replace(/^https:\/\/seed-1/, `seed-1..${seeds.length}`)}</span>;
+      })()}
       {admin && !open && ['ready', 'failed', 'services'].includes(l.status) && <button className="btn !py-0.5 ml-auto" onClick={async () => {
         setError(null);
         try { const r = await api(`/api/networks/${n.name}/ops`, { method: 'POST', body: { action: 'devnet-services' } }); navigate(`/n/${n.name}/ops/${r.id}`); } catch (e) { setError(e); }
