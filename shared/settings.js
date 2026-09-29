@@ -29,7 +29,7 @@ export const DEFAULT_SETTINGS = {
     vpcId: 'vpc-08b7a214713ca4ce9', subnetId: 'subnet-01765e4b0fc0a2aa4', securityGroupIds: ['sg-0246983c2e14a5f34'],
     keyName: 'dash-status-agent', ipamPoolId: 'ipam-pool-0de83ed8bba5f9b48', rootVolumeGiB: 60,
     validators: 13, validatorType: 't4g.medium', validatorArch: 'arm64', walletType: 't3.large', walletArch: 'amd64',
-    protocol: 14,
+    protocol: 14, blockTimeSeconds: 10,
     images: {
       core: 'dashpay/dashd:23', drive: 'dashpay/drive:4.2.0-beta.5', dapi: 'dashpay/rs-dapi:4.2.0-beta.5',
       tenderdash: 'dashpay/tenderdash:1.8.1', gateway: 'dashpay/envoy:1.39.0-impr.1', helper: 'dashpay/dashmate-helper:4.2.0-beta.5',
@@ -146,6 +146,8 @@ export function validateDevnetDefaults(d) {
   for (const k of ['validatorType', 'walletType']) req(/^[a-z][a-z0-9-]*\.[a-z0-9]+$/.test(d[k]), `${k} invalid`);
   for (const k of ['validatorArch', 'walletArch']) req(['arm64', 'amd64'].includes(d[k]), `${k} must be arm64 or amd64`);
   req(Number.isInteger(d.protocol) && d.protocol >= 1 && d.protocol <= 100, 'protocol invalid');
+  // Under 8 s a restarted node never completes Core's blockchain sync.
+  req(d.blockTimeSeconds === undefined || (Number.isInteger(d.blockTimeSeconds) && d.blockTimeSeconds >= 8 && d.blockTimeSeconds <= 600), 'blockTimeSeconds 8..600');
   for (const c of COMPONENTS) req(IMAGE_TAG.test(d.images?.[c] || '') && d.images[c].replace(/^docker\.io\//, '').split(/[@:]/)[0] === COMPONENT_REPOS[c], `images.${c} must be ${COMPONENT_REPOS[c]}:<tag>`);
   req(!d.images?.acme || (IMAGE_TAG.test(d.images.acme) && d.images.acme.replace(/^docker\.io\//, '').split(/[@:]/)[0] === 'goacme/lego'), 'images.acme must be goacme/lego:<tag> (or empty for self-signed gateways)');
   req(!d.images?.acme || /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,24}$/.test(d.acmeEmail || ''), 'acmeEmail required for trusted gateway certificates');
@@ -184,7 +186,9 @@ export function mergeDevnets(settings, registry) {
   for (const n of settings.networks) if (registry[n.name]) n.lifecycle = lifecycleOf(registry[n.name]);
   return settings;
 }
-const lifecycleOf = (reg) => ({ status: reg.status, operation: reg.operation, createdBy: reg.createdBy, createdAt: reg.createdAt, readyAt: reg.readyAt || null, dns: reg.dns || null });
+// Console devnets start Platform after creation, once their quorums form.
+const lifecycleOf = (reg) => ({ status: reg.status, operation: reg.operation, createdBy: reg.createdBy, createdAt: reg.createdAt, readyAt: reg.readyAt || null, dns: reg.dns || null,
+  platform: reg.platform || (reg.status === 'ready' ? 'ready' : null), blockTimeSeconds: reg.blockTimeSeconds || 10 });
 
 // Core reports a devnet's chain as devnet-<name>; dashnet plans carry <name>.
 export const devnetChain = (core) => (core.startsWith('devnet-') ? core : `devnet-${core}`);

@@ -77,7 +77,9 @@ export async function prebuildServices({ r, write, dplan, d, name, pool }) {
   }
 }
 
-export async function deployServices({ r, write, dplan, d, name, pool, r53 }) {
+// platformPending: Platform starts later (once quorums form); the explorer's
+// indexer and API and the quorum count are checked when it has.
+export async function deployServices({ r, write, dplan, d, name, pool, r53, platformPending = false }) {
   const ports = { ...PORTS, ...(dplan.ports || {}) };
   const wallet = dplan.targets.find((t) => t.role === 'wallet');
   const validators = dplan.targets.filter((t) => t.role === 'validator');
@@ -102,12 +104,13 @@ export async function deployServices({ r, write, dplan, d, name, pool, r53 }) {
   await pool.exec(host(relay), `[ "$(sudo docker inspect -f '{{index .Config.Labels "dashnet.auxiliary"}}' devnet-td-relay 2>/dev/null)" = "${name}/${relay.name}" ] || { sudo docker rm -f devnet-td-relay >/dev/null 2>&1; sudo docker run -d --name devnet-td-relay --label ${relayLabel} --restart unless-stopped --network host --log-driver local alpine/socat:1.8.0.3 TCP-LISTEN:${RELAY_PORT},bind=${vpc(relay)},fork,reuseaddr TCP:127.0.0.1:${ports.platformRPC}; }`, null, 180_000);
 
   write(r.id, 'services: installing on wallet host (builds faucet and explorer frontend unless already built)');
-  const result = await runRemote(pool, wallet, servicesConfig(name, d, dplan), (line) => write(r.id, `  ${line}`));
+  const result = await runRemote(pool, wallet, { ...servicesConfig(name, d, dplan), platformPending }, (line) => write(r.id, `  ${line}`));
   const { promoCodes, ...shown } = result;
   write(r.id, `services: ${JSON.stringify(shown)}`);
-  const bad = ['quorums', 'insight', 'faucet', 'explorerApi', 'explorerFrontend'].filter((k) => !result[k] || result[k] >= 500);
+  const bad = ['quorums', 'insight', 'faucet', ...(platformPending ? [] : ['explorerApi']), 'explorerFrontend'].filter((k) => !result[k] || result[k] >= 500);
   if (bad.length) throw new Error(`services not answering locally: ${bad.join(', ')}`);
-  if (!Number.isInteger(result.quorumList) || result.quorumList < 1) throw new Error(`quorum server has no quorums from Core: ${result.quorumList}`);
+  if (!platformPending && (!Number.isInteger(result.quorumList) || result.quorumList < 1)) throw new Error(`quorum server has no quorums from Core: ${result.quorumList}`);
   if (result.insight !== 200 || !Number.isInteger(result.insightBlocks)) throw new Error(`Insight is not following the chain: HTTP ${result.insight}, ${result.insightBlocks}`);
-  return { dns: names, walletAddress: result.walletAddress, promoCodes, summary: `faucet balance ${result.faucetBalance}, ${result.quorumList} quorums listed, explorer validators ${result.explorerValidators}, insight at block ${result.insightBlocks}, ${Object.values(names).map((x) => x.host).join(', ')}` };
+  const platform = platformPending ? 'Platform Explorer follows Platform' : `${result.quorumList} quorums listed, explorer validators ${result.explorerValidators}`;
+  return { dns: names, walletAddress: result.walletAddress, promoCodes, summary: `faucet balance ${result.faucetBalance}, ${platform}, insight at block ${result.insightBlocks}, ${Object.values(names).map((x) => x.host).join(', ')}` };
 }

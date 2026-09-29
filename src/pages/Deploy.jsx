@@ -48,6 +48,7 @@ export default function Deploy({ name }) {
   if (error) return <div className="mt-6"><Err error={error} /></div>;
   if (!n) return <div className="mt-6 text-dim">Loading…</div>;
   if (!n.deployable) return <div className="mt-6"><Empty>{n.displayName} is monitored only. Enable “deployable” in Settings to operate it.</Empty></div>;
+  if (['starting', 'stopped'].includes(n.lifecycle?.platform)) return <div className="mt-6"><Empty>Platform has not started on {n.displayName} yet. Upgrades are available once its Platform operation has finished.</Empty></div>;
 
   const toggle = (set, value) => { const x = new Set(set); x.has(value) ? x.delete(value) : x.add(value); return x; };
   const visibleHosts = hosts.filter((h) => roleFilter === 'all' || h.role === roleFilter);

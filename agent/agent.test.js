@@ -380,3 +380,60 @@ test('service images are prebuilt on the wallet host without the chain, best eff
   await prebuildServices({ r: { id: 'op' }, write: (_, l) => lines.push(l), dplan, d, name: 'devnet-console-9', pool: failing });
   assert.match(lines.at(-1), /connection reset; the install builds them instead/);
 });
+
+test('Platform follows a creation in its own confirmed operation, never on request', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ops-'));
+  const dirs = { data: root, private: join(root, 'private'), requests: join(root, 'req'), ops: join(root, 'ops'), work: join(root, 'work'), state: join(root, 'state') };
+  const ran = [];
+  const devnetsImpl = { registry: () => ({}), executePlatform: async (r) => { ran.push(r.id); } };
+  const ops = createOps({ settings: () => settings, dirs, key: { path: '/key' }, pool: { knownHosts: () => '', pins: {} }, binary: 'dashnet', log: () => {}, spawnImpl: fakeDashnet([]), devnetsImpl });
+  const actor = { id: 9920871, login: 'ktechmidas' };
+  assert.throws(() => validateRequest(settings, { id: '6c8139ad-e92f-40da-943d-1e001efacc01', network: 'devnet-x', action: 'devnet-platform' }), /automatically/);
+  // As executeCreate queues it: already confirmed by the creation's confirmation.
+  const id = '6c8139ad-e92f-40da-943d-1e001efacc02', now = new Date().toISOString();
+  writeFileSync(join(dirs.ops, `${id}.json`), JSON.stringify({ id, network: 'devnet-x', actor, createdAt: now, status: 'confirmed', confirmedBy: actor, confirmedAt: now, autoConfirmed: true, steps: [],
+    request: { id, network: 'devnet-x', action: 'devnet-platform', nodes: [], components: [], images: {}, options: {} }, review: { kind: 'devnet-platform', planId: 'platform-devnet-x', preparedAt: now } }));
+  const read = () => JSON.parse(readFileSync(join(dirs.ops, `${id}.json`), 'utf8'));
+  for (let i = 0; i < 200 && read().status !== 'succeeded'; i++) { ops.tick(); await new Promise((r) => setTimeout(r, 5)); }
+  assert.equal(read().status, 'succeeded');
+  assert.deepEqual(ran, [id]);
+});
+
+test('block time is part of a devnet request and bounded', async () => {
+  const { validateDevnetRequest } = await import('./devnets.js');
+  const s = structuredClone(settings);
+  const q = (blockTimeSeconds) => ({ id: '6c8139ad-e92f-40da-943d-1e001efacc03', network: 'devnet-blocks', action: 'create-devnet', devnet: { blockTimeSeconds } });
+  assert.equal(validateDevnetRequest(s, q(150), {}).blockTimeSeconds, 150);
+  for (const bad of [5, 7, 601, 2.5]) assert.throws(() => validateDevnetRequest(s, q(bad), {}), /blockTimeSeconds/);
+});
+
+test('services before Platform skip only the Platform-dependent checks', async () => {
+  const { deployServices } = await import('./services.js');
+  const dplan = { coreNetwork: 'console-9-g1', platformChainId: 'dash-devnet-console-9', ports: {},
+    targets: [{ name: 'wallet-001', role: 'wallet', instanceId: 'i-0aaaaaaaaaaaaaaa1', sshAddress: '198.51.100.9' },
+      { name: 'validators-001', role: 'validator', instanceId: 'i-0aaaaaaaaaaaaaaa2', sshAddress: '198.51.100.10', peerAddress: '198.51.100.10', privateAddress: '10.0.0.10' }] };
+  const d = { displayName: 'Console 9', dnsZoneId: 'Z1', dnsSuffix: 'networks.dash.org', services: { quorumServer: 'dashpay/quorum-list-server:0.7.0', insightImage: 'dashpay/insight:4.0.10', explorerVersion: '2.5.3', faucetRef: 'b'.repeat(40) } };
+  const r53 = { send: async () => ({ ChangeInfo: { Id: 'c', Status: 'INSYNC' } }) };
+  const result = { faucetBalance: 50000, quorums: 200, quorumList: null, insight: 200, insightBlocks: 4100, faucet: 200, explorerApi: null, explorerValidators: null, explorerFrontend: 200, walletAddress: 'y1', promoCodes: {} };
+  let sent;
+  const pool = { exec: async (h, cmd) => {
+    const run = cmd.match(/python3 \/opt\/devnet-services\/services\.py (\S+)/);
+    if (!run) return '';
+    sent = JSON.parse(Buffer.from(run[1], 'base64').toString());
+    return JSON.stringify(result);
+  } };
+  const args = { r: { id: 'op' }, write: () => {}, dplan, d, name: 'devnet-console-9', pool, r53 };
+  const out = await deployServices({ ...args, platformPending: true });
+  assert.equal(sent.platformPending, true);
+  assert.match(out.summary, /Platform Explorer follows Platform/);
+  await assert.rejects(deployServices(args), /explorerApi/, 'full checks once Platform runs');
+});
+
+test('upgrades wait until a new devnet has started Platform', () => {
+  const s = structuredClone(settings);
+  s.networks.push({ ...s.networks[0], name: 'devnet-fresh', kind: 'dashnet', chainType: 'devnet', deployable: true });
+  const q = { id: '6c8139ad-e92f-40da-943d-1e001efacc04', network: 'devnet-fresh', action: 'upgrade', nodes: [], components: ['drive'], images: { drive: 'dashpay/drive:4.2.0-beta.6' } };
+  for (const platform of ['starting', 'stopped']) {
+    assert.throws(() => validateRequest(s, q, { 'devnet-fresh': { status: 'ready', platform, upgradeScopes: ['platform', 'tenderdash', 'core'] } }), /Platform has not started/);
+  }
+});

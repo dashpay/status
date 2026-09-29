@@ -47,11 +47,13 @@ export function manifestFor(settings, network, state) {
   };
 }
 
-export const LIFECYCLE = new Set(['create-devnet', 'delete-devnet', 'devnet-services', 'platform-reset']);
+export const LIFECYCLE = new Set(['create-devnet', 'delete-devnet', 'devnet-services', 'devnet-platform', 'platform-reset']);
 
 export function validateRequest(settings, q, registry = {}) {
   if (!q || !UUID.test(q.id)) throw new Error('invalid request id');
   if (q.action === 'create-devnet') { validateDevnetRequest(settings, q, registry); return { lifecycle: true }; }
+  // Queued by a creation once Core is ready; never requested directly.
+  if (q.action === 'devnet-platform') throw new Error('Platform starts automatically after a devnet is created');
   if (q.action === 'platform-reset') { validateReset(settings, q); return { lifecycle: true }; }
   if (q.action === 'devnet-services') {
     const reg = registry[q.network];
@@ -76,6 +78,8 @@ export function validateRequest(settings, q, registry = {}) {
     const components = q.components || [], images = q.images || {};
     if (q.action === 'upgrade') {
       // Core needs a devnet whose pinned dash-network-go supports --scope core.
+      // dashnet upgrades a network-ready deployment only.
+      if (['starting', 'stopped'].includes(registry[q.network].platform)) throw new Error('Platform has not started on this devnet yet; upgrade once its Platform operation has finished');
       const core = (registry[q.network].upgradeScopes || []).includes('core');
       const allowed = ['drive', 'dapi', 'gateway', 'helper', 'tenderdash', ...(core ? ['core'] : [])];
       if (components.includes('core') && !core) throw new Error('this devnet was created with a dash-network-go that cannot upgrade Core; devnets created since Core upgrades landed can');
@@ -313,9 +317,12 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     live.set(r.id, r);
     try {
       if (LIFECYCLE.has(r.request.action)) {
-        const impl = { 'create-devnet': ['prepareCreate', 'executeCreate'], 'delete-devnet': ['prepareDelete', 'executeDelete'], 'devnet-services': ['prepareServices', 'executeServices'], 'platform-reset': ['prepareReset', 'executeReset'] }[r.request.action];
+        const impl = { 'create-devnet': ['prepareCreate', 'executeCreate'], 'delete-devnet': ['prepareDelete', 'executeDelete'], 'devnet-services': ['prepareServices', 'executeServices'], 'devnet-platform': [null, 'executePlatform'], 'platform-reset': ['prepareReset', 'executeReset'] }[r.request.action];
         const mod = r.request.action === 'platform-reset' ? reset : devnets;
-        if (r.status === 'queued') { await mod[impl[0]](r); r.status = 'review'; }
+        if (r.status === 'queued') {
+          if (!impl[0]) throw new Error(`${r.request.action} runs only as queued by its creation`);
+          await mod[impl[0]](r); r.status = 'review';
+        }
         else if (r.status === 'confirmed') { await mod[impl[1]](r); r.status = 'succeeded'; r.finishedAt = new Date().toISOString(); }
       } else if (getSettings().networks.find((n) => n.name === r.network)?.kind === 'dashnet') {
         if (r.request.action === 'doctor') { await devnets.doctor(r); r.status = r.result.healthy ? 'succeeded' : 'failed'; }
@@ -341,6 +348,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
       for (const st of r.steps) if (st.status === 'running') { st.status = 'failed'; st.finishedAt = new Date().toISOString(); st.detail ??= r.error.slice(0, 200); }
       write(r.id, `error: ${r.error}`);
       if (r.request.action === 'create-devnet' && r.confirmedAt && !shuttingDown) devnets.markFailed?.(r.network);
+      if (r.request.action === 'devnet-platform') devnets.markPlatformFailed?.(r.network);
     }
     r.cancelRequested = undefined;
     live.delete(r.id);
@@ -403,7 +411,10 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
         // The running copy owns the record: flag it there so the next save keeps it.
         mine.cancelRequested = true; save(mine); write(r.id, `cancel requested by ${actor.login}`);
         active.child?.kill('SIGTERM');
-      } else if (['queued', 'review', 'confirmed'].includes(r.status)) { r.status = 'cancelled'; save(r); write(r.id, `cancelled by ${actor.login}`); }
+      } else if (['queued', 'review', 'confirmed'].includes(r.status)) {
+        r.status = 'cancelled'; save(r); write(r.id, `cancelled by ${actor.login}`);
+        if (r.request.action === 'devnet-platform') devnets.markPlatformFailed?.(r.network);
+      }
     } else if (q.type === 'resume') {
       if (!['failed', 'interrupted', 'cancelled'].includes(r.status)) throw new Error('only a stopped operation can be resumed');
       // Never confirmed: prepare a fresh plan. Confirmed: continue the exact reviewed plan.

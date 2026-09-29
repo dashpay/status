@@ -10,6 +10,7 @@
 // owned by dash-network-go for exactly this network.
 import { copyFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { EC2Client, DescribeInstancesCommand, DescribeVolumesCommand, TerminateInstancesCommand, DeleteVolumeCommand } from '@aws-sdk/client-ec2';
 import { Route53Client, ChangeResourceRecordSetsCommand, ListResourceRecordSetsCommand } from '@aws-sdk/client-route-53';
@@ -22,6 +23,12 @@ const PRICES = { 't4g.small': 0.0168, 't4g.medium': 0.0336, 't4g.large': 0.0672,
 const GP3_GIB_MONTH = 0.08;
 const SERVICE_KEYS = ['quorumServer', 'insightImage', 'explorerVersion', 'faucetRef', 'faucetAmount', 'faucetRateLimit', 'faucetFunding', 'epochSeconds'];
 const TEXT = /^[A-Za-z0-9 .,_()-]+$/;
+// Core block interval in seconds; devnets created before it was settable use 10.
+const blockSeconds = (d) => d?.blockTimeSeconds || 10;
+// Each health sample must see a new Core block.
+const observeSeconds = (d) => Math.max(90, Math.ceil(2.5 * blockSeconds(d)));
+// A resumed deploy waits for the quorums (well under 60 blocks), then Platform.
+const deployMinutes = (d) => Math.max(100, blockSeconds(d) + 60);
 
 export { shortName };
 export const coreNetwork = (name, generation = 1) => `devnet-${shortName(name)}-g${generation}`;
@@ -30,7 +37,7 @@ export function validateDevnetRequest(settings, q, registry) {
   if (!NAME.test(q.network || '')) throw new Error('name must look like devnet-<name> (lowercase, 2-31 characters after devnet-)');
   if (settings.networks.some((n) => n.name === q.network) || registry[q.network]) throw new Error(`${q.network} already exists; journal records are permanent, pick a new name`);
   // Placement (VPC, subnet, groups, key, IPAM, DNS zone) always comes from Settings.
-  const allowed = ['displayName', 'description', 'public', 'validators', 'validatorType', 'validatorArch', 'walletType', 'walletArch', 'rootVolumeGiB', 'protocol'];
+  const allowed = ['displayName', 'description', 'public', 'validators', 'validatorType', 'validatorArch', 'walletType', 'walletArch', 'rootVolumeGiB', 'protocol', 'blockTimeSeconds'];
   const extra = Object.keys(q.devnet || {}).filter((k) => !allowed.includes(k) && k !== 'images' && k !== 'services');
   if (extra.length) throw new Error(`not settable per devnet: ${extra.join(', ')}`);
   const services = Object.keys(q.devnet?.services || {}).filter((k) => !SERVICE_KEYS.includes(k));
@@ -91,6 +98,14 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
   const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
 
   // What this devnet's own (pinned) dash-network-go can upgrade.
+  // Whether this devnet's pinned dash-network-go knows a flag (builds older than
+  // the console may be pinned to a devnet created before an agent update).
+  function supports(name, command, flag) {
+    const bin = join(dirs.private, 'devnets', name, 'dashnet');
+    if (!existsSync(bin)) return false;
+    const p = spawnSync(bin, [command, '-h'], { encoding: 'utf8', timeout: 10_000 });
+    return new RegExp(`^\\s*-${flag}\\b`, 'm').test(`${p.stdout}${p.stderr}`);
+  }
   function upgradeScopes(name) {
     const bin = join(dirs.private, 'devnets', name, 'dashnet');
     if (!existsSync(bin)) return null;
@@ -171,6 +186,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     done = step(r, 'EC2 footprint (dashnet provision-plan, read-only)');
     rmSync(join(dir, 'ec2-plan.json'), { force: true });
     await run(r, 'provision-plan', ['provision-plan', '--network', join(dir, 'network.yaml'), '--out', join(dir, 'ec2-plan.json')], { timeoutMs: 5 * 60_000 });
+    if (blockSeconds(d) !== 10 && !supports(r.network, 'deployment-plan', 'block-time')) throw new Error('this devnet\'s pinned dash-network-go has no --block-time; create it with 10-second blocks or after the agent update');
     const plan = readJSON(join(dir, 'ec2-plan.json'));
     const lock = readJSON(join(dir, 'lock.json'));
     done('ok', `plan ${plan.id.slice(0, 12)}`);
@@ -255,14 +271,18 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       // Public IPAM addresses and Let's Encrypt gateway certificates, as
       // long-running devnets have; explicit so a missing prerequisite fails.
       const tls = d.images.acme && d.ipamPoolId ? ['--gateway-tls', 'letsencrypt', '--acme-email', d.acmeEmail] : ['--gateway-tls', 'self-signed'];
-      await run(r, 'deployment-plan', ['deployment-plan', '--bootstrap-plan', join(dir, 'bootstrap-plan.json'), '--protocol', String(d.protocol), '--advertise', d.ipamPoolId ? 'public' : 'private', ...tls, '--out', join(dir, 'deployment.json')]);
+      await run(r, 'deployment-plan', ['deployment-plan', '--bootstrap-plan', join(dir, 'bootstrap-plan.json'), '--protocol', String(d.protocol), '--advertise', d.ipamPoolId ? 'public' : 'private', ...tls, ...(supports(name, 'deployment-plan', 'block-time') ? ['--block-time', String(blockSeconds(d))] : []), '--out', join(dir, 'deployment.json')]);
       done('ok');
     }
     const dplan = readJSON(join(dir, 'deployment.json'));
     register(name, { coreNetwork: devnetChain(dplan.coreNetwork), platformChainId: dplan.platformChainId });
 
+    // Platform does not hold up creation: it starts in a follow-up operation as
+    // soon as the quorums form, as legacy devnets did. Devnets pinned to a
+    // dash-network-go without --core-only deploy everything here instead.
+    const coreOnly = supports(name, 'deploy', 'core-only');
     await once('deploy', async () => {
-    done = step(r, 'Core, EvoNode registration, quorums, Platform (dashnet deploy)');
+    done = step(r, coreOnly ? 'Core, EvoNode registration, rotation cycles, DKG on (dashnet deploy --core-only)' : 'Core, EvoNode registration, quorums, Platform (dashnet deploy)');
     // A validator can be PoSe-banned by an early DKG while the fleet is still
     // forming; dashnet then waits forever for it. Revive such nodes meanwhile.
     const watcher = setInterval(() => reviveBanned(r, name, dplan).catch((e) => write(r.id, `revive: ${e.message}`)), 60_000);
@@ -271,7 +291,8 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       // Best effort (it never rejects); the install builds whatever is missing.
       const early = prebuildServices({ r, write, dplan, d, name, pool });
       try {
-        await run(r, 'deploy', ['deploy', '--plan', join(dir, 'deployment.json'), '--confirm', dplan.id, ...access(dir), '--timeout', '100m', '--observation-window', '90s', '--out', join(dir, `deployed.${stamp()}.json`)], { timeoutMs: 101 * 60_000 });
+        const minutes = coreOnly ? 60 : deployMinutes(d);
+        await run(r, 'deploy', ['deploy', ...(coreOnly ? ['--core-only'] : []), '--plan', join(dir, 'deployment.json'), '--confirm', dplan.id, ...access(dir), '--timeout', `${minutes}m`, '--observation-window', `${observeSeconds(d)}s`, '--out', join(dir, `deployed.${stamp()}.json`)], { timeoutMs: (minutes + 1) * 60_000 });
       } finally { await early; } // never leave it running past this operation
     } finally { clearInterval(watcher); }
     done('ok');
@@ -279,16 +300,65 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     });
 
     await once('services', async () => {
-      done = step(r, 'Quorum server, Platform Explorer, faucet, DNS and TLS');
-      const services = await deployServices({ r, write, dplan, d, name, pool, s, ec2, r53, dir });
+      done = step(r, coreOnly ? 'Faucet, Insight, quorum server, DNS and TLS (Platform Explorer follows Platform)' : 'Quorum server, Platform Explorer, faucet, DNS and TLS');
+      const services = await deployServices({ r, write, dplan, d, name, pool, s, ec2, r53, dir, platformPending: coreOnly });
       register(name, { services: d.services, dns: services.dns, walletAddress: services.walletAddress, promoCodes: services.promoCodes });
       done('ok', services.summary);
     });
 
+    if (!coreOnly) {
+      done = step(r, 'Health check (dashnet doctor)');
+      const window = observeSeconds(d);
+      const code = await run(r, 'doctor', ['doctor', '--plan', join(dir, 'deployment.json'), ...access(dir), '--timeout', `${window + 300}s`, '--observation-window', `${window}s`, '--out', join(dir, `health.${stamp()}.json`)], { allowFail: true, timeoutMs: (window + 360) * 1000 });
+      done(code === 0 ? 'ok' : 'warn', code === 0 ? 'all targets healthy' : 'see log');
+      register(name, { status: 'ready', platform: 'ready', blockTimeSeconds: blockSeconds(d), readyAt: new Date().toISOString(), upgradeScopes: upgradeScopes(name) });
+      return;
+    }
+    // A resumed creation must not reset a Platform that already started.
+    register(name, { status: 'ready', ...(r.done.includes('platform-op') ? {} : { platform: 'starting' }), blockTimeSeconds: blockSeconds(d), readyAt: registry()[name]?.readyAt || new Date().toISOString(), upgradeScopes: upgradeScopes(name) });
+    await once('platform-op', async () => {
+      const now = new Date().toISOString(), id = randomUUID();
+      const follow = { id, network: name, actor: r.actor, createdAt: now, status: 'confirmed', confirmedBy: r.confirmedBy || r.actor, confirmedAt: now, autoConfirmed: true, steps: [],
+        request: { id, network: name, action: 'devnet-platform', nodes: [], components: [], images: {}, options: {} },
+        review: { kind: 'devnet-platform', planId: `platform-${name}`, preparedAt: now, createdBy: r.id } };
+      save(follow);
+      write(id, `queued by the creation of ${name} (${r.id}): start Platform as soon as its quorums form`);
+      r.result = { ...(r.result || {}), platformOperation: id };
+      write(r.id, `Core is ready; Platform starts in operation ${id} as soon as the quorums form`);
+    });
+  }
+
+  // Follows a creation: waits for the quorums, starts Platform, then brings up
+  // the Platform Explorer and checks the whole fleet.
+  async function executePlatform(r) {
+    const name = r.network, dir = workDir(name);
+    const d = readJSON(join(dir, 'request.json')), dplan = readJSON(join(dir, 'deployment.json'));
+    const reg = registry()[name];
+    if (!reg || !dplan || ['deleting', 'deleted', 'failed'].includes(reg.status)) throw new Error(`${name} is ${reg?.status || 'unknown'}; Platform not started`);
+    r.status = 'running'; r.done ??= []; save(r);
+    if (reg.platform !== 'ready') register(name, { platform: 'starting' });
+    const once = async (key, fn) => { if (r.done.includes(key)) return; await fn(); r.done.push(key); save(r); };
+    let done;
+    await once('deploy', async () => {
+      done = step(r, 'Wait for quorums, then start Drive, Tenderdash and DAPI (dashnet deploy)');
+      const watcher = setInterval(() => reviveBanned(r, name, dplan).catch((e) => write(r.id, `revive: ${e.message}`)), 60_000);
+      try {
+        const minutes = deployMinutes(d);
+        await run(r, 'deploy', ['deploy', '--plan', join(dir, 'deployment.json'), '--confirm', dplan.id, ...access(dir), '--timeout', `${minutes}m`, '--observation-window', `${observeSeconds(d)}s`, '--out', join(dir, `deployed.${stamp()}.json`)], { timeoutMs: (minutes + 1) * 60_000 });
+      } finally { clearInterval(watcher); }
+      done('ok');
+    });
+    await once('services', async () => {
+      done = step(r, 'Platform Explorer and all services');
+      const services = await deployServices({ r, write, dplan, d, name, pool, s: getSettings(), ec2, r53, dir });
+      register(name, { dns: services.dns, walletAddress: services.walletAddress, promoCodes: services.promoCodes });
+      done('ok', services.summary);
+    });
     done = step(r, 'Health check (dashnet doctor)');
-    const code = await run(r, 'doctor', ['doctor', '--plan', join(dir, 'deployment.json'), ...access(dir), '--timeout', '5m', '--observation-window', '90s', '--out', join(dir, `health.${stamp()}.json`)], { allowFail: true, timeoutMs: 6 * 60_000 });
+    const window = observeSeconds(d);
+    const code = await run(r, 'doctor', ['doctor', '--plan', join(dir, 'deployment.json'), ...access(dir), '--timeout', `${window + 300}s`, '--observation-window', `${window}s`, '--out', join(dir, `health.${stamp()}.json`)], { allowFail: true, timeoutMs: (window + 360) * 1000 });
     done(code === 0 ? 'ok' : 'warn', code === 0 ? 'all targets healthy' : 'see log');
-    register(name, { status: 'ready', readyAt: new Date().toISOString(), upgradeScopes: upgradeScopes(name) });
+    register(name, { platform: 'ready', platformReadyAt: new Date().toISOString() });
   }
 
   const revived = new Map();
@@ -414,9 +484,12 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       const who = plan.scope === 'core' ? 'every node one at a time (Core: validators, then the mining node)' : 'validators one at a time';
       const done = step(r, `Upgrade ${who} (dashnet upgrade, scope ${plan.scope})`);
       r.progress = { phase: plan.scope, completed: [], current: null }; save(r);
-      // A Core rollout visits every node and waits for quiet DKG windows.
-      const minutes = plan.scope === 'core' ? 240 : 110;
-      await run(r, 'upgrade', ['upgrade', '--plan', join(dir, phase.plan), '--confirm', plan.id, ...access(dir), '--observation-window', '90s', '--timeout', `${minutes}m`, '--out', join(dir, `upgrade-result.${stamp()}.json`)], {
+      // A Core rollout visits every node and may wait up to a DKG cycle for its
+      // quiet window; every node's health check needs two samples.
+      const d = readJSON(join(dir, 'request.json')), nodes = readJSON(join(dir, 'deployment.json'))?.targets?.length || 14;
+      const window = observeSeconds(d);
+      const minutes = plan.scope === 'core' ? Math.max(240, Math.ceil((nodes * (26 * blockSeconds(d) + 420 + window)) / 60)) : Math.max(110, Math.ceil((nodes * (2 * window + 180)) / 60));
+      await run(r, 'upgrade', ['upgrade', '--plan', join(dir, phase.plan), '--confirm', plan.id, ...access(dir), '--observation-window', `${window}s`, '--timeout', `${minutes}m`, '--out', join(dir, `upgrade-result.${stamp()}.json`)], {
         timeoutMs: (minutes + 1) * 60_000, bin: r.artifacts.bin,
         onLine: (line) => {
           const m = /((?:validators|wallet|miner|fullnodes?)-\d+)/.exec(line);
@@ -436,7 +509,8 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     r.status = 'running'; save(r);
     const done = step(r, 'Health check (dashnet doctor)');
     const out = join(dir, `health.${stamp()}.json`);
-    const code = await run(r, 'doctor', ['doctor', '--plan', join(dir, 'deployment.json'), ...access(dir), '--timeout', '6m', '--observation-window', '90s', '--out', out], { allowFail: true, timeoutMs: 7 * 60_000 });
+    const window = observeSeconds(readJSON(join(dir, 'request.json')));
+    const code = await run(r, 'doctor', ['doctor', '--plan', join(dir, 'deployment.json'), ...access(dir), '--timeout', `${window + 270}s`, '--observation-window', `${window}s`, '--out', out], { allowFail: true, timeoutMs: (window + 330) * 1000 });
     const h = readJSON(out) || {};
     const nodes = {};
     for (const [n, v] of Object.entries(h.nodes || h.targets || {})) nodes[n] = { healthy: !!v.healthy, status: v.status || (v.healthy ? 'healthy' : 'unhealthy'), problems: v.problems || [] };
@@ -465,7 +539,8 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     const dplan = readJSON(join(dir, 'deployment.json'));
     r.status = 'running'; save(r);
     const done = step(r, 'Quorum server, Platform Explorer, faucet, DNS and TLS');
-    const services = await deployServices({ r, write, dplan, d, name, pool, s: getSettings(), ec2, r53, dir });
+    // Until Platform runs, its explorer parts and checks wait for it.
+    const services = await deployServices({ r, write, dplan, d, name, pool, s: getSettings(), ec2, r53, dir, platformPending: !!reg.platform && reg.platform !== 'ready' });
     writeFileSync(join(dir, 'request.json'), JSON.stringify(d), { mode: 0o600 });
     register(name, { services: d.services, dns: services.dns, promoCodes: services.promoCodes, status: registry()[name]?.status === 'failed' ? 'ready' : registry()[name]?.status });
     done('ok', services.summary);
@@ -536,8 +611,13 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
   function markFailed(name) {
     if (['creating', 'services'].includes(registry()[name]?.status)) register(name, { status: 'failed', failedAt: new Date().toISOString() });
   }
+  // Failed, cancelled or interrupted: Core stays usable and the Platform
+  // operation can be resumed.
+  function markPlatformFailed(name) {
+    if (registry()[name]?.platform === 'starting') register(name, { platform: 'stopped' });
+  }
 
-  return { prepareCreate, executeCreate, prepareServices, executeServices, prepareUpgrade, executeUpgrade, doctor, prepareDelete, executeDelete, registry, markFailed };
+  return { prepareCreate, executeCreate, executePlatform, prepareServices, executeServices, prepareUpgrade, executeUpgrade, doctor, prepareDelete, executeDelete, registry, markFailed, markPlatformFailed };
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

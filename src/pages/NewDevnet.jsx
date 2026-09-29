@@ -34,6 +34,8 @@ export default function NewDevnet() {
   if (form.validators < 13 || form.validators > 25) problems.push('13 to 25 validators');
   for (const c of COMPONENTS) if ((form.images[c] || '').replace(/^docker\.io\//, '').split(/[@:]/)[0] !== REPOS[c]) problems.push(`${c} image must be ${REPOS[c]}:<tag>`);
   if (form.images.acme && form.images.acme.replace(/^docker\.io\//, '').split(/[@:]/)[0] !== 'goacme/lego') problems.push('ACME client image must be goacme/lego:<tag>, or empty for self-signed gateways');
+  const blockTime = form.blockTimeSeconds ?? 10;
+  if (!Number.isInteger(blockTime) || blockTime < 8 || blockTime > 600) problems.push('Core block time 8 to 600 seconds');
 
   async function submit() {
     setBusy(true); setError(null);
@@ -51,7 +53,7 @@ export default function NewDevnet() {
       <div className="mt-4 flex items-center gap-3">
         <Link to="/" className="text-dim hover:text-fg">← Overview</Link>
         <h1 className="text-[18px] font-semibold">New devnet</h1>
-        <span className="text-dim text-[12px]">dash-network-go provision → bootstrap → deploy, then quorum server, Platform Explorer and faucet</span>
+        <span className="text-dim text-[12px]">dash-network-go provision → bootstrap → Core, then faucet, Insight and quorum server; Platform and its explorer start by themselves once the quorums form</span>
       </div>
 
       <Section title="1 · Name">
@@ -86,6 +88,8 @@ export default function NewDevnet() {
           <label className="text-[12px]"><div className="text-dim mb-1">ACME client <span className="mono">goacme/lego</span> · Let's Encrypt certificate for each validator's public IP (empty: self-signed)</div>
             <input className="input w-full mono" value={form.images.acme || ''} onChange={(e) => set((f) => { f.images.acme = e.target.value.trim(); })} /></label>
           <label className="text-[12px]"><div className="text-dim mb-1">Platform protocol number (4.2.x = 14, 4.1.x = 13)</div><input className="input w-28 mono" type="number" value={form.protocol} onChange={(e) => set((f) => { f.protocol = Number(e.target.value); })} /></label>
+          <label className="text-[12px]"><div className="text-dim mb-1">Core block time, seconds (8–600; legacy devnets used 150). Quorums form within about 25 blocks; slower blocks mean a later Platform and slower Core upgrades.</div>
+            <input className="input w-28 mono" type="number" min="8" max="600" value={blockTime} onChange={(e) => set((f) => { f.blockTimeSeconds = Number(e.target.value); })} /></label>
         </div>
       </Section>
 

@@ -13,7 +13,7 @@ export default function Operation({ name, id }) {
   if (!session.loaded) return null;
   if (!canSee(session, name)) return <div className="mt-6"><Empty>Access to this network required.</Empty></div>;
   // Lifecycle operations (devnet create/delete/services, Platform reset) are admin-only.
-  const lifecycle = ['create-devnet', 'delete-devnet', 'devnet-services', 'platform-reset'].includes(op?.request?.action);
+  const lifecycle = ['create-devnet', 'delete-devnet', 'devnet-services', 'devnet-platform', 'platform-reset'].includes(op?.request?.action);
   const operator = lifecycle ? !!session.admin : canOperate(session, name);
   if (error) return <div className="mt-6"><Err error={error} /></div>;
   if (!op) return <div className="mt-6 text-dim">Loading…</div>;
@@ -78,6 +78,16 @@ export default function Operation({ name, id }) {
       )}
 
       {review?.kind === 'create-devnet' && <CreateReview op={op} review={review} operator={operator} pending={pending} act={act} expiresIn={expiresIn} />}
+      {op.result?.platformOperation && (
+        <Section title="Platform">
+          <div className="panel p-3 text-[12px]">Core is ready. Platform starts automatically as soon as the quorums form: <Link to={`/n/${name}/ops/${op.result.platformOperation}`} className="mono">{short(op.result.platformOperation, 12)}</Link></div>
+        </Section>
+      )}
+      {review?.kind === 'devnet-platform' && (
+        <Section title="Start Platform">
+          <div className="panel p-3 text-[12px]">Queued by the creation of this devnet (<Link to={`/n/${name}/ops/${review.createdBy}`} className="mono">{short(review.createdBy, 12)}</Link>): waits for the quorums, starts Drive, Tenderdash and DAPI on every validator, then brings up the Platform Explorer and checks the fleet.</div>
+        </Section>
+      )}
       {review?.kind === 'platform-reset' && <ResetReview op={op} review={review} operator={operator} pending={pending} act={act} />}
       {op.stages && <Stages op={op} />}
       {review?.kind === 'devnet-services' && <ServicesReview op={op} review={review} operator={operator} pending={pending} act={act} />}
