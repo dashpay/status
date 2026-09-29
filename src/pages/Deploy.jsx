@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, canOperate, navigate, useResource, useSession, ROLE_LABEL, ago } from '../lib.js';
 import { Dot, Empty, Err, Link, Section } from '../ui.jsx';
-import { COMPONENTS, OPERABLE, REPOS, cmp, newestRelease, reported } from '../releases.js';
+import { COMPONENTS, OPERABLE, REPOS, cmp, helperFor, imageTag, newestRelease, reported } from '../releases.js';
 
 // Plain-language actions; the dashnet command runs underneath (shown in the header).
 const ACTIONS = [
@@ -35,13 +35,21 @@ export default function Deploy({ name }) {
   // dash-network-go upgrades every validator, one at a time; there is no node selection.
   const chosen = native ? hosts.filter((h) => h.role === 'validator') : hosts.filter((h) => selected.has(h.name));
   const coreUpgradable = !native || (n?.upgradeScopes || []).includes('core');
-  const available = new Set(chosen.flatMap((h) => ROLE_COMPONENTS[h.role].filter((c) => (c !== 'core' || coreUpgradable) && h.containers.some((k) => k.component === c))));
+  // On dashmate-rendered devnets the helper never runs: it is the dashmate
+  // that renders the services, recorded with the devnet's images.
+  const dashmate = native && n?.dashmate;
+  const present = (h, c) => (dashmate && c === 'helper') || h.containers.some((k) => k.component === c);
+  const available = new Set(chosen.flatMap((h) => ROLE_COMPONENTS[h.role].filter((c) => (c !== 'core' || coreUpgradable) && present(h, c))));
   const [autoRun, setAutoRun] = useState(true);
   const [filling, setFilling] = useState(null);
   const archs = [...new Set(chosen.map((h) => h.arch))];
   const needsComponents = action === 'upgrade' || action === 'deploy';
   const activeComponents = [...components].filter((c) => available.has(c));
-  const missingOn = (c) => chosen.filter((h) => !h.containers.some((k) => k.component === c)).map((h) => h.name);
+  const missingOn = (c) => chosen.filter((h) => !present(h, c)).map((h) => h.name);
+  const runningOf = (c) => (dashmate && c === 'helper' ? [imageTag(n.images?.helper)].filter(Boolean) : [...new Set(chosen.map((h) => h.containers.find((k) => k.component === c)?.version).filter(Boolean))]);
+  // Drive moving without its dashmate (or to another release) is allowed but flagged.
+  const driveTag = components.has('drive') ? imageTag(images.drive) : null;
+  const helperLags = dashmate && driveTag && imageTag(components.has('helper') ? images.helper : n.images?.helper) !== driveTag;
 
   if (!session.loaded) return null;
   if (!canOperate(session, name)) return <div className="mt-6"><Empty>Sign in as an operator of this network to deploy.</Empty></div>;
@@ -65,10 +73,14 @@ export default function Deploy({ name }) {
   async function fillNewest() {
     setFilling('loading');
     const picks = {};
-    await Promise.all([...available].map(async (c) => {
+    await Promise.all([...available].filter((c) => !(dashmate && c === 'helper')).map(async (c) => {
       const running = [...new Set(chosen.map((h) => reported(h, c)).filter(Boolean))].sort(cmp)[0];
       try { const { tags } = await api(`/api/images/${c}/tags`); const t = newestRelease(tags, running); if (t) picks[c] = `${REPOS[c]}:${t}`; } catch { /* tags unavailable */ }
     }));
+    if (dashmate) {
+      const drive = imageTag(picks.drive) || [...new Set(chosen.map((h) => reported(h, 'drive')).filter(Boolean))].sort(cmp)[0];
+      try { const u = helperFor(n, drive, (await api('/api/images/helper/tags')).tags); if (u) picks.helper = `${REPOS.helper}:${u.to}`; } catch { /* tags unavailable */ }
+    }
     setImages((x) => ({ ...x, ...picks }));
     setComponents(new Set(Object.keys(picks)));
     setFilling(Object.keys(picks).length ? `${Object.keys(picks).length} newer release(s) selected` : 'everything already runs the newest release in its line');
@@ -146,8 +158,11 @@ export default function Deploy({ name }) {
             {COMPONENTS.filter((c) => available.has(c)).map((c) => (
               <ComponentRow key={c} c={c} on={components.has(c)} toggle={() => setComponents((s) => toggle(s, c))} action={action}
                 image={images[c] || ''} setImage={(v) => setImages((x) => ({ ...x, [c]: v }))} archs={archs}
-                current={[...new Set(chosen.map((h) => h.containers.find((k) => k.component === c)?.version).filter(Boolean))]} missing={missingOn(c)} />
+                current={runningOf(c)} missing={missingOn(c)} />
             ))}
+            {action === 'upgrade' && helperLags && (
+              <div className="text-[12px] lv-warn">dashmate (the helper) renders this devnet's services and should be Drive's release: select the helper at {driveTag} too. "Use newest releases" does this.</div>
+            )}
             {action === 'upgrade' && activeComponents.includes('drive') && !activeComponents.includes('tenderdash') && chosen.some((h) => h.role === 'validator') && (
               <div className="text-[12px] lv-warn">Replacing Drive drains Tenderdash on the same host; dashnet will add Tenderdash to the plan with its current image.</div>
             )}

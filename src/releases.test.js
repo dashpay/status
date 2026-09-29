@@ -21,3 +21,19 @@ test('running versions come from what nodes report', () => {
   assert.equal(reported(h, 'tenderdash'), '1.8.1');
   assert.equal(reported(h, 'gateway'), null, 'digest-only pins have no release');
 });
+
+test('dashmate follows Drive on console devnets', async () => {
+  const { helperFor, imageTag, withImage } = await import('./releases.js');
+  const helperTags = tags('4.2.0-beta.5', '4.2.0-beta.6');
+  const n = { dashmate: true, images: { helper: 'dashpay/dashmate-helper:4.2.0-beta.5' } };
+  assert.deepEqual(helperFor(n, '4.2.0-beta.6', helperTags), { c: 'helper', from: '4.2.0-beta.5', to: '4.2.0-beta.6' });
+  assert.equal(helperFor(n, '4.2.0-beta.5', helperTags), null, 'already in step');
+  assert.equal(helperFor(n, '4.2.0-beta.7', helperTags), null, 'no helper published for that release');
+  assert.equal(helperFor({ ...n, dashmate: false }, '4.2.0-beta.6', helperTags), null, 'older devnets never run the helper');
+  assert.equal(imageTag('docker.io/dashpay/drive:4.2.0-beta.6'), '4.2.0-beta.6');
+  assert.equal(imageTag('dashpay/drive@sha256:' + 'a'.repeat(64)), null);
+  const images = { drive: 'dashpay/drive:4.2.0-beta.5', helper: 'dashpay/dashmate-helper:4.2.0-beta.5' };
+  assert.equal(withImage(images, 'drive', 'dashpay/drive:4.2.0-beta.6').helper, 'dashpay/dashmate-helper:4.2.0-beta.6');
+  const pinned = withImage({ ...images, helper: 'dashpay/dashmate-helper:4.2.0-beta.4' }, 'drive', 'dashpay/drive:4.2.0-beta.6');
+  assert.equal(pinned.helper, 'dashpay/dashmate-helper:4.2.0-beta.4', 'a helper chosen apart from Drive stays');
+});

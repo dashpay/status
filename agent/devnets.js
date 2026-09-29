@@ -27,12 +27,32 @@ const TEXT = /^[A-Za-z0-9 .,_()-]+$/;
 const blockSeconds = (d) => d?.blockTimeSeconds || 10;
 // Platform epoch length; dashnet builds without --epoch-time run 3600.
 const epochSeconds = (d) => d?.platformEpochSeconds || 3600;
-// Each health sample must see a new Core block.
-const observeSeconds = (d) => Math.max(90, Math.ceil(2.5 * blockSeconds(d)));
+// Each health sample must see a new Core block. Platform needs no longer
+// window: dash-network-go accepts an idle chain's recent block as live.
+const observeSeconds = (d) => Math.max(30, Math.ceil(2.5 * blockSeconds(d)));
 // A resumed deploy waits for the quorums (well under 60 blocks), then Platform.
 const deployMinutes = (d) => Math.max(100, blockSeconds(d) + 60);
 
 export { shortName };
+// dash-network-go devnets whose services each release's dashmate renders; the
+// helper image is then that dashmate, and Platform upgrades re-render with it.
+export const DASHMATE_PROFILE = 'devnet-dashmate-compose';
+// The images a devnet runs now: its network file after any upgrade.
+export function imagesOf(yaml) {
+  const out = {};
+  const block = /^images:\n((?: {2}\S.*\n?)+)/m.exec(yaml || '');
+  for (const line of (block?.[1] || '').split('\n')) {
+    const m = /^ {2}([a-z]+): (\S+)$/.exec(line);
+    if (m) out[m[1]] = m[2].replace(/^docker\.io\//, '');
+  }
+  return out;
+}
+// The helper follows Drive's release unless chosen explicitly: dashmate renders
+// the services, so it should be the release being deployed.
+export function helperFollowsDrive(images, explicit = {}) {
+  const tag = /^dashpay\/drive:([A-Za-z0-9_][A-Za-z0-9_.-]{0,127})$/.exec(String(images.drive || '').replace(/^docker\.io\//, ''))?.[1];
+  return explicit.helper || !tag ? images : { ...images, helper: `dashpay/dashmate-helper:${tag}` };
+}
 // As dash-network-go names chains: <name>, or <name>-g<N> for a reset chain.
 export const coreNetwork = (name, generation = 1) => `devnet-${shortName(name)}${generation > 1 ? `-g${generation}` : ''}`;
 
@@ -49,7 +69,10 @@ export function validateDevnetRequest(settings, q, registry) {
   if (services.length) throw new Error(`not settable per devnet: services.${services.join(', services.')}`);
   const d = { ...settings.devnets, ...(q.devnet || {}) };
   if (!Number.isInteger(d.rootVolumeGiB) || d.rootVolumeGiB < 30 || d.rootVolumeGiB > 1000) throw new Error('root disk 30..1000 GiB');
-  d.images = { ...settings.devnets.images, ...(q.devnet?.images || {}) };
+  // dashmate's Core never uses private addresses: every host needs an IPAM
+  // Elastic IP. Refuse here, before anything is billable.
+  if (!d.ipamPoolId) throw new Error('an IPAM pool is required (Settings → devnets): devnet nodes need public Elastic IPs');
+  d.images = helperFollowsDrive({ ...settings.devnets.images, ...(q.devnet?.images || {}) }, q.devnet?.images || {});
   d.services = { ...settings.devnets.services, ...(q.devnet?.services || {}) };
   if (!Number.isInteger(d.validators) || d.validators < 13 || d.validators > 25) throw new Error('validators must be 13..25 (dashnet devnet profile)');
   for (const k of ['validatorType', 'walletType']) if (!/^[a-z][a-z0-9-]*\.[a-z0-9]+$/.test(d[k])) throw new Error(`${k} invalid`);
@@ -153,6 +176,18 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     copyFileSync(binary, `${pinned}.next`); chmodSync(`${pinned}.next`, 0o700); renameSync(`${pinned}.next`, pinned);
     register(name, { upgradeScopes: upgradeScopes(name), dashnet: now });
     write(r.id, `dashnet ${was.slice(0, 12)} -> ${now.slice(0, 12)} for ${name} (same node and bootstrap recipes)`);
+  }
+
+  // Current images, and whether dashmate renders the devnet, for the console.
+  function runtimeOf(dir) {
+    const file = existsSync(join(dir, 'network-current.yaml')) ? 'network-current.yaml' : 'network.yaml';
+    const images = existsSync(join(dir, file)) ? imagesOf(readFileSync(join(dir, file), 'utf8')) : {};
+    return { images, dashmate: readJSON(join(dir, 'deployment.json'))?.profile === DASHMATE_PROFILE };
+  }
+  for (const [name, reg] of Object.entries(registry())) {
+    if (reg.status === 'deleted' || reg.images) continue;
+    const dir = join(dirs.private, 'devnets', name);
+    if (existsSync(join(dir, 'deployment.json'))) register(name, runtimeOf(dir));
   }
 
   for (const [name, reg] of Object.entries(registry())) {
@@ -283,7 +318,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       done('ok');
     }
     const dplan = readJSON(join(dir, 'deployment.json'));
-    register(name, { coreNetwork: devnetChain(dplan.coreNetwork), platformChainId: dplan.platformChainId, platformEpochSeconds: dplan.platformEpochSeconds || 3600 });
+    register(name, { coreNetwork: devnetChain(dplan.coreNetwork), platformChainId: dplan.platformChainId, platformEpochSeconds: dplan.platformEpochSeconds || 3600, ...runtimeOf(dir) });
 
     // Platform does not hold up creation: it starts in a follow-up operation as
     // soon as the quorums form, as legacy devnets did. Devnets pinned to a
@@ -508,6 +543,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       });
       // The network file now carries this phase's images for later operations.
       writeFileSync(join(dir, 'network-current.yaml'), readFileSync(join(dir, phase.candidate)), { mode: 0o600 });
+      register(name, runtimeOf(dir));
       r.done.push(`phase-${n}`); save(r);
       done('ok');
     }

@@ -423,7 +423,7 @@ test('Platform epoch is part of a devnet request: one hour by default, 60 s .. 3
   const q = (devnet) => ({ id: '6c8139ad-e92f-40da-943d-1e001efacc05', network: 'devnet-epochs', action: 'create-devnet', devnet });
   assert.equal(validateDevnetRequest(s, q({}), {}).platformEpochSeconds, 3600);
   assert.equal(validateDevnetRequest(s, q({ platformEpochSeconds: 600 }), {}).platformEpochSeconds, 600);
-  for (const bad of [59, 30 * 86400 + 1, 1.5, '3600']) assert.throws(() => validateDevnetRequest(s, q({ platformEpochSeconds: bad }), {}), /platformEpochSeconds/);
+  for (const bad of [59, 179, 30 * 86400 + 1, 1.5, '3600']) assert.throws(() => validateDevnetRequest(s, q({ platformEpochSeconds: bad }), {}), /platformEpochSeconds/);
 });
 
 test('services before Platform skip only the Platform-dependent checks', async () => {
@@ -538,4 +538,19 @@ test('deleting a devnet releases its addresses only once EC2 has detached them',
   assert.deepEqual(steps.map((s) => [s.name, s.status]), [['Remove DNS records', 'ok'], ['Terminate instances', 'ok'], ['Wait for addresses to detach', 'ok'],
     ['Release BYOIP addresses (dashnet release-addresses)', 'ok'], ['Delete retained root volumes', 'ok']]);
   assert.equal(JSON.parse(readFileSync(join(dirs.data, 'devnets.json'), 'utf8'))['devnet-gone'].status, 'deleted');
+});
+
+test('dashmate-rendered devnets need an IPAM pool, and their dashmate follows Drive', async () => {
+  const { validateDevnetRequest, imagesOf, helperFollowsDrive } = await import('./devnets.js');
+  const s = structuredClone(settings);
+  const q = (devnet) => ({ id: '6c8139ad-e92f-40da-943d-1e001efacc06', network: 'devnet-dashmate', action: 'create-devnet', devnet });
+  assert.equal(validateDevnetRequest(s, q({}), {}).images.helper, s.devnets.images.helper);
+  // A newer Drive brings its own dashmate release unless the helper is chosen too.
+  assert.equal(validateDevnetRequest(s, q({ images: { drive: 'dashpay/drive:4.2.0-beta.6' } }), {}).images.helper, 'dashpay/dashmate-helper:4.2.0-beta.6');
+  assert.equal(validateDevnetRequest(s, q({ images: { drive: 'dashpay/drive:4.2.0-beta.6', helper: 'dashpay/dashmate-helper:4.2.0-beta.5' } }), {}).images.helper, 'dashpay/dashmate-helper:4.2.0-beta.5');
+  assert.deepEqual(helperFollowsDrive({ drive: 'dashpay/drive@sha256:' + 'a'.repeat(64), helper: 'h' }), { drive: 'dashpay/drive@sha256:' + 'a'.repeat(64), helper: 'h' }, 'a digest pins no release to follow');
+  s.devnets.ipamPoolId = '';
+  assert.throws(() => validateDevnetRequest(s, q({}), {}), /IPAM pool is required/);
+  assert.deepEqual(imagesOf('apiVersion: x\nimages:\n  core: docker.io/dashpay/dashd:23\n  helper: docker.io/dashpay/dashmate-helper:4.2.0-beta.6\n  acme: docker.io/goacme/lego:v5.5.2\nnodes: []\n'),
+    { core: 'dashpay/dashd:23', helper: 'dashpay/dashmate-helper:4.2.0-beta.6', acme: 'goacme/lego:v5.5.2' });
 });

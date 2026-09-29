@@ -124,3 +124,18 @@ test('a trusted gateway certificate close to expiry means renewal is failing', (
   lapsed.dapi.tls.expired = true;
   assert.ok(reasons([evo('a', lapsed)]).includes('gateway certificate expired'), 'an expired issued certificate fails verification yet is reported');
 });
+
+test('console devnets carry their images and dashmate release; sidecars are labelled', async () => {
+  const { devnetEntry } = await import('./settings.js');
+  const { sidecarOf } = await import('./evaluate.js');
+  const entry = devnetEntry('devnet-x', { status: 'ready', images: { helper: 'dashpay/dashmate-helper:4.2.0-beta.6' }, dashmate: true });
+  assert.equal(entry.dashmate, true);
+  assert.equal(entry.images.helper, 'dashpay/dashmate-helper:4.2.0-beta.6');
+  assert.equal(entry.observationWindow, '30s', 'Platform liveness no longer needs a long window');
+  assert.equal(devnetEntry('devnet-old', { status: 'ready' }).dashmate, false);
+  assert.equal(sidecarOf({ repo: 'osminogin/tor-simple', name: 'dashnet-x-validators-001-core_tor' }), 'Tor');
+  assert.equal(sidecarOf({ repo: 'envoyproxy/ratelimit', name: 'x-gateway_rate_limiter' }), 'rate limiter');
+  assert.equal(sidecarOf({ repo: 'redis', name: 'dashnet-x-validators-001-gateway_rate_limiter_redis' }), 'rate limiter store');
+  assert.equal(sidecarOf({ repo: 'redis', name: 'some-cache' }), null, 'only the rate limiter store is a sidecar');
+  assert.equal(sidecarOf({ repo: 'dashpay/drive', name: 'x-drive_abci' }), null);
+});

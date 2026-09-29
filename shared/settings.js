@@ -12,6 +12,9 @@ export const COMPONENT_REPOS = {
   core: 'dashpay/dashd', drive: 'dashpay/drive', tenderdash: 'dashpay/tenderdash',
   dapi: 'dashpay/rs-dapi', gateway: 'dashpay/envoy', helper: 'dashpay/dashmate-helper',
 };
+// Services dashmate adds beside the components, by image repository (Redis
+// only as the gateway rate limiter's store).
+export const SIDECAR_REPOS = { 'osminogin/tor-simple': 'Tor', 'envoyproxy/ratelimit': 'rate limiter', 'prom/statsd-exporter': 'rate limiter metrics' };
 const endpoints = (net, extra = []) => [
   { label: 'Insight', url: `https://insight.${net}.networks.dash.org/insight/` },
   { label: 'Faucet', url: `https://faucet.${net}.networks.dash.org/` },
@@ -149,7 +152,8 @@ export function validateDevnetDefaults(d) {
   // Under 8 s a restarted node never completes Core's blockchain sync.
   req(d.blockTimeSeconds === undefined || (Number.isInteger(d.blockTimeSeconds) && d.blockTimeSeconds >= 8 && d.blockTimeSeconds <= 600), 'blockTimeSeconds 8..600');
   // Drive's EPOCH_TIME_LENGTH_S (dashnet deployment-plan --epoch-time).
-  req(d.platformEpochSeconds === undefined || (Number.isInteger(d.platformEpochSeconds) && d.platformEpochSeconds >= 60 && d.platformEpochSeconds <= 30 * 86400), 'platformEpochSeconds 60 s .. 30 days');
+  // dashmate's epochTime minimum is 180 s.
+  req(d.platformEpochSeconds === undefined || (Number.isInteger(d.platformEpochSeconds) && d.platformEpochSeconds >= 180 && d.platformEpochSeconds <= 30 * 86400), 'platformEpochSeconds 180 s .. 30 days');
   for (const c of COMPONENTS) req(IMAGE_TAG.test(d.images?.[c] || '') && d.images[c].replace(/^docker\.io\//, '').split(/[@:]/)[0] === COMPONENT_REPOS[c], `images.${c} must be ${COMPONENT_REPOS[c]}:<tag>`);
   req(!d.images?.acme || (IMAGE_TAG.test(d.images.acme) && d.images.acme.replace(/^docker\.io\//, '').split(/[@:]/)[0] === 'goacme/lego'), 'images.acme must be goacme/lego:<tag> (or empty for self-signed gateways)');
   req(!d.images?.acme || /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,24}$/.test(d.acmeEmail || ''), 'acmeEmail required for trusted gateway certificates');
@@ -202,6 +206,9 @@ export function devnetEntry(name, reg) {
     p2pPort: 20001, public: reg.public !== false, deployable: reg.status === 'ready', showBalances: true, kind: 'dashnet',
     // Components this devnet's dash-network-go can upgrade in place.
     upgradeScopes: reg.upgradeScopes || ['platform', 'tenderdash'],
+    // The images it runs now; with dashmate set, the helper is the dashmate
+    // release that renders its services.
+    images: reg.images || null, dashmate: !!reg.dashmate,
     description: '',
     endpoints: [
       dns.insight && { label: 'Insight', url: `https://${dns.insight.host}/insight-api/status` },
@@ -209,7 +216,7 @@ export function devnetEntry(name, reg) {
       dns.explorer && { label: 'Explorer', url: `https://${dns.explorer.host}/` },
       dns.faucet && { label: 'Faucet', url: `https://${dns.faucet.host}/api/status` },
     ].filter(Boolean),
-    observationWindow: '90s', operationTimeout: '110m',
+    observationWindow: '30s', operationTimeout: '110m',
   };
 }
 

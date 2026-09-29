@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useState } from 'react';
 import { ago, api, bytes, canOperate, canSee, clock, dash, duration, navigate, num, short, span, useNow, useResource, useSession, ROLE_LABEL } from '../lib.js';
 import { Delta, Dot, Empty, Err, Level, Link, Meter, Section, Stat } from '../ui.jsx';
 import Operations from './Operations.jsx';
-import { COMPONENTS, OPERABLE, REPOS, cmp, newestRelease, reported } from '../releases.js';
+import { cmp, COMPONENTS, helperFor, imageTag, newestRelease, OPERABLE, reported, REPOS } from '../releases.js';
 import Connect from './Connect.jsx';
 
 const ROLE_ORDER = ['validator', 'masternode', 'seed', 'fullnode', 'web', 'wallet', 'miner', 'mixer', 'quorums', 'metrics', 'logs', 'vpn', 'other'];
@@ -196,7 +196,7 @@ function columns(role, tips, now, hostsHaveServices) {
     ...sys];
   return [...base,
     { h: 'core height', n: 1, c: (h) => h.core ? <>{num(h.core.height)}<Delta value={tips.core - h.core.height} /></> : '—' },
-    { h: 'software', c: (h) => <span className="mono text-[11.5px]">{coreVer(h) ? `core ${coreVer(h)}` : ''}{h.containers.filter((k) => !k.component).slice(0, 3).map((k) => ` ${k.image.split('/').pop()}`).join('')}</span> },
+    { h: 'software', c: (h) => <span className="mono text-[11.5px]">{coreVer(h) ? `core ${coreVer(h)}` : ''}{h.containers.filter((k) => !k.component && !k.sidecar).slice(0, 3).map((k) => ` ${k.image.split('/').pop()}`).join('')}</span> },
     { h: 'containers', n: 1, c: (h) => h.containers.length ? `${h.containers.filter((k) => k.running).length}/${h.containers.length}` : '—' },
     { h: 'type', c: (h) => <span className="text-dim mono">{h.instanceType}</span> },
     ...sys];
@@ -296,7 +296,7 @@ function HostDetail({ h, now, member, operator, network }) {
             {h.containers.map((k) => (
               <tr key={k.name} className={k.running ? '' : 'text-dim'}>
                 <td className="pr-2"><Dot level={k.running ? (k.health === 'unhealthy' ? 'warn' : 'ok') : 'stopped'} /></td>
-                <td className="pr-3 break-all">{k.name}</td>
+                <td className="pr-3 break-all">{k.name}{k.sidecar && <span className="text-dim"> · {k.sidecar}</span>}</td>
                 <td className="pr-3 break-all" title={k.digest || ''}>{k.image.replace(/@sha256:(.{12}).*/, '@$1…')}</td>
                 <td className="pr-3 whitespace-nowrap">{k.running ? `up ${ago(k.startedAt, now)}` : k.state}</td>
                 <td className="text-right whitespace-nowrap">{k.restarts ? <span className="lv-warn">{k.restarts} restarts</span> : ''}</td>
@@ -349,6 +349,7 @@ function Lifecycle({ n, member, admin }) {
       {l.status === 'ready' && l.platform === 'starting' && <span className="lv-info">Platform starts as soon as the quorums form</span>}
       {l.status === 'ready' && l.platform === 'stopped' && <span className="lv-down">Platform has not started: resume its operation</span>}
       <span className="text-dim">Core block every {l.blockTimeSeconds}s{l.platformEpochSeconds ? ` · Platform epoch ${span(l.platformEpochSeconds)}` : ''}</span>
+      {n.dashmate && <span className="text-dim" title="Every node's services are rendered by this dashmate release and run from its compose files">services by dashmate <span className="mono">{imageTag(n.images?.helper) || '—'}</span></span>}
       <span className="text-dim">created by {l.createdBy} {l.createdAt ? ago(l.createdAt) + ' ago' : ''}</span>
       {member && l.operation && <Link className="link" to={`/n/${n.name}/ops/${l.operation}`}>creation log</Link>}
       {l.dns && Object.entries(l.dns).filter(([k]) => !k.startsWith('seed-')).map(([k, v]) => <a key={k} className="link mono" href={`https://${v.host}/`} target="_blank" rel="noreferrer">{k}</a>)}
@@ -386,7 +387,15 @@ function Updates({ n }) {
     Promise.all(components.map(async (c) => {
       const running = [...new Set(hosts.filter((h) => h.containers.some((k) => k.component === c)).map((h) => reported(h, c)).filter(Boolean))].sort(cmp)[0];
       try { const next = newestRelease((await api(`/api/images/${c}/tags`)).tags, running); return next ? { c, from: running, to: next } : null; } catch { return null; }
-    })).then((list) => current && setState({ network: n.name, updates: list.filter(Boolean) }));
+    })).then(async (list) => {
+      const updates = list.filter(Boolean);
+      // dashmate renders a console devnet: its helper follows Drive's release.
+      if (native && n.dashmate) {
+        const drive = updates.find((u) => u.c === 'drive')?.to || [...new Set(hosts.map((h) => reported(h, 'drive')).filter(Boolean))].sort(cmp)[0];
+        try { const u = helperFor(n, drive, (await api('/api/images/helper/tags')).tags); if (u) updates.push(u); } catch { /* tags unavailable */ }
+      }
+      if (current) setState({ network: n.name, updates });
+    });
     return () => { current = false; };
   }, [n.name, key]); // eslint-disable-line react-hooks/exhaustive-deps
   const updates = state.network === n.name ? state.updates : [];

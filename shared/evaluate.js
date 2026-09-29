@@ -1,6 +1,6 @@
 // Turns agent state into what the board shows. Every status comes with the
 // concrete facts that produced it; there is no status without a reason.
-import { COMPONENT_REPOS } from './settings.js';
+import { COMPONENT_REPOS, SIDECAR_REPOS } from './settings.js';
 
 export const LEVELS = ['ok', 'warn', 'down', 'unreachable', 'stopped', 'deploying'];
 // `info` facts are shown with the host but never change its status.
@@ -8,6 +8,12 @@ const RANK = { info: 0, ok: 0, stopped: 1, deploying: 1, warn: 2, down: 3, unrea
 const BY_REPO = Object.fromEntries(Object.entries(COMPONENT_REPOS).map(([c, r]) => [r, c]));
 // Older agents reported index.docker.io/ prefixes for digest-pulled images.
 const COMPONENT_OF = new Proxy(BY_REPO, { get: (t, k) => (typeof k === 'string' ? t[k.replace(/^(index\.)?docker\.io\//, '')] : undefined) });
+// What a dashmate sidecar container is for, if it is one.
+export function sidecarOf(container) {
+  const repo = String(container.repo || '').replace(/^(index\.)?docker\.io\/(library\/)?/, '');
+  if (SIDECAR_REPOS[repo]) return SIDECAR_REPOS[repo];
+  return repo === 'redis' && /rate_limiter_redis/.test(container.name || '') ? 'rate limiter store' : null;
+}
 const CORE_ROLES = new Set(['validator', 'masternode', 'seed', 'fullnode', 'web', 'wallet', 'miner', 'mixer']);
 
 export function tagOf(image) {
@@ -167,7 +173,7 @@ export function projectNetwork(network, evaluation, state, operator) {
       insight: d.insight || null, faucet: d.faucet ? (operator || network.showBalances ? d.faucet : { ...d.faucet, balance: undefined, utxos: undefined }) : null, quorumServer: d.quorumServer || null, explorer: d.explorer || null,
       wallets: c.wallets && (network.showBalances || operator) ? c.wallets.filter((w) => w.name).map((w) => ({ name: w.name, trusted: w.trusted, pending: w.pending, immature: w.immature, coinjoin: w.coinjoin })) : c.wallets ? { count: c.wallets.filter((w) => w.name).length } : null,
       system: d.system ? { load: s.load, cpus: s.cpus, memPercent: pct(s.memTotal - s.memAvailable, s.memTotal), memTotal: s.memTotal, swapPercent: s.swapTotal ? pct(s.swapTotal - s.swapFree, s.swapTotal) : null, disks: (s.disks || []).map((x) => ({ mount: x.mount, percent: pct(x.used, x.size), size: x.size, avail: x.avail })), uptime: s.uptime, os: s.os, kernel: s.kernel } : null,
-      containers: (d.containers || []).map((k) => ({ name: k.name, component: COMPONENT_OF[k.repo] || null, image: k.image, version: COMPONENT_OF[k.repo] ? versionOf(COMPONENT_OF[k.repo], k, d, evaluation.tags) : tagOf(k.image), digest: k.digest, state: k.state, running: k.running, restarts: k.restarts, startedAt: k.startedAt, health: k.health })),
+      containers: (d.containers || []).map((k) => ({ name: k.name, component: COMPONENT_OF[k.repo] || null, sidecar: sidecarOf(k), image: k.image, version: COMPONENT_OF[k.repo] ? versionOf(COMPONENT_OF[k.repo], k, d, evaluation.tags) : tagOf(k.image), digest: k.digest, state: k.state, running: k.running, restarts: k.restarts, startedAt: k.startedAt, health: k.health })),
       p2p: h.p2p ? { port: h.p2p.port, ok: h.p2p.ok, ms: h.p2p.ms } : null,
       dapiPublic: h.dapiPublic ? { ok: h.dapiPublic.ok, ms: h.dapiPublic.ms } : null,
     };
@@ -176,7 +182,7 @@ export function projectNetwork(network, evaluation, state, operator) {
   });
   return {
     name: network.name, displayName: network.displayName, description: network.description || '', chainType: network.chainType, coreNetwork: network.coreNetwork,
-    public: network.public, deployable: network.deployable, kind: network.kind || 'managed', upgradeScopes: network.upgradeScopes || null, lifecycle: network.lifecycle || null, observationWindow: network.observationWindow, operationTimeout: network.operationTimeout, level: evaluation.level, generatedAt: evaluation.generatedAt, ageSeconds: evaluation.ageSeconds,
+    public: network.public, deployable: network.deployable, kind: network.kind || 'managed', upgradeScopes: network.upgradeScopes || null, images: network.images || null, dashmate: !!network.dashmate, lifecycle: network.lifecycle || null, observationWindow: network.observationWindow, operationTimeout: network.operationTimeout, level: evaluation.level, generatedAt: evaluation.generatedAt, ageSeconds: evaluation.ageSeconds,
     pollSeconds: state?.pollSeconds || null, discovery: state?.discovery ? { at: state.discovery.at, error: operator ? state.discovery.error : state.discovery.error ? 'discovery failed' : null } : null,
     summary: evaluation.summary, endpoints: (state?.endpoints || []).map((e) => ({ label: e.label, kind: e.kind, url: e.url, status: e.status, ok: e.ok, ms: e.ms, error: e.error, height: e.height, version: e.version, chainId: e.chainId })),
     hosts, journal: operator ? state?.journal || null : undefined,
