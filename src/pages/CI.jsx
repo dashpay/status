@@ -22,10 +22,10 @@ const secs = (s) => {
 export default function CI() {
   const session = useSession();
   const now = useNow(1000);
-  const { data, error, reload } = useResource(session.user ? '/api/ci' : null, (t) => t === 'ci');
+  // Signed out (or without access) the server sends a sanitized view.
+  const { data, error, reload } = useResource(session.loaded ? `/api/ci?as=${session.user?.id || 'public'}` : null, (t) => t === 'ci');
   const [bind, tip] = useTip();
   if (!session.loaded) return <div className="mt-6 text-dim">Loading…</div>;
-  if (!session.user) return <div className="mt-6"><Empty>Sign in with GitHub to see CI runners.</Empty></div>;
   if (error) return <div className="mt-6"><Err error={error} /></div>;
   if (!data) return <div className="mt-6 text-dim">Loading…</div>;
   const t = data.totals;
@@ -37,6 +37,7 @@ export default function CI() {
         <h1 className="text-[16px] font-semibold">CI runners</h1>
         <span className="text-dim text-[12px]">self-hosted GitHub Actions runners · live from each runner host, queue times from GitHub</span>
       </div>
+      {data.public && <div className="mt-2 text-[12px] text-dim">Public view: hosts are anonymised; branches, links and private repositories are left out. {session.user ? 'Your account has no access to more.' : 'Sign in for details.'}</div>}
       <div className="mt-3 grid gap-2 grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
         <Stat label="Runners online" value={`${t.online}/${t.runners}`} level={t.online < t.runners ? 'down' : 'ok'} sub={`${t.busy} busy now`} />
         <Stat label="Waiting for a runner" value={data.queue ? t.queuedNow : '—'} level={t.queuedNow > 0 ? 'warn' : undefined}
@@ -63,8 +64,8 @@ export default function CI() {
               <tbody>
                 {data.queue.jobs.map((j) => (
                   <tr key={j.id || j.url}><td className="mono lv-warn">{ago(j.createdAt, now)}</td><td className="mono">{j.repo}</td>
-                    <td><a className="link" href={j.url} target="_blank" rel="noreferrer">{j.workflow} · {j.name}</a></td>
-                    <td className="mono text-dim">{j.labels.join(', ')}</td><td className="mono text-dim truncate max-w-[240px]">{j.branch}</td></tr>
+                    <td>{j.url ? <a className="link" href={j.url} target="_blank" rel="noreferrer">{j.workflow} · {j.name}</a> : `${j.workflow} · ${j.name}`}</td>
+                    <td className="mono text-dim">{j.labels.join(', ')}</td><td className="mono text-dim truncate max-w-[240px]">{j.branch || '—'}</td></tr>
                 ))}
               </tbody>
             </table>
@@ -80,7 +81,7 @@ export default function CI() {
       <Section title="Recent jobs">
         <div className="panel overflow-x-auto max-h-[520px]">
           <table className="grid w-full text-[12px]">
-            <thead><tr><th>Finished</th><th>Runner</th><th>Repository</th><th>Workflow / job</th><th>Branch</th><th className="text-right">Queued</th><th className="text-right">Ran</th><th>Result</th></tr></thead>
+            <thead><tr><th>Finished</th><th>Runner</th><th>Repository</th><th>Workflow / job</th>{!data.public && <th>Branch</th>}<th className="text-right">Queued</th><th className="text-right">Ran</th><th>Result</th></tr></thead>
             <tbody>
               {data.recent.map((j) => (
                 <tr key={`${j.runnerName}|${j.start}|${j.name}`}>
@@ -88,7 +89,7 @@ export default function CI() {
                   <td className="mono">{j.runnerName}</td>
                   <td className="mono text-dim">{j.repo || '—'}</td>
                   <td className="max-w-[420px] truncate">{j.url ? <a className="link" href={j.url} target="_blank" rel="noreferrer">{j.workflow ? `${j.workflow} · ` : ''}{j.name}</a> : j.name}</td>
-                  <td className="mono text-dim max-w-[200px] truncate">{j.headRef || j.ref?.replace(/^refs\/(heads|tags)\//, '') || '—'}</td>
+                  {!data.public && <td className="mono text-dim max-w-[200px] truncate">{j.headRef || j.ref?.replace(/^refs\/(heads|tags)\//, '') || '—'}</td>}
                   <td className="mono text-right">{secs(j.queueSec)}</td>
                   <td className="mono text-right">{secs(j.durationSec)}</td>
                   <td className={RESULT[j.result] || 'text-dim'}>{j.result || '—'}</td>
@@ -102,7 +103,7 @@ export default function CI() {
 
       {data.reporters && <Reporters reporters={data.reporters} reload={reload} now={now} />}
       <div className="mt-3 text-faint text-[11px]">
-        {data.github.enabled ? `GitHub API: ${data.github.enriched} runs timed${data.github.rate ? `, ${data.github.rate.remaining} requests left this hour` : ''}.` : 'GitHub API credentials not configured: no queue times.'}
+        {data.public ? null : data.github.enabled ? `GitHub API: ${data.github.enriched} runs timed${data.github.rate ? `, ${data.github.rate.remaining} requests left this hour` : ''}.` : 'GitHub API credentials not configured: no queue times.'}
       </div>
     </div>
   );
@@ -117,17 +118,17 @@ function HostCard({ h, now, bind }) {
       <div className="px-3 py-2 border-b border-line flex items-center gap-2 flex-wrap">
         <Dot level={h.stale ? 'down' : 'ok'} />
         <span className="font-semibold">{h.label}</span>
-        <span className="text-dim mono text-[11px]">{h.hostname} · {h.os} · {h.arch} · {h.cpus} CPU</span>
+        <span className="text-dim mono text-[11px]">{[h.hostname, h.os, h.arch, `${h.cpus} CPU`].filter(Boolean).join(' · ')}</span>
         <span className={`ml-auto mono text-[11px] ${h.stale ? 'lv-down' : 'text-dim'}`} title={clock(h.receivedAt)}>{h.stale ? 'no report for ' : 'reported '}{ago(h.receivedAt, now)}{h.stale ? '' : ' ago'}</span>
       </div>
       <div className="px-3 py-2 grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-1 text-[12px]">
         <Metric k="Load (1m / CPUs)"><Meter value={h.load?.[0] != null && h.cpus ? (h.load[0] / h.cpus) * 100 : null} /></Metric>
         <Metric k="Memory"><Meter value={h.memTotal ? (h.memUsed / h.memTotal) * 100 : null} warn={90} /></Metric>
-        <Metric k={`Disk ${disk?.path === '/' ? '' : disk?.path || ''}`}><Meter value={disk ? (1 - disk.free / disk.total) * 100 : null} /><div className="text-faint mono text-[10.5px] text-right">{disk ? `${bytes(disk.free)} free` : ''}</div></Metric>
+        <Metric k={`Disk ${!disk?.path || disk.path === '/' ? '' : disk.path}`}><Meter value={disk ? (1 - disk.free / disk.total) * 100 : null} /><div className="text-faint mono text-[10.5px] text-right">{disk ? `${bytes(disk.free)} free` : ''}</div></Metric>
         <Metric k="Docker"><div className="mono text-right">{docker != null ? bytes(docker) : '—'}</div><div className="text-faint mono text-[10.5px] text-right">{reclaim ? `${bytes(reclaim)} reclaimable` : h.docker?.error ? 'unavailable' : ''}</div></Metric>
       </div>
       {h.runners.map((r) => <RunnerRow key={r.name} r={r} now={now} bind={bind} />)}
-      <div className="px-3 py-1.5 border-t border-line text-faint text-[10.5px] mono">up {secs(h.uptimeSec)} · reporter v{h.reporter} · python {h.python}</div>
+      <div className="px-3 py-1.5 border-t border-line text-faint text-[10.5px] mono">up {secs(h.uptimeSec)}{h.reporter ? ` · reporter v${h.reporter} · python ${h.python}` : ''}</div>
     </div>
   );
 }
@@ -146,7 +147,7 @@ function RunnerRow({ r, now, bind }) {
         <span className="mono font-semibold">{r.name}</span>
         <span className={`lv-${level}`}>{label}</span>
         {r.pool && <span className="tag">{r.pool}</span>}
-        <span className="text-dim mono text-[11px]">{r.kind === 'docker' ? `container ${r.container}` : 'native'}{r.version ? ` · v${r.version}` : ''}</span>
+        <span className="text-dim mono text-[11px]">{r.kind === 'docker' ? (r.container ? `container ${r.container}` : 'in Docker') : 'native'}{r.version ? ` · v${r.version}` : ''}</span>
         <span className="ml-auto text-dim text-[11px]">24h: <span className="mono text-fg">{r.day.jobs}</span> jobs{r.day.failed ? <> · <span className="mono lv-down">{r.day.failed}</span> failed</> : null} · busy <span className="mono text-fg">{pct((r.day.busySec / 86400) * 100)}</span></span>
       </div>
       {r.job && (

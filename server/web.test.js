@@ -190,8 +190,9 @@ test('access changes save at once and survive a reload; admins cannot lock thems
 test('CI: admins issue reporter tokens; reporters post with them; infrastructure pages need access', async () => {
   const w = await start();
   try {
-    assert.equal((await w.req('/api/ci')).status, 401);
-    assert.equal((await w.req('/api/aws')).status, 401);
+    // Signed out: the sanitized views.
+    assert.equal((await (await w.req('/api/ci')).json()).public, true);
+    assert.equal((await w.req('/api/aws')).status, 404, 'no inventory yet');
     const csrf = await w.login();
     const created = await w.req('/api/ci/reporters', { method: 'POST', body: JSON.stringify({ label: 'ubuntu-server-2' }), headers: { 'content-type': 'application/json', 'x-csrf-token': csrf } });
     assert.equal(created.status, 201);
@@ -211,9 +212,23 @@ test('CI: admins issue reporter tokens; reporters post with them; infrastructure
     assert.equal(s.runners[0].name, 'ubuntu-server-2');
     assert.equal(s.reporters[0].id, id);
     assert.equal((await w.req('/api/aws')).status, 404);
-    writeFileSync(join(w.dataDir, 'aws', 'inventory.json'), JSON.stringify({ at: 'now', instances: [] }));
+    writeFileSync(join(w.dataDir, 'aws', 'inventory.json'), JSON.stringify({ at: 'now', regions: ['us-west-2'], errors: [],
+      instances: [{ region: 'us-west-2', id: 'i-0123456789abcdef0', type: 't4g.small', state: 'running', arch: 'arm64', publicIp: '192.0.2.9', tags: { Name: 'dn-testnet-masternode-1', DashNetwork: 'testnet' }, vcpus: 2, memoryMiB: 2048 }],
+      volumes: [{ region: 'us-west-2', id: 'vol-1', sizeGiB: 50, type: 'gp3' }], addresses: [{ region: 'us-west-2', publicIp: '192.0.2.9' }], natGateways: [], loadBalancers: [{ region: 'us-west-2', name: 'testnet-alb', type: 'application', dns: 'testnet-alb.elb.amazonaws.com' }],
+      lambda: [{ name: 'killdate' }], dynamodb: [], ecr: [{ name: 'rs-dapi', images: 10, bytes: 1e9 }], snapshots: [], cloudfront: [{ aliases: ['quorums.testnet.networks.dash.org'] }], s3: [{ name: 'dash-terraform-state' }],
+      costs: { at: 'now', month: '2026-09', monthToDate: 3270.85, monthEndEstimate: 3503.4, lastMonth: 3109.17, byService: [{ service: 'EC2 - Other', amount: 1178.9 }], daily: [] } }));
     assert.equal((await (await w.req('/api/aws')).json()).at, 'now');
+    assert.equal((await (await w.req('/api/aws')).json()).instances[0].publicIp, '192.0.2.9', 'members see the inventory');
     assert.equal((await w.req(`/api/ci/reporters/${id}`, { method: 'DELETE', headers: { 'x-csrf-token': csrf } })).status, 200);
+    // Signed out: spend and breakdowns, nothing that names or locates a resource.
+    await w.req('/api/auth/logout', { method: 'POST', headers: { 'x-csrf-token': csrf } });
+    const pub = await (await w.req('/api/aws')).json();
+    assert.equal(pub.public, true);
+    assert.deepEqual(pub.byNetwork, [{ label: 'testnet', count: 1, vcpus: 2, memoryGiB: 2 }]);
+    assert.equal(pub.costs.monthToDate, 3270.85);
+    const text = JSON.stringify(pub);
+    for (const leak of ['192.0.2.9', 'i-0123456789abcdef0', 'dn-testnet-masternode-1', 'testnet-alb', 'elb.amazonaws', 'killdate', 'rs-dapi', 'quorums.testnet', 'dash-terraform-state', 'vol-1'])
+      assert.ok(!text.includes(leak), `leaked ${leak}`);
     assert.equal((await post(`Bearer ${token}`)).status, 401);
   } finally { w.close(); }
 });

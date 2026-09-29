@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createAuth } from './auth.js';
 import { createCi } from './ci.js';
+import { publicInventory } from './aws-public.js';
 import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, loadSettings, memberOf, operatorFor, readJSON, saveSettings, validateSettings, writeAtomic } from '../shared/settings.js';
 import { evaluateNetwork, projectNetwork } from '../shared/evaluate.js';
 import { devnetFiles } from '../shared/devnet-files.js';
@@ -48,7 +49,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     try {
       const r = ci.ingest(req.reporter, req.body);
       clearTimeout(debounce.get('ci'));
-      debounce.set('ci', setTimeout(() => push('ci', { at: new Date(clock()).toISOString() }, (c) => memberOf(settings, c.user)), 2000));
+      debounce.set('ci', setTimeout(() => push('ci', { at: new Date(clock()).toISOString() }), 2000));
       res.json(r);
     } catch (e) { res.status(400).json({ error: e.message }); }
   });
@@ -131,7 +132,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   const onAwsFile = (file) => {
     if (file !== 'inventory.json') return;
     clearTimeout(debounce.get('aws'));
-    debounce.set('aws', setTimeout(() => push('aws', { at: new Date(clock()).toISOString() }, (c) => memberOf(settings, c.user)), 500));
+    debounce.set('aws', setTimeout(() => push('aws', { at: new Date(clock()).toISOString() }), 500));
   };
   const watchers = [];
   for (const [dir, fn] of [[dirs.state, onStateFile], [dirs.ops, onOpFile], [awsDir, onAwsFile]]) {
@@ -291,9 +292,17 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     next.operators = next.operators.filter((o) => o.id !== id);
   }));
 
-  // Infrastructure pages: any account with access. CI reporters: admins.
-  const anyAccess = (req, res, next) => (memberOf(settings, user(req)) ? next() : res.status(user(req) ? 403 : 401).json({ error: 'Sign in with an account that has access' }));
-  app.get('/api/ci', anyAccess, (req, res) => res.json(ci.summary({ admin: isAdmin(req) })));
+  // Infrastructure pages: full detail for any account with access; before
+  // sign-in a sanitized view (statistics and spend, nothing identifying).
+  const publicCache = new Map();
+  const cached = (key, fn) => {
+    const hit = publicCache.get(key);
+    if (hit && clock() - hit.at < 15_000) return hit.value;
+    const value = fn();
+    publicCache.set(key, { at: clock(), value });
+    return value;
+  };
+  app.get('/api/ci', (req, res) => res.json(memberOf(settings, user(req)) ? ci.summary({ admin: isAdmin(req) }) : cached('ci', () => ci.publicSummary())));
   app.post('/api/ci/reporters', ...adminWrite, (req, res) => {
     try {
       const { id, token } = ci.addReporter(req.body?.label);
@@ -303,10 +312,10 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   app.delete('/api/ci/reporters/:id', ...adminWrite, (req, res) => {
     try { ci.removeReporter(req.params.id); res.json({ ok: true }); } catch (e) { res.status(404).json({ error: e.message }); }
   });
-  app.get('/api/aws', anyAccess, (req, res) => {
+  app.get('/api/aws', (req, res) => {
     const inv = readJSON(join(awsDir, 'inventory.json'));
     if (!inv) return res.status(404).json({ error: 'No AWS inventory yet; the agent collects it every 10 minutes' });
-    res.json(inv);
+    res.json(memberOf(settings, user(req)) ? inv : cached(`aws|${inv.at}`, () => publicInventory(inv)));
   });
 
   // GitHub account lookup so admins can grant access by login.

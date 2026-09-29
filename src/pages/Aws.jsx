@@ -12,12 +12,13 @@ const EIP_MONTH = 3.65, GP_GIB_MONTH = 0.08, SNAP_GIB_MONTH = 0.05, ECR_GB_MONTH
 export default function Aws() {
   const session = useSession();
   const now = useNow(5000);
-  const { data, error } = useResource(session.user ? '/api/aws' : null, (t) => t === 'aws');
+  // Signed out (or without access) the server sends spend and breakdowns only.
+  const { data, error } = useResource(session.loaded ? `/api/aws?as=${session.user?.id || 'public'}` : null, (t) => t === 'aws');
   const [bind, tip] = useTip();
   if (!session.loaded) return <div className="mt-6 text-dim">Loading…</div>;
-  if (!session.user) return <div className="mt-6"><Empty>Sign in with GitHub to see the AWS inventory.</Empty></div>;
   if (error) return <div className="mt-6">{error.status === 404 ? <Empty>{error.message}</Empty> : <Err error={error} />}</div>;
   if (!data) return <div className="mt-6 text-dim">Loading…</div>;
+  if (data.public) return <PublicInventory inv={data} now={now} bind={bind} tip={tip} signedIn={!!session.user} />;
   return <Inventory inv={data} now={now} bind={bind} tip={tip} />;
 }
 
@@ -100,6 +101,66 @@ function Inventory({ inv, now, bind, tip }) {
             <div><span className="text-dim">Lambda ({inv.lambda.length}):</span> <span className="mono">{inv.lambda.map((f) => `${f.name} (${f.region})`).join(', ') || '—'}</span></div>
             <div><span className="text-dim">DynamoDB ({inv.dynamodb.length}):</span> <span className="mono">{inv.dynamodb.map((t) => `${t.name} (${t.region})`).join(', ') || '—'}</span></div>
             <div><span className="text-dim">S3 buckets ({inv.s3.length}):</span> <span className="mono">{inv.s3.map((b) => b.name).join(', ') || '—'}</span></div>
+          </div>
+        </Section>
+      </div>
+    </div>
+  );
+}
+
+// Before sign-in: what runs and what it costs, as totals and breakdowns.
+function PublicInventory({ inv, now, bind, tip, signedIn }) {
+  const c = inv.costs;
+  const s = inv.storage;
+  const breakdown = (title, rows) => (
+    <Section title={title}>
+      <div className="panel p-3">
+        <HBars rows={rows.slice(0, 10).map((r) => ({ label: r.label, value: r.count, vcpus: r.vcpus, memoryGiB: r.memoryGiB }))} bind={bind} format={(v) => v.toLocaleString('en-US')} color={SERIES[0]}
+          tip={(r) => (<><div className="text-dim mb-0.5">{r.label}</div><TipRow value={r.value} label="running instances" /><TipRow value={r.vcpus} label="vCPU" /><TipRow value={`${r.memoryGiB} GiB`} label="memory" /></>)} />
+      </div>
+    </Section>
+  );
+  return (
+    <div>
+      <TipLayer tip={tip} />
+      <div className="mt-5 flex flex-wrap items-baseline gap-x-3">
+        <h1 className="text-[16px] font-semibold">AWS</h1>
+        <span className="text-dim text-[12px]">what DCG runs for Dash networks, across {inv.regionsInUse} regions · updated <span title={clock(inv.at)}>{ago(inv.at, now)} ago</span></span>
+      </div>
+      <div className="mt-2 text-[12px] text-dim">Public view: totals and breakdowns only. {signedIn ? 'Your account has no access to more.' : 'Sign in for the full inventory.'}</div>
+      <div className="mt-3 grid gap-2 grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
+        <Stat label="Instances running" value={inv.instances.running} sub={`${inv.instances.vcpus.toLocaleString('en-US')} vCPU · ${inv.instances.memoryGiB.toLocaleString('en-US')} GiB`} />
+        <Stat label="Cost · month to date" value={usd(c?.monthToDate)} sub={c ? `last month ${usd(c.lastMonth)}` : '—'} />
+        <Stat label="Month-end estimate" value={usd(c?.monthEndEstimate)} sub={c ? 'Cost Explorer forecast' : ''} />
+        <Stat label="Block storage" value={`${(s.ebsGiB / 1024).toFixed(1)} TiB`} sub={`${s.volumes} EBS volumes`} />
+        <Stat label="Container images" value={bytes(s.ecrBytes)} sub={`${s.ecrImages.toLocaleString('en-US')} images`} />
+        <Stat label="Edge and network" value={`${inv.network.loadBalancers} LB · ${inv.network.cloudfront} CDN`} sub={`${inv.network.elasticIps} Elastic IPs · ${inv.network.natGateways} NAT`} />
+      </div>
+      {c && (
+        <div className="grid grid-cols-1 gap-x-4 xl:grid-cols-2">
+          <CostByService c={c} bind={bind} />
+          <DailyCost c={c} bind={bind} />
+        </div>
+      )}
+      <div className="grid grid-cols-1 gap-x-4 lg:grid-cols-2">
+        {breakdown('Running instances by network', inv.byNetwork)}
+        {breakdown('Running instances by region', inv.byRegion)}
+        {breakdown('Running instances by family', inv.byFamily)}
+        {breakdown('Running instances by architecture', inv.byArch)}
+      </div>
+      <div className="grid grid-cols-1 gap-x-4 lg:grid-cols-2">
+        <Section title="Block storage by volume type">
+          <div className="panel p-3">
+            <HBars rows={s.ebsByType.map((r) => ({ label: r.label, value: r.gib }))} bind={bind} format={(v) => `${v.toLocaleString('en-US')} GiB`} color={SERIES[0]}
+              tip={(r) => (<><div className="text-dim mb-0.5">{r.label}</div><TipRow value={`${r.value.toLocaleString('en-US')} GiB`} label="provisioned" /></>)} />
+          </div>
+        </Section>
+        <Section title="Everything else">
+          <div className="panel p-3 grid grid-cols-2 sm:grid-cols-3 gap-3 text-[12px]">
+            {[['EBS snapshots', `${s.snapshotsGiB.toLocaleString('en-US')} GiB`], ['S3 buckets', s.s3Buckets], ['Lambda functions', inv.serverless.lambda], ['DynamoDB tables', inv.serverless.dynamodb],
+              ['Stopped instances', inv.instances.stopped], ['Regions enabled', inv.regions]].map(([k, v]) => (
+              <div key={k}><div className="text-dim text-[11px]">{k}</div><div className="mono text-[15px]">{v}</div></div>
+            ))}
           </div>
         </Section>
       </div>
