@@ -72,6 +72,7 @@ export default function Operation({ name, id }) {
             <span>phase <span className="mono">{op.progress.phase}</span></span>
             {op.progress.current && <span>withdrawn <span className="mono lv-warn">{op.progress.current}</span></span>}
             <span>applied <span className="mono">{op.progress.completed.length}/{review?.targets?.length ?? '?'}</span> {op.progress.completed.length ? <span className="text-dim mono">({op.progress.completed.join(', ')})</span> : null}</span>
+            {op.progress.starting && <span className="lv-warn mono">waiting for node to start: {op.progress.starting}</span>}
             {op.progress.waiting && <span className="lv-warn mono">waiting for fleet health: {op.progress.waiting}</span>}
           </div>
         </Section>

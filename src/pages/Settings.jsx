@@ -116,7 +116,7 @@ function NetworkEditor({ n, ro, update, remove }) {
         <TextField label="Core chain (getblockchaininfo.chain)" value={n.coreNetwork} ro={ro} mono onChange={(v) => update((x) => { x.coreNetwork = v; })} />
         <NumberField label="Core P2P port (fallback)" value={n.p2pPort} ro={ro} onChange={(v) => update((x) => { x.p2pPort = v; })} />
         <TextField label="Health observation window" value={n.observationWindow} ro={ro} mono onChange={(v) => update((x) => { x.observationWindow = v; })} />
-        <TextField label="Operation timeout" value={n.operationTimeout} ro={ro} mono onChange={(v) => update((x) => { x.operationTimeout = v; })} />
+        <TextField label="Operation timeout (per node)" value={n.operationTimeout} ro={ro} mono onChange={(v) => update((x) => { x.operationTimeout = v; })} />
         <Toggle label="Public (visible without sign-in)" value={n.public} ro={ro} onChange={(v) => update((x) => { x.public = v; })} />
         <Toggle label="Deployable from console" value={n.deployable} ro={ro || n.chainType === 'mainnet'} onChange={(v) => update((x) => { x.deployable = v; })} />
         <Toggle label="Show wallet balances publicly" value={n.showBalances} ro={ro} onChange={(v) => update((x) => { x.showBalances = v; })} />

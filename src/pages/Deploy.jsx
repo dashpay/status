@@ -158,7 +158,7 @@ export default function Deploy({ name }) {
       <Section title={`${needsComponents ? 4 : 3} · Options`}>
         <div className="panel p-3 flex flex-wrap gap-6 items-end">
           <label className="text-[12px]"><div className="text-dim mb-1">Observation window (health gap between checks)</div><input className="input w-28 mono" placeholder={n.observationWindow} value={window} onChange={(e) => setWindow(e.target.value.trim())} /></label>
-          {(action === 'upgrade' || action === 'deploy') && <label className="text-[12px]"><div className="text-dim mb-1">Operation timeout</div><input className="input w-28 mono" placeholder={n.operationTimeout} value={timeout} onChange={(e) => setTimeoutValue(e.target.value.trim())} /></label>}
+          {(action === 'upgrade' || action === 'deploy') && <label className="text-[12px]"><div className="text-dim mb-1">Operation timeout per node</div><input className="input w-28 mono" placeholder={n.operationTimeout} value={timeout} onChange={(e) => setTimeoutValue(e.target.value.trim())} /></label>}
           <div className="text-dim text-[11.5px] max-w-[520px]">Defaults come from Settings. Upgrades withdraw one host at a time; validators additionally require the remaining quorum to be healthy before each withdrawal.</div>
           {needsComponents && <label className="flex items-center gap-2 text-[12px] cursor-pointer"><input type="checkbox" checked={autoRun} onChange={(e) => setAutoRun(e.target.checked)} />
             <span>Start as soon as the plan is ready <span className="text-dim">(the exact plan stays on the operation page; cancel any time)</span></span></label>}
