@@ -12,7 +12,7 @@ import { copyFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSyn
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { EC2Client, DescribeInstancesCommand, DescribeVolumesCommand, TerminateInstancesCommand, DeleteVolumeCommand } from '@aws-sdk/client-ec2';
+import { EC2Client, DescribeAddressesCommand, DescribeInstancesCommand, DescribeVolumesCommand, TerminateInstancesCommand, DeleteVolumeCommand } from '@aws-sdk/client-ec2';
 import { Route53Client, ChangeResourceRecordSetsCommand, ListResourceRecordSetsCommand } from '@aws-sdk/client-route-53';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { COMPONENTS, COMPONENT_REPOS, devnetChain, readJSON, validateDevnetDefaults, writeAtomic } from '../shared/settings.js';
@@ -89,12 +89,12 @@ export function networkYaml(settings, name, d, amis) {
   return lines.join('\n') + '\n';
 }
 
-export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log = console.log }) {
+export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log = console.log, clients = {}, wait = sleep }) {
   const { dashnet, step, save, write, pinBinary, binary } = ctx;
   const registryPath = join(dirs.data, 'devnets.json');
   const registry = () => readJSON(registryPath, {});
   const register = (name, patch) => { const r = registry(); r[name] = { ...(r[name] || {}), ...patch, updatedAt: new Date().toISOString() }; writeAtomic(registryPath, JSON.stringify(r, null, 1)); };
-  const ec2 = new EC2Client({ region }), r53 = new Route53Client({ region: 'us-east-1' }), ssm = new SSMClient({ region });
+  const ec2 = clients.ec2 || new EC2Client({ region }), r53 = clients.r53 || new Route53Client({ region: 'us-east-1' }), ssm = clients.ssm || new SSMClient({ region });
   const workDir = (name) => { const d = join(dirs.private, 'devnets', name); mkdirSync(d, { recursive: true, mode: 0o700 }); return d; };
   const access = (dir) => ['--ssh-key', key.path, '--known-hosts', join(dir, 'known_hosts')];
   const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
@@ -585,10 +585,19 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     done = step(r, 'Terminate instances');
     let instances = await owned(name);
     if (instances.length) await ec2.send(new TerminateInstancesCommand({ InstanceIds: instances.map((i) => i.InstanceId) }));
-    for (let i = 0; i < 60 && (instances = (await owned(name)).filter((x) => x.State?.Name !== 'terminated')).length; i++) await sleep(10_000);
+    for (let i = 0; i < 60 && (instances = (await owned(name)).filter((x) => x.State?.Name !== 'terminated')).length; i++) await wait(10_000);
     if (instances.length) { done('failed'); throw new Error(`${instances.length} instance(s) not terminated yet`); }
     done('ok');
     if (existsSync(join(dir, 'ec2-plan.json'))) {
+      // EC2 detaches an Elastic IP some time after its instance reports
+      // "terminated"; a release before then fails with InvalidIPAddress.InUse
+      // (devnet-console-2, 2026-09-29: 32 s after termination).
+      done = step(r, 'Wait for addresses to detach');
+      const attached = async () => ((await ec2.send(new DescribeAddressesCommand({ Filters: [{ Name: 'tag:dashnet:network', Values: [name] }, { Name: 'tag:dashnet:managed-by', Values: ['dash-network-go'] }] }))).Addresses || []).filter((a) => a.AssociationId);
+      let still = await attached();
+      for (let i = 0; i < 30 && still.length; i++) { await wait(10_000); still = await attached(); }
+      if (still.length) { done('failed'); throw new Error(`${still.length} address(es) still attached: ${still.map((a) => a.PublicIp).join(', ')}`); }
+      done('ok');
       done = step(r, 'Release BYOIP addresses (dashnet release-addresses)');
       const plan = readJSON(join(dir, 'ec2-plan.json'));
       await run(r, 'release-addresses', ['release-addresses', '--plan', join(dir, 'ec2-plan.json'), '--confirm', plan.id, '--timeout', '10m'], { timeoutMs: 11 * 60_000 });
@@ -601,7 +610,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       vols = await volumes();
       if (!vols.length) break;
       for (const v of vols.filter((x) => x.State === 'available')) { await ec2.send(new DeleteVolumeCommand({ VolumeId: v.VolumeId })); deleted++; }
-      await sleep(10_000);
+      await wait(10_000);
     }
     vols = await volumes();
     if (vols.length) { done('failed'); throw new Error(`${vols.length} volume(s) remain: ${vols.map((v) => `${v.VolumeId} ${v.State}`).join(', ')}`); }
