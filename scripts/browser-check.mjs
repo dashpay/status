@@ -130,6 +130,33 @@ try {
   const saved = JSON.parse(readFileSync(join(dataDir, 'settings.json'), 'utf8'));
   assert.deepEqual(saved.operators.find((o) => o.login === 'octocat'), { id: 583231, login: 'octocat', role: 'viewer', networks: ['devnet-moutai'] });
   await page.screenshot({ path: 'artifacts/settings.png', fullPage: true });
+
+  // Infrastructure pages: CI runners (a reporter's push) and the AWS inventory.
+  const { id: reporter } = app.ci.addReporter('mac-runner-fixture');
+  const hour = (h) => new Date(Date.now() - h * 3_600_000).toISOString().replace(/\.\d+Z$/, 'Z');
+  app.ci.ingest(reporter, { v: 1, reporter: '1', python: '3.9.6', at: hour(0),
+    host: { hostname: 'fixture.lan', os: 'macOS 26.6.2', arch: 'arm64', cpus: 14, load: [2, 2, 2], memTotal: 38e9, memUsed: 20e9, uptimeSec: 86400, disks: [{ path: '/System/Volumes/Data', total: 5e11, free: 1.2e11 }], docker: null },
+    runners: [{ key: '/Users/runner/actions-runner', name: 'mac-runner-fixture', pool: 'platform-repositories', kind: 'native', version: '2.337.0', listening: true, busy: true, job: { name: 'Swift SDK build', start: hour(0.1), repo: 'dashpay/platform', runId: 1, workflow: 'Tests' }, diag: { bytes: 6e9, files: 162880 } }],
+    jobs: [3, 5, 9, 30].map((h, i) => ({ runner: '/Users/runner/actions-runner', runnerName: 'mac-runner-fixture', name: 'Swift SDK build', start: hour(h), end: hour(h - 0.1), result: i === 1 ? 'Failed' : 'Succeeded', repo: 'dashpay/platform', runId: 10 + i, attempt: 1, workflow: 'Tests', visibility: 'public' })) });
+  mkdirSync(join(dataDir, 'aws'), { recursive: true });
+  writeFileSync(join(dataDir, 'aws', 'inventory.json'), JSON.stringify({ at, tookMs: 4000, regions: ['us-west-2'], errors: [],
+    instances: [{ region: 'us-west-2', az: 'us-west-2a', id: 'i-0123456789abcdef0', type: 't4g.small', state: 'running', launchTime: at, publicIp: '192.0.2.9', tags: { Name: 'dn-testnet-masternode-1', DashNetwork: 'testnet' }, volumes: ['vol-1'], vcpus: 2, memoryMiB: 2048, lifecycle: 'on-demand' }],
+    volumes: [{ region: 'us-west-2', id: 'vol-1', sizeGiB: 50, type: 'gp3', state: 'in-use', attachedTo: 'i-0123456789abcdef0' }, { region: 'us-west-2', id: 'vol-2', sizeGiB: 200, type: 'gp2', state: 'available', attachedTo: null, createTime: at }],
+    addresses: [], natGateways: [], loadBalancers: [], lambda: [], dynamodb: [], ecr: [{ region: 'eu-west-1', name: 'rs-dapi', images: 7770, untagged: 5402, bytes: 4.45e11, lastPush: at }], snapshots: [], cloudfront: [], s3: [],
+    costs: { at, month: at.slice(0, 7), monthToDate: 3270.85, monthEndEstimate: 3503.4, lastMonth: 3109.17, byService: [{ service: 'EC2 - Other', amount: 1178.9 }, { service: 'Amazon Elastic Compute Cloud - Compute', amount: 897.3 }], daily: [{ day: at.slice(0, 10), amount: 110.2 }] } }));
+  for (const [label, viewport] of [['desktop', { width: 1600, height: 1000 }], ['mobile', { width: 390, height: 844 }]]) {
+    await page.setViewportSize(viewport);
+    await page.goto(origin + '/ci');
+    await page.getByText('Runner hosts').waitFor();
+    assert.ok((await page.locator('body').innerText()).includes('mac-runner-fixture'));
+    await page.screenshot({ path: `artifacts/ci-${label}.png`, fullPage: true });
+    await page.goto(origin + '/aws');
+    await page.getByText('Worth a look').waitFor();
+    const text = await page.locator('body').innerText();
+    assert.ok(text.includes('dn-testnet-masternode-1') && text.includes('Unattached volume') && text.includes('$3,271'));
+    await page.screenshot({ path: `artifacts/aws-${label}.png`, fullPage: true });
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), `${label}: no horizontal page scroll`);
+  }
   console.log(JSON.stringify({ public: 'passed', deployRequest: q.id, settings: 'user added' }));
 } finally {
   await browser.close();
