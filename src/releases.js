@@ -29,3 +29,20 @@ export function newestRelease(tags, running) {
   const best = ok.sort(cmp).pop();
   return best && cmp(best, running) > 0 ? best : null;
 }
+
+// dashmate renders a console devnet's services, so its helper follows Drive's
+// release: the update that brings the helper to Drive's (new or running) tag.
+export function helperFor(n, driveTag, helperTags) {
+  if (!n?.dashmate || !driveTag) return null;
+  const running = imageTag(n.images?.helper);
+  return driveTag !== running && (helperTags || []).some((t) => t.name === driveTag) ? { c: 'helper', from: running, to: driveTag } : null;
+}
+// The tag of an image reference, if it has one.
+export const imageTag = (ref) => /:([A-Za-z0-9_][A-Za-z0-9_.-]{0,127})$/.exec((ref || '').split('@')[0])?.[1] || null;
+// dashmate (the helper image) renders every console devnet node's services, so
+// it follows Drive's release while the two are in step.
+export function withImage(images, c, value) {
+  const next = { ...images, [c]: value };
+  if (c === 'drive' && imageTag(images.drive) && imageTag(images.drive) === imageTag(images.helper) && imageTag(value)) next.helper = `${REPOS.helper}:${imageTag(value)}`;
+  return next;
+}

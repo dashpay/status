@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, navigate, span, useSession } from '../lib.js';
 import { Empty, Err, Link, Section } from '../ui.jsx';
+import { imageTag as tagOf, withImage } from '../releases.js';
 
 const COMPONENTS = ['core', 'drive', 'dapi', 'tenderdash', 'gateway', 'helper'];
 const REPOS = { core: 'dashpay/dashd', drive: 'dashpay/drive', tenderdash: 'dashpay/tenderdash', dapi: 'dashpay/rs-dapi', gateway: 'dashpay/envoy', helper: 'dashpay/dashmate-helper' };
@@ -37,7 +38,7 @@ export default function NewDevnet() {
   const blockTime = form.blockTimeSeconds ?? 10;
   if (!Number.isInteger(blockTime) || blockTime < 8 || blockTime > 600) problems.push('Core block time 8 to 600 seconds');
   const epoch = form.platformEpochSeconds ?? 3600;
-  if (!Number.isInteger(epoch) || epoch < 60 || epoch > 30 * 86400) problems.push('Platform epoch 60 seconds to 30 days');
+  if (!Number.isInteger(epoch) || epoch < 180 || epoch > 30 * 86400) problems.push('Platform epoch 3 minutes (dashmate\'s minimum) to 30 days');
 
   async function submit() {
     setBusy(true); setError(null);
@@ -86,15 +87,16 @@ export default function NewDevnet() {
 
       <Section title="3 · Versions">
         <div className="panel p-3 grid gap-3 sm:grid-cols-2">
-          {COMPONENTS.map((c) => <ImageField key={c} c={c} value={form.images[c]} fallback={defaults.images[c]} onChange={(v) => set((f) => { f.images[c] = v; })} />)}
+          {COMPONENTS.map((c) => <ImageField key={c} c={c} value={form.images[c]} fallback={defaults.images[c]} onChange={(v) => set((f) => { f.images = withImage(f.images, c, v); })} />)}
+          {tagOf(form.images.helper) !== tagOf(form.images.drive) && <div className="text-[12px] lv-warn">The helper is the dashmate that renders every node's services: keep it on Drive's release ({tagOf(form.images.drive) || '—'}).</div>}
           <label className="text-[12px]"><div className="text-dim mb-1">ACME client <span className="mono">goacme/lego</span> · Let's Encrypt certificate for each validator's public IP (empty: self-signed)</div>
             <input className="input w-full mono" value={form.images.acme || ''} onChange={(e) => set((f) => { f.images.acme = e.target.value.trim(); })} /></label>
           <label className="text-[12px]"><div className="text-dim mb-1">Platform protocol number (4.2.x = 14, 4.1.x = 13)</div><input className="input w-28 mono" type="number" value={form.protocol} onChange={(e) => set((f) => { f.protocol = Number(e.target.value); })} /></label>
           <label className="text-[12px]"><div className="text-dim mb-1">Core block time, seconds (8–600; legacy devnets used 150). Quorums form within about 25 blocks; slower blocks mean a later Platform and slower Core upgrades.</div>
             <input className="input w-28 mono" type="number" min="8" max="600" value={blockTime} onChange={(e) => set((f) => { f.blockTimeSeconds = Number(e.target.value); })} /></label>
-          <label className="text-[12px]"><div className="text-dim mb-1">Platform epoch, seconds (60 s to 30 days; mainnet runs 9.125 days). Fees are distributed and protocol upgrades take effect at epoch boundaries.</div>
+          <label className="text-[12px]"><div className="text-dim mb-1">Platform epoch, seconds (180 s, dashmate's minimum, to 30 days; mainnet runs 9.125 days). Fees are distributed and protocol upgrades take effect at epoch boundaries.</div>
             <span className="flex items-center gap-2">
-              <input className="input w-28 mono" type="number" min="60" max={30 * 86400} value={epoch} onChange={(e) => set((f) => { f.platformEpochSeconds = Number(e.target.value); })} />
+              <input className="input w-28 mono" type="number" min="180" max={30 * 86400} value={epoch} onChange={(e) => set((f) => { f.platformEpochSeconds = Number(e.target.value); })} />
               <span className="text-dim mono">{Number.isInteger(epoch) && epoch > 0 ? `= ${span(epoch)}` : ''}</span>
               {[[600, '10 min'], [3600, '1 h'], [86400, '1 d']].map(([s, l]) => <button key={s} type="button" className={`tag !cursor-pointer ${epoch === s ? '!text-fg !border-accent' : ''}`} onClick={() => set((f) => { f.platformEpochSeconds = s; })}>{l}</button>)}
             </span></label>
