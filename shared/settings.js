@@ -71,8 +71,18 @@ export const DEFAULT_SETTINGS = {
       ],
       observationWindow: '4m', operationTimeout: '110m',
     },
-    // Mainnet (EC2 tag mainnet-support) is off the board for now; an admin can
-    // add it back in Settings as a monitor-only (non-deployable) network.
+    // Mainnet is deliberately sourced from a separate observer/fullnode.  Do
+    // not discover or probe the existing mainnet-support fleet here.
+    {
+      name: 'mainnet', displayName: 'Mainnet', tag: 'mainnet-observer', chainType: 'mainnet', coreNetwork: 'main', p2pPort: 19999,
+      public: true, deployable: false, showBalances: false, kind: 'external', source: 'report',
+      description: 'Limited mainnet signals: ChainLocks, Platform blocks, quorum list health, large PoSe bans and chain stalls.',
+      endpoints: [
+        { label: 'Quorum list', url: 'https://quorums.mainnet.networks.dash.org/masternodes' },
+      ],
+      mainnetSignals: { bigBanThreshold: 1, coreStallSeconds: 1800, platformStallSeconds: 1800 },
+      observationWindow: '30m', operationTimeout: '110m',
+    },
   ],
 };
 
@@ -127,10 +137,11 @@ export function validateSettings(input) {
       if (typeof e.label !== 'string' || !e.label.trim() || e.label.length > 40) throw new Error(`${n.name}: endpoint label required`);
       let url; try { url = new URL(e.url); } catch { throw new Error(`${n.name}: endpoint URL invalid`); }
       if (url.protocol !== 'https:' || url.username || url.password) throw new Error(`${n.name}: endpoints must be credential-free https URLs`);
-      if (e.kind !== undefined && !['http', 'dapi'].includes(e.kind)) throw new Error(`${n.name}: endpoint kind must be http or dapi`);
+      if (e.kind !== undefined && !['http', 'dapi', 'quorum'].includes(e.kind)) throw new Error(`${n.name}: endpoint kind must be http, dapi or quorum`);
     }
     if (n.description !== undefined && (typeof n.description !== 'string' || n.description.length > 500)) throw new Error(`${n.name}: description too long`);
-    if (n.kind !== undefined && !['managed', 'dashnet'].includes(n.kind)) throw new Error(`${n.name}: kind must be managed or dashnet`);
+    if (n.kind !== undefined && !['managed', 'dashnet', 'external'].includes(n.kind)) throw new Error(`${n.name}: kind must be managed, dashnet or external`);
+    if (n.source !== undefined && n.source !== 'report') throw new Error(`${n.name}: unsupported observation source`);
     delete n.lifecycle;
   }
   return s;

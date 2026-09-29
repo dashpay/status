@@ -117,6 +117,22 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
         else if (!d.explorer.indexerRunning) flag('down', 'explorer indexer not running');
         else if ((d.explorer.chainHeight || 0) - (d.explorer.indexedHeight || 0) > t.platformLagBlocks) flag('warn', `explorer indexer ${(d.explorer.chainHeight || 0) - (d.explorer.indexedHeight || 0)} blocks behind`);
       }
+      if (network.chainType === 'mainnet') {
+        const m = d.mainnet || {};
+        const signals = network.mainnetSignals || {};
+        const chainLockAge = Number.isFinite(m.chainLockAgeSeconds) ? m.chainLockAgeSeconds : null;
+        const coreStall = m.coreStall === true;
+        const platformStall = m.platformStall === true;
+        if (!Number.isFinite(m.chainLockHeight) || m.chainLockHeight <= 0) flag('down', 'mainnet ChainLock unavailable');
+        if (chainLockAge !== null && chainLockAge > 300) flag('warn', `mainnet ChainLock is ${Math.round(chainLockAge)}s old`);
+        if (coreStall) flag('down', 'mainnet Core chain stalled');
+        if (platformStall) flag('down', 'mainnet Platform chain stalled');
+        if (!Number.isFinite(m.platformHeight) || m.platformHeight <= 0) flag('down', 'mainnet Platform height unavailable');
+        if (m.quorumServer?.status !== 200) flag('down', `mainnet quorum list HTTP ${m.quorumServer?.status ?? 'unavailable'}`);
+        const banned = Number(m.bigBans ?? m.quorumServer?.banned ?? 0);
+        const banThreshold = Number.isFinite(signals.bigBanThreshold) ? signals.bigBanThreshold : 1;
+        if (banned >= banThreshold) flag('warn', `mainnet PoSe-banned masternodes ${banned}`);
+      }
     }
     // A console devnet under construction is not failing: say what is happening.
     if (building && level !== 'ok' && level !== 'stopped') {
@@ -127,6 +143,18 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
   });
 
   const counts = Object.fromEntries(LEVELS.map((l) => [l, rows.filter((r) => r.level === l).length]));
+  if (network.source === 'report') {
+    const observed = Date.parse(state?.generatedAt || '');
+    const window = /^([0-9]+)(s|m|h)$/.exec(network.observationWindow || '30m');
+    const maxAge = window ? Number(window[1]) * (window[2] === 'h' ? 3600_000 : window[2] === 'm' ? 60_000 : 1000) : 30 * 60_000;
+    const stale = !Number.isFinite(observed) || now - observed > maxAge || observed > now + 60_000;
+    if (stale) {
+      const row = rows.find((r) => r.host.role === 'fullnode');
+      if (row) { row.level = 'unreachable'; row.reasons.push({ level: 'unreachable', text: 'mainnet observer report is stale' }); }
+    }
+  }
+  const refreshedCounts = Object.fromEntries(LEVELS.map((l) => [l, rows.filter((r) => r.level === l).length]));
+  Object.assign(counts, refreshedCounts);
   const versions = {};
   for (const r of rows) for (const k of r.data.containers || []) {
     const component = COMPONENT_OF[k.repo];
@@ -148,6 +176,19 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
     },
     dapi: { ok: validatorRows.filter((r) => r.data.dapi?.ok).length, total: validatorRows.filter((r) => r.host.state === 'running').length },
   };
+  const mainnetRow = rows.find((r) => r.host.role === 'fullnode' && r.data.mainnet);
+  if (network.chainType === 'mainnet' && mainnetRow) {
+    const m = mainnetRow.data.mainnet || {};
+    summary.mainnet = {
+      chainLock: m.chainLockHeight ?? null,
+      chainLockAgeSeconds: m.chainLockAgeSeconds ?? null,
+      platformHeight: m.platformHeight ?? mainnetRow.data.tenderdash?.height ?? null,
+      bigBans: m.bigBans ?? m.quorumServer?.banned ?? null,
+      quorumCount: m.quorumServer?.quorums ?? null,
+      coreStall: !!m.coreStall,
+      platformStall: !!m.platformStall,
+    };
+  }
   const level = rows.reduce((a, r) => (r.host.duplicate || r.host.role === 'vpn' ? a : RANK[r.level] > RANK[a] ? r.level : a), 'ok');
   return { level: building ? 'deploying' : level === 'stopped' ? 'ok' : level, rows, summary, tags, generatedAt: state?.generatedAt || null, ageSeconds: state?.generatedAt ? Math.round((now - Date.parse(state.generatedAt)) / 1000) : null };
 }
@@ -176,6 +217,12 @@ export function projectNetwork(network, evaluation, state, operator) {
       containers: (d.containers || []).map((k) => ({ name: k.name, component: COMPONENT_OF[k.repo] || null, sidecar: sidecarOf(k), image: k.image, version: COMPONENT_OF[k.repo] ? versionOf(COMPONENT_OF[k.repo], k, d, evaluation.tags) : tagOf(k.image), digest: k.digest, state: k.state, running: k.running, restarts: k.restarts, startedAt: k.startedAt, health: k.health })),
       p2p: h.p2p ? { port: h.p2p.port, ok: h.p2p.ok, ms: h.p2p.ms } : null,
       dapiPublic: h.dapiPublic ? { ok: h.dapiPublic.ok, ms: h.dapiPublic.ms } : null,
+      mainnet: d.mainnet ? {
+        chainLockHeight: d.mainnet.chainLockHeight, chainLockAgeSeconds: d.mainnet.chainLockAgeSeconds,
+        platformHeight: d.mainnet.platformHeight, bigBans: d.mainnet.bigBans,
+        coreStall: !!d.mainnet.coreStall, platformStall: !!d.mainnet.platformStall,
+        quorumServer: d.mainnet.quorumServer || null,
+      } : null,
     };
     if (operator) Object.assign(row, { instanceId: h.instanceId, privateIp: h.privateIp, nameTag: h.nameTag, keyName: h.keyName, launchTime: h.launchTime, tagged: h.tagged, probeError: h.probe?.error || null, probeErrors: d.errors || [], lastGood: h.lastGood ? { at: h.lastGood.at } : null });
     return row;

@@ -14,12 +14,13 @@ import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, loadSettings, memberO
 import { evaluateNetwork, projectNetwork } from '../shared/evaluate.js';
 import { devnetFiles } from '../shared/devnet-files.js';
 import { validateRequest } from '../agent/ops.js';
+import { validateMainnetReport } from '../shared/mainnet.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 const LIFECYCLE_ACTIONS = ['create-devnet', 'delete-devnet', 'devnet-services', 'devnet-platform', 'platform-reset'];
 
-export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, clock = Date.now, ciGithub = null } = {}) {
+export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, clock = Date.now, ciGithub = null, mainnetReportToken = process.env.MAINNET_REPORT_TOKEN } = {}) {
   const settingsPath = join(dataDir, 'settings.json');
   const dirs = { state: join(dataDir, 'state'), requests: join(dataDir, 'requests'), ops: join(dataDir, 'ops') };
   for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
@@ -56,6 +57,19 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   app.use(express.json({ limit: '64kb' }));
   app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
   auth.install(app);
+
+  // The limited Mainnet board is fed by a separately managed observer/fullnode
+  // (not the existing mainnet-support fleet). Keep this write path token-only,
+  // strictly scoped and public-data-only; it never queues operations.
+  app.post('/api/mainnet/report', (req, res) => {
+    if (!mainnetReportToken || req.get('authorization') !== `Bearer ${mainnetReportToken}`) return res.status(401).json({ error: 'observer authorization required' });
+    try {
+      const report = validateMainnetReport(req.body, clock());
+      writeAtomic(join(dirs.state, 'mainnet.json'), JSON.stringify(report));
+      push('network', { name: 'mainnet', at: report.generatedAt });
+      res.status(202).json({ accepted: true, generatedAt: report.generatedAt });
+    } catch (e) { res.status(400).json({ error: e.message }); }
+  });
 
   const user = (req) => auth.session(req)?.user || null;
   const isOperator = (req, network) => operatorFor(settings, user(req), network);
@@ -376,7 +390,7 @@ export function startWeb() {
   const origin = process.env.PUBLIC_ORIGIN || 'https://status.testnet.networks.dash.org';
   const id = process.env.GITHUB_OAUTH_CLIENT_ID, secret = process.env.GITHUB_OAUTH_CLIENT_SECRET;
   // The OAuth app's client credentials raise GitHub's public-API limit to 5000/h.
-  const app = createWeb({ dataDir, origin, ciGithub: id && secret ? { id, secret } : null });
+  const app = createWeb({ dataDir, origin, ciGithub: id && secret ? { id, secret } : null, mainnetReportToken: process.env.MAINNET_REPORT_TOKEN });
   const ciTimer = setInterval(() => app.ci.tick(), 60_000);
   ciTimer.unref();
   const server = app.listen(Number(process.env.PORT) || 3001, process.env.BIND_ADDRESS || '127.0.0.1', () => console.log(`dash-status web on ${process.env.PORT || 3001}`));

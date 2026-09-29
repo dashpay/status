@@ -17,7 +17,7 @@ async function start(userId = 9920871, extraUsers = []) {
     : url.includes('/users/octocat') ? Response.json({ id: 583231, login: 'octocat', name: 'The Octocat', type: 'User', avatar_url: 'https://avatars.githubusercontent.com/u/583231' })
       : url.includes('/users/') ? new Response('{}', { status: 404 }) : Response.json({ id: userId, login: 'someone' });
   const origin = 'http://127.0.0.1';
-  const app = createWeb({ dataDir, origin, auth: { clientId: 'c', clientSecret: 's', fetcher: github }, fetcher: github });
+  const app = createWeb({ dataDir, origin, mainnetReportToken: 'fixture-mainnet-token', auth: { clientId: 'c', clientSecret: 's', fetcher: github }, fetcher: github });
   const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   const base = `http://127.0.0.1:${server.address().port}`;
   let cookie = '';
@@ -39,11 +39,30 @@ test('public board needs no session and hides operator fields', async () => {
   const w = await start();
   try {
     const overview = await (await w.req('/api/overview')).json();
-    assert.deepEqual(overview.networks.map((n) => n.name), ['testnet', 'devnet-moutai']);
+    assert.deepEqual(overview.networks.map((n) => n.name), ['testnet', 'devnet-moutai', 'mainnet']);
     const n = await (await w.req('/api/networks/testnet')).json();
     assert.equal(n.hosts[0].name, 'seed-2');
     assert.equal(n.hosts[0].instanceId, undefined);
     assert.equal((await w.req('/api/networks/testnet/ops')).status, 401);
+  } finally { w.close(); }
+});
+
+test('mainnet observer report is token-scoped and appears as limited signals', async () => {
+  const w = await start();
+  try {
+    const body = JSON.stringify({ network: 'mainnet', generatedAt: new Date().toISOString(), probeMs: 42,
+      core: { chain: 'main', blocks: 200, headers: 200, chainLockHeight: 200, blockTime: Math.floor(Date.now() / 1000), synced: true },
+      platform: { height: 300, blockTime: new Date().toISOString(), network: 'dash-mainnet', catchingUp: false },
+      quorumServer: { status: 200, latencyMs: 12, quorums: 10, banned: 2, enabled: 100 },
+      mainnet: { chainLockAgeSeconds: 4, bigBans: 2, coreStall: false, platformStall: false } });
+    assert.equal((await w.req('/api/mainnet/report', { method: 'POST', body, headers: { 'content-type': 'application/json' } })).status, 401);
+    const report = await w.req('/api/mainnet/report', { method: 'POST', body, headers: { 'content-type': 'application/json', authorization: 'Bearer fixture-mainnet-token' } });
+    assert.equal(report.status, 202);
+    const mainnet = await (await w.req('/api/networks/mainnet')).json();
+    assert.equal(mainnet.summary.mainnet.platformHeight, 300);
+    assert.equal(mainnet.summary.mainnet.bigBans, 2);
+    assert.equal(mainnet.hosts[0].mainnet.quorumServer.quorums, 10);
+    assert.equal(mainnet.hosts[0].instanceId, undefined);
   } finally { w.close(); }
 });
 

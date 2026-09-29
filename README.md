@@ -92,7 +92,7 @@ visibility, deployability, balance visibility, observation window, timeout and
 checked endpoints (HTTP or DAPI gRPC-Web). Applied on the agent's next cycle;
 AWS account/region changes take effect after an agent restart.
 
-Mainnet is monitored only.
+**Mainnet** is a deliberately limited observer board, not a mainnet-support-fleet monitor. A separately managed Evolution fullnode observer reports Core ChainLocks and stall state, Platform block progress and stall state, the public quorum-list-server, and the count of large PoSe bans. The `mainnet-support` EC2 fleet is not discovered or probed by this application, and no Mainnet operations are exposed. The observer report is token-scoped and contains only public chain/service facts. The web container reads `MAINNET_REPORT_TOKEN` from `/etc/dash-status/mainnet.env`; the observer host uses the same secret in `/etc/dash-mainnet-observer/env`. Install `deploy/dash-mainnet-observer.service` only on the dedicated observer/fullnode host.
 
 ## Infrastructure pages
 

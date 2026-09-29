@@ -43,7 +43,12 @@ export function createDiscovery({ region, tagKey }, client = new EC2Client({ reg
   }
   return async function discover(networks) {
     const states = { Name: 'instance-state-name', Values: ['pending', 'running', 'stopping', 'stopped'] };
-    const tags = networks.map((n) => n.tag);
+    // External/report-backed networks are intentionally not discovered from
+    // EC2.  Mainnet uses a separately managed observer/fullnode and must not
+    // accidentally enroll or monitor the existing mainnet-support fleet.
+    const discovered = networks.filter((n) => n.source !== 'report');
+    const tags = discovered.map((n) => n.tag);
+    if (!tags.length) return Object.fromEntries(networks.map((n) => [n.name, []]));
     const [tagged, named] = await Promise.all([
       describe([{ Name: `tag:${tagKey}`, Values: tags }, states]),
       describe([{ Name: 'tag:Name', Values: tags.flatMap((t) => [`dn-${t}-*`, `dh-${t}-*`]) }, states]),
@@ -53,7 +58,7 @@ export function createDiscovery({ region, tagKey }, client = new EC2Client({ reg
     for (const i of byId.values()) {
       const tag = (k) => i.Tags?.find((t) => t.Key === k)?.Value;
       const nameTag = tag('Name');
-      for (const n of networks) {
+      for (const n of discovered) {
         // dash-network-go instances carry their role and node name as tags.
         const c = tag('dashnet:managed-by') === 'dash-network-go' && tag('dashnet:network') === n.tag
           ? { role: DASHNET_ROLES[tag('dashnet:role')] || 'other', name: tag('dashnet:node') || i.InstanceId }

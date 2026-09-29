@@ -34,6 +34,10 @@ function NetworkCard({ n, now }) {
         <Fact k="Protocol" v={s.platform?.protocol != null ? `v${s.platform.protocol}` : '—'} sub={s.core?.protocol ? `core ${s.core.protocol}` : null} />
         <Fact k="Masternodes READY" v={s.masternodes?.total ? `${s.masternodes.ready}/${s.masternodes.total}` : '—'} sub={s.masternodes?.pose ? `${s.masternodes.pose} with PoSe` : null} warn={s.masternodes && s.masternodes.ready < s.masternodes.total} />
         <Fact k="DAPI getStatus" v={s.dapi?.total ? `${s.dapi.ok}/${s.dapi.total}` : '—'} sub={s.platform?.validatorSet ? `validator set ${s.platform.validatorSet}` : null} warn={s.dapi && s.dapi.ok < s.dapi.total} />
+        {s.mainnet && <>
+          <Fact k="Mainnet bans" v={s.mainnet.bigBans ?? '—'} sub={s.mainnet.quorumCount != null ? `${s.mainnet.quorumCount} quorums listed` : null} warn={(s.mainnet.bigBans || 0) > 0} />
+          <Fact k="Mainnet stalls" v={s.mainnet.coreStall || s.mainnet.platformStall ? 'stalled' : 'clear'} sub={s.mainnet.platformHeight ? `Platform ${num(s.mainnet.platformHeight)}` : null} warn={s.mainnet.coreStall || s.mainnet.platformStall} />
+        </>}
       </div>
       <div className="px-4 pb-3">
         <div className="flex items-center justify-between text-[11px] text-dim mb-1.5">
