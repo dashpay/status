@@ -33,11 +33,14 @@ const observeSeconds = (d) => Math.max(90, Math.ceil(2.5 * blockSeconds(d)));
 const deployMinutes = (d) => Math.max(100, blockSeconds(d) + 60);
 
 export { shortName };
-export const coreNetwork = (name, generation = 1) => `devnet-${shortName(name)}-g${generation}`;
+// As dash-network-go names chains: <name>, or <name>-g<N> for a reset chain.
+export const coreNetwork = (name, generation = 1) => `devnet-${shortName(name)}${generation > 1 ? `-g${generation}` : ''}`;
 
 export function validateDevnetRequest(settings, q, registry) {
   if (!NAME.test(q.network || '')) throw new Error('name must look like devnet-<name> (lowercase, 2-31 characters after devnet-)');
   if (settings.networks.some((n) => n.name === q.network) || registry[q.network]) throw new Error(`${q.network} already exists; journal records are permanent, pick a new name`);
+  // <name>-g<N> is how a reset chain of devnet-<name> is named (and its DNS alias).
+  if (/-g\d+$/.test(q.network)) throw new Error('name must not end in -g<number>: that is how a reset devnet chain is named');
   // Placement (VPC, subnet, groups, key, IPAM, DNS zone) always comes from Settings.
   const allowed = ['displayName', 'description', 'public', 'validators', 'validatorType', 'validatorArch', 'walletType', 'walletArch', 'rootVolumeGiB', 'protocol', 'blockTimeSeconds', 'platformEpochSeconds'];
   const extra = Object.keys(q.devnet || {}).filter((k) => !allowed.includes(k) && k !== 'images' && k !== 'services');
@@ -94,6 +97,8 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
   const registryPath = join(dirs.data, 'devnets.json');
   const registry = () => readJSON(registryPath, {});
   const register = (name, patch) => { const r = registry(); r[name] = { ...(r[name] || {}), ...patch, updatedAt: new Date().toISOString() }; writeAtomic(registryPath, JSON.stringify(r, null, 1)); };
+  // Registered before Route 53 has them, so deleting after a failed install removes them too.
+  const registerNames = (name, d, dplan) => register(name, { dns: { ...(registry()[name]?.dns || {}), ...serviceNames(name, d, dplan.coreNetwork) } });
   const ec2 = clients.ec2 || new EC2Client({ region }), r53 = clients.r53 || new Route53Client({ region: 'us-east-1' }), ssm = clients.ssm || new SSMClient({ region });
   const workDir = (name) => { const d = join(dirs.private, 'devnets', name); mkdirSync(d, { recursive: true, mode: 0o700 }); return d; };
   const access = (dir) => ['--ssh-key', key.path, '--known-hosts', join(dir, 'known_hosts')];
@@ -201,7 +206,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       instances: plan.targets.length, storageGiB: plan.targets.length * d.rootVolumeGiB, estimate: estimate(d),
       images: Object.fromEntries([...COMPONENTS, ...(d.images.acme ? ['acme'] : [])].map((c) => [c, { ref: d.images[c], digests: lockDigests(lock, c) }])),
       protocol: d.protocol, blockTimeSeconds: blockSeconds(d), platformEpochSeconds: epochSeconds(d), coreNetwork: coreNetwork(name), platformChainId: `dash-${coreNetwork(name)}`,
-      dns: serviceNames(name, d), services: d.services, amis, network: { vpc: d.vpcId, subnet: d.subnetId, securityGroups: d.securityGroupIds, ipamPool: d.ipamPoolId },
+      dns: serviceNames(name, d, coreNetwork(name)), services: d.services, amis, network: { vpc: d.vpcId, subnet: d.subnetId, securityGroups: d.securityGroupIds, ipamPool: d.ipamPoolId },
     };
   }
 
@@ -304,6 +309,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
 
     await once('services', async () => {
       done = step(r, coreOnly ? 'Faucet, Insight, quorum server, DNS and TLS (Platform Explorer follows Platform)' : 'Quorum server, Platform Explorer, faucet, DNS and TLS');
+      registerNames(name, d, dplan);
       const services = await deployServices({ r, write, dplan, d, name, pool, s, ec2, r53, dir, platformPending: coreOnly });
       register(name, { services: d.services, dns: services.dns, walletAddress: services.walletAddress, promoCodes: services.promoCodes });
       done('ok', services.summary);
@@ -353,6 +359,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     });
     await once('services', async () => {
       done = step(r, 'Platform Explorer and all services');
+      registerNames(name, d, dplan);
       const services = await deployServices({ r, write, dplan, d, name, pool, s: getSettings(), ec2, r53, dir });
       register(name, { dns: services.dns, walletAddress: services.walletAddress, promoCodes: services.promoCodes });
       done('ok', services.summary);
@@ -530,7 +537,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     // Current Settings defaults are the desired service versions for every console devnet.
     const services = { ...d.services, ...getSettings().devnets.services, ...(r.request.services || {}) };
     r.status = 'preparing'; save(r);
-    r.review = { kind: 'devnet-services', planId: `services-${name}-${Date.now()}`, preparedAt: new Date().toISOString(), from: d.services, to: services, dns: serviceNames(name, d) };
+    r.review = { kind: 'devnet-services', planId: `services-${name}-${Date.now()}`, preparedAt: new Date().toISOString(), from: d.services, to: services, dns: serviceNames(name, d, reg.coreNetwork) };
   }
 
   async function executeServices(r) {
@@ -543,6 +550,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     r.status = 'running'; save(r);
     const done = step(r, 'Quorum server, Platform Explorer, faucet, DNS and TLS');
     // Until Platform runs, its explorer parts and checks wait for it.
+    registerNames(name, d, dplan);
     const services = await deployServices({ r, write, dplan, d, name, pool, s: getSettings(), ec2, r53, dir, platformPending: !!reg.platform && reg.platform !== 'ready' });
     writeFileSync(join(dir, 'request.json'), JSON.stringify(d), { mode: 0o600 });
     register(name, { services: d.services, dns: services.dns, promoCodes: services.promoCodes, status: registry()[name]?.status === 'failed' ? 'ready' : registry()[name]?.status });
@@ -575,7 +583,13 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     const reg = registry()[name] || {};
     const hosts = Object.values(reg.dns || {}).map((x) => x.host).filter(Boolean);
     const zone = reg.dnsZoneId || getSettings().devnets.dnsZoneId;
-    const records = async () => (hosts.length ? (await r53.send(new ListResourceRecordSetsCommand({ HostedZoneId: zone, StartRecordName: [...hosts].sort()[0], MaxItems: '300' }))).ResourceRecordSets : []);
+    // One lookup per name: Route 53 orders names by reversed labels, so a
+    // listing from one name need not reach quorums.<name>-g1 or the others.
+    const records = async () => {
+      const found = [];
+      for (const h of hosts) found.push(...((await r53.send(new ListResourceRecordSetsCommand({ HostedZoneId: zone, StartRecordName: h, StartRecordType: 'A', MaxItems: '1' }))).ResourceRecordSets || []));
+      return found;
+    };
     const existing = await records();
     const changes = existing.filter((x) => x.Type === 'A' && hosts.includes(x.Name.replace(/\.$/, ''))).map((x) => ({ Action: 'DELETE', ResourceRecordSet: x }));
     if (changes.length) await r53.send(new ChangeResourceRecordSetsCommand({ HostedZoneId: zone, ChangeBatch: { Changes: changes } }));

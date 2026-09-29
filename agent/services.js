@@ -8,13 +8,26 @@ export const shortName = (name) => name.replace(/^devnet-/, '');
 const REMOTE = readFileSync(new URL('./services-remote.py', import.meta.url), 'utf8');
 const RELAY_PORT = 26667;
 
-export function serviceNames(name, d) {
-  const short = shortName(name), suffix = d.dnsSuffix || 'networks.dash.org';
+// Every seed name reaches every validator (one Caddy); three keep Let's
+// Encrypt's weekly certificates per registered domain in reserve.
+export const SEEDS = 3;
+
+// core: the Core devnet name, which SDKs take as devnetName and derive
+// https://quorums.<devnetName>.networks.dash.org from. It is the devnet's own
+// name except on chains named <name>-g1 by older dashnet (or reset chains).
+export function serviceNames(name, d, core = shortName(name)) {
+  const short = shortName(name), suffix = d.dnsSuffix || 'networks.dash.org', chain = shortName(core);
   return {
     insight: { host: `insight.${short}.${suffix}`, url: `https://insight.${short}.${suffix}/insight/` },
     quorums: { host: `quorums.${short}.${suffix}`, url: `https://quorums.${short}.${suffix}/quorums` },
     explorer: { host: `explorer.${short}.${suffix}`, url: `https://explorer.${short}.${suffix}/` },
     faucet: { host: `faucet.${short}.${suffix}`, url: `https://faucet.${short}.${suffix}/` },
+    ...(chain !== short && { quorums_sdk: { host: `quorums.${chain}.${suffix}`, url: `https://quorums.${chain}.${suffix}/quorums` } }),
+    // DAPI seeds named as testnet's and Moutai's. Validator certificates name
+    // only their IP, so Caddy on the wallet host terminates TLS for these and
+    // spreads requests over every validator's gateway.
+    ...Object.fromEntries(Array.from({ length: SEEDS }, (_, i) => [`seed-${i + 1}`,
+      { host: `seed-${i + 1}.${short}.${suffix}`, url: `https://seed-${i + 1}.${short}.${suffix}:${PORTS.gateway}` }])),
   };
 }
 
@@ -42,7 +55,7 @@ function servicesConfig(name, d, dplan) {
   const wallet = dplan.targets.find((t) => t.role === 'wallet');
   const validators = dplan.targets.filter((t) => t.role === 'validator');
   const relay = validators[0];
-  const names = serviceNames(name, d);
+  const names = serviceNames(name, d, dplan.coreNetwork);
   return {
     short: shortName(name), displayName: d.displayName, auxiliary: `${name}/${wallet.name}`, coreNetwork: dplan.coreNetwork, platformChainId: dplan.platformChainId,
     coreRpcPort: ports.coreRPC, coreZmqPort: ports.coreZMQ, hosts: Object.fromEntries(Object.entries(names).map(([k, v]) => [k, v.host])),
@@ -56,6 +69,8 @@ function servicesConfig(name, d, dplan) {
     // Validators with Let's Encrypt certificates are verified; self-signed ones are not.
     trustedGateways: !!dplan.gatewayTls,
     dapiUrls: validators.slice(0, 5).map((t) => `https://${t.sshAddress}:${ports.gateway}`),
+    gatewayPort: ports.gateway,
+    gateways: validators.map((t) => `https://${t.sshAddress}:${ports.gateway}`),
   };
 }
 
@@ -86,7 +101,7 @@ export async function deployServices({ r, write, dplan, d, name, pool, r53, plat
   const wallet = dplan.targets.find((t) => t.role === 'wallet');
   const validators = dplan.targets.filter((t) => t.role === 'validator');
   const relay = validators[0];
-  const names = serviceNames(name, d);
+  const names = serviceNames(name, d, dplan.coreNetwork);
 
   write(r.id, `services: DNS ${Object.values(names).map((x) => x.host).join(', ')} -> ${wallet.sshAddress}`);
   const change = await r53.send(new ChangeResourceRecordSetsCommand({

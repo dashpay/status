@@ -25,7 +25,7 @@ EC2 (tag DashNetwork=<net>, Name dn-<net>-<role>-<n>)
   status host's IAM role (`dash-status-server`: EC2 describe, Instance Connect,
   dashnet journal; for console devnets also EC2 launch/teardown of
   dash-network-go-tagged resources, IPAM addresses, and Route 53 A records named
-  `insight|quorums|explorer|faucet|dapi.<devnet>.networks.dash.org` only, with
+  `insight|quorums|explorer|faucet|dapi|seed-*.<devnet>.networks.dash.org` only, with
   existing testnet/mainnet/Moutai names denied) and its own SSH key. When the key is not yet authorized on a
   newly discovered host it pushes it once through EC2 Instance Connect. Host keys
   are pinned per instance ID. Deployments use the
@@ -66,7 +66,8 @@ Platform) → services → `doctor`. Every stage resumes after interruption, wit
 exact dashnet binary the plans were made with. The devnet appears on the board
 while it is built. Each devnet's wallet host also runs:
 
-- `quorum-list-server` → `https://quorums.<name>.networks.dash.org`
+- `quorum-list-server` → `https://quorums.<name>.networks.dash.org` (SDKs take the Core devnet name, `<name>`, as `devnetName`; chains older dashnet named `<name>-g1` also get `quorums.<name>-g1`)
+- DAPI seeds `seed-1..3.<name>.networks.dash.org` (443 and 1443): Caddy on the wallet host with hostname certificates, spread over every validator's gateway
 - Platform Explorer (Postgres, indexer, API, per-devnet frontend) → `https://explorer.<name>…`
 - dash-faucet from source, with its own funded wallet topped up every 15 minutes → `https://faucet.<name>…`
 - Caddy with Let's Encrypt for all three.

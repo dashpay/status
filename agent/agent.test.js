@@ -449,6 +449,45 @@ test('services before Platform skip only the Platform-dependent checks', async (
   await assert.rejects(deployServices(args), /explorerApi/, 'full checks once Platform runs');
 });
 
+test('services publish DAPI seeds and the quorum host SDKs derive from the Core devnet name', async () => {
+  const { deployServices, serviceNames } = await import('./services.js');
+  const { validateDevnetRequest } = await import('./devnets.js');
+  const names = serviceNames('devnet-bonsia', { dnsSuffix: 'networks.dash.org' }, 'devnet-bonsia-g1');
+  assert.equal(names.quorums_sdk.host, 'quorums.bonsia-g1.networks.dash.org');
+  assert.deepEqual(Object.keys(names).filter((k) => k.startsWith('seed-')), ['seed-1', 'seed-2', 'seed-3']);
+  assert.equal(names['seed-3'].url, 'https://seed-3.bonsia.networks.dash.org:1443');
+  const plain = serviceNames('devnet-sakura', {}, 'devnet-sakura');
+  assert.equal(plain.quorums.host, 'quorums.sakura.networks.dash.org');
+  assert.equal(plain.quorums_sdk, undefined, 'a chain named after the devnet needs no alias');
+  assert.deepEqual(serviceNames('devnet-sakura', {}), plain, 'the devnet name by default');
+  assert.equal(serviceNames('devnet-bonsia', {}, 'bonsia-g2').quorums_sdk.host, 'quorums.bonsia-g2.networks.dash.org');
+  const { coreNetwork } = await import('./devnets.js');
+  assert.equal(coreNetwork('devnet-sakura'), 'devnet-sakura', 'no generation suffix on a first chain');
+  assert.equal(coreNetwork('devnet-sakura', 2), 'devnet-sakura-g2');
+  // An alias like quorums.<x>-g1 must never be another devnet's own name.
+  assert.throws(() => validateDevnetRequest(structuredClone(settings), { id: '6c8139ad-e92f-40da-943d-1e001efacc06', network: 'devnet-bonsia-g1', action: 'create-devnet', devnet: {} }, {}), /-g<number>/);
+
+  const dplan = { coreNetwork: 'console-9-g1', platformChainId: 'dash-devnet-console-9-g1', ports: {}, gatewayTls: { issuer: 'letsencrypt' },
+    targets: [{ name: 'wallet-001', role: 'wallet', instanceId: 'i-0aaaaaaaaaaaaaaa1', sshAddress: '198.51.100.9' },
+      ...[10, 11, 12].map((n, i) => ({ name: `validators-00${i + 1}`, role: 'validator', instanceId: `i-0aaaaaaaaaaaaaa${n}`, sshAddress: `198.51.100.${n}`, peerAddress: `198.51.100.${n}`, privateAddress: `10.0.0.${n}` }))] };
+  const d = { displayName: 'Console 9', dnsZoneId: 'Z1', dnsSuffix: 'networks.dash.org', services: { quorumServer: 'dashpay/quorum-list-server:0.7.0', insightImage: 'dashpay/insight:4.0.10', explorerVersion: '2.5.3', faucetRef: 'b'.repeat(40) } };
+  const upserts = [];
+  const r53 = { send: async (c) => { for (const x of c.input?.ChangeBatch?.Changes || []) upserts.push([x.ResourceRecordSet.Name, x.ResourceRecordSet.ResourceRecords[0].Value]); return { ChangeInfo: { Id: 'c', Status: 'INSYNC' } }; } };
+  let sent;
+  const pool = { exec: async (h, cmd) => {
+    const run = cmd.match(/python3 \/opt\/devnet-services\/services\.py (\S+)/);
+    if (!run) return '';
+    sent = JSON.parse(Buffer.from(run[1], 'base64').toString());
+    return JSON.stringify({ faucetBalance: 50000, quorums: 200, quorumList: 4, insight: 200, insightBlocks: 4100, faucet: 200, explorerApi: 200, explorerValidators: 200, explorerFrontend: 200, walletAddress: 'y1', promoCodes: {} });
+  } };
+  const out = await deployServices({ r: { id: 'op' }, write: () => {}, dplan, d, name: 'devnet-console-9', pool, r53 });
+  assert.ok(upserts.every(([, ip]) => ip === '198.51.100.9'), 'every name points at the wallet host');
+  for (const host of ['quorums.console-9-g1.networks.dash.org', 'seed-1.console-9.networks.dash.org', 'seed-3.console-9.networks.dash.org']) assert.ok(upserts.some(([n]) => n === host), host);
+  assert.deepEqual(sent.gateways, ['https://198.51.100.10:1443', 'https://198.51.100.11:1443', 'https://198.51.100.12:1443'], 'seeds spread over every validator');
+  assert.equal(sent.hosts.quorums_sdk, 'quorums.console-9-g1.networks.dash.org');
+  assert.ok(out.dns['seed-2'] && out.dns.quorums_sdk, 'registered, so deleting the devnet removes them');
+});
+
 test('upgrades wait until a new devnet has started Platform', () => {
   const s = structuredClone(settings);
   s.networks.push({ ...s.networks[0], name: 'devnet-fresh', kind: 'dashnet', chainType: 'devnet', deployable: true });
