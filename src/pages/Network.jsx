@@ -49,6 +49,10 @@ export default function Network({ name, tab }) {
             <Stat label="MN READY" value={s.masternodes.total ? `${s.masternodes.ready}/${s.masternodes.total}` : '—'} sub={`${s.masternodes.pose} with PoSe`} level={s.masternodes.ready < s.masternodes.total ? 'warn' : undefined} />
             <Stat label="DAPI getStatus" value={s.dapi.total ? `${s.dapi.ok}/${s.dapi.total}` : '—'} sub="local gRPC per evo node" level={s.dapi.ok < s.dapi.total ? 'down' : undefined} />
             <Stat label="Difficulty" value={s.core?.difficulty != null ? dash(s.core.difficulty) : '—'} sub={`${n.hosts.length} hosts`} />
+            {s.mainnet && <>
+              <Stat label="PoSe bans" value={s.mainnet.bigBans ?? '—'} sub={s.mainnet.quorumCount != null ? `${s.mainnet.quorumCount} quorums` : 'quorum list unavailable'} level={(s.mainnet.bigBans || 0) > 0 ? 'warn' : undefined} />
+              <Stat label="Chain stalls" value={s.mainnet.coreStall || s.mainnet.platformStall ? 'stalled' : 'clear'} sub={s.mainnet.chainLockAgeSeconds != null ? `ChainLock ${Math.round(s.mainnet.chainLockAgeSeconds)}s old` : 'ChainLock age unavailable'} level={s.mainnet.coreStall || s.mainnet.platformStall ? 'down' : undefined} />
+            </>}
           </div>
 
           {(n.endpoints.length > 0 || Object.keys(s.versions).length > 0) && (
@@ -276,6 +280,12 @@ function HostDetail({ h, now, member, operator, network }) {
         {h.faucet && <><div className="label mt-3 mb-1">Faucet</div><KV rows={h.faucet.kind === 'dash-faucet' ? [['/api/status', `${h.faucet.status} · ${h.faucet.state} · ${h.faucet.latencyMs} ms`], ['balance', dash(h.faucet.balance)], ['spendable UTXOs', h.faucet.utxos]] : [['HTTP', `${h.faucet.status} · ${h.faucet.latencyMs} ms`], ['title', h.faucet.title]]} /></>}
         {h.quorumServer && <><div className="label mt-3 mb-1">Quorum list server</div><KV rows={[['/health', `${h.quorumServer.status} · ${h.quorumServer.latencyMs} ms`], ['platform quorums', h.quorumServer.quorums]]} /></>}
         {h.explorer && <><div className="label mt-3 mb-1">Platform Explorer</div><KV rows={[['API /status', `${h.explorer.status} · ${h.explorer.latencyMs} ms · API ${h.explorer.apiVersion ?? '—'}`], ['indexed / chain', `${num(h.explorer.indexedHeight)} / ${num(h.explorer.chainHeight)}`], ['identities / transactions', `${h.explorer.identities ?? '—'} / ${h.explorer.transactions ?? '—'}`]]} /></>}
+        {h.mainnet && <><div className="label mt-3 mb-1">Mainnet observer</div><KV rows={[
+          ['ChainLock', `${num(h.mainnet.chainLockHeight)} · ${h.mainnet.chainLockAgeSeconds != null ? `${Math.round(h.mainnet.chainLockAgeSeconds)}s old` : 'age unknown'}`],
+          ['Platform', `${num(h.mainnet.platformHeight)}${h.mainnet.platformStall ? ' · stalled' : ''}`],
+          ['PoSe bans', h.mainnet.bigBans],
+          ['quorum list', h.mainnet.quorumServer ? `${h.mainnet.quorumServer.status} · ${h.mainnet.quorumServer.quorums ?? '—'} quorums` : 'unavailable'],
+        ]} /></>}
       </div>
       <div>
         {h.platform && <><div className="label mb-1">Platform</div><KV rows={[

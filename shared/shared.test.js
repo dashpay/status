@@ -9,7 +9,7 @@ const network = settings.networks[0];
 test('default settings validate; bad edits are rejected with a reason', () => {
   assert.ok(validateSettings(settings));
   const bad = structuredClone(settings);
-  bad.networks.push({ ...{ name: 'mainnet', displayName: 'Mainnet', tag: 'mainnet-support', chainType: 'mainnet', coreNetwork: 'main', p2pPort: 9999, public: true, deployable: false, showBalances: false, endpoints: [], observationWindow: '4m', operationTimeout: '110m' }, deployable: true });
+  bad.networks.push({ ...{ name: 'mainnet-bad', displayName: 'Mainnet bad', tag: 'mainnet-bad', chainType: 'mainnet', coreNetwork: 'main', p2pPort: 9999, public: true, deployable: false, showBalances: false, endpoints: [], observationWindow: '4m', operationTimeout: '110m' }, deployable: true });
   assert.throws(() => validateSettings(bad), /mainnet workloads are not deployable/);
   const url = structuredClone(settings);
   url.networks[0].endpoints.push({ label: 'x', url: 'http://user:pw@example.com' });

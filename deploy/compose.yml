@@ -15,7 +15,7 @@ services:
   web:
     <<: *common
     mem_limit: 512m
-    env_file: [/etc/dash-status/oauth.env]
+    env_file: [/etc/dash-status/oauth.env, /etc/dash-status/mainnet.env]
     environment:
       STATUS_MODE: web
       STATUS_DATA_DIR: /data

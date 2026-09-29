@@ -1,0 +1,22 @@
+[Unit]
+Description=Dash mainnet limited-signal observer
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+EnvironmentFile=/etc/dash-mainnet-observer/env
+ExecStart=/usr/bin/python3 /opt/dash-mainnet-observer/mainnet-observer.py
+Restart=always
+RestartSec=30
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/dash-mainnet-observer
+
+[Install]
+WantedBy=multi-user.target
