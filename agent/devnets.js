@@ -600,7 +600,10 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       done('ok');
       done = step(r, 'Release BYOIP addresses (dashnet release-addresses)');
       const plan = readJSON(join(dir, 'ec2-plan.json'));
-      await run(r, 'release-addresses', ['release-addresses', '--plan', join(dir, 'ec2-plan.json'), '--confirm', plan.id, '--timeout', '10m'], { timeoutMs: 11 * 60_000 });
+      // The agent's current dashnet, not the devnet's pinned build: EC2 plans
+      // carry no node recipes, and newer builds can finish a cleanup older ones
+      // could not (dash-network-go#24: resumable after EC2 purges terminated instances).
+      await run(r, 'release-addresses', ['release-addresses', '--plan', join(dir, 'ec2-plan.json'), '--confirm', plan.id, '--timeout', '10m'], { timeoutMs: 11 * 60_000, bin: binary });
       done('ok');
     }
     done = step(r, 'Delete retained root volumes');

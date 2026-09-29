@@ -489,9 +489,9 @@ test('deleting a devnet releases its addresses only once EC2 has detached them',
   const r53 = { send: async () => ({ ResourceRecordSets: [] }) };
   const steps = [];
   const ctx = {
-    dashnet: async (r, args) => { events.push(args[0]); return 0; },
+    dashnet: async (r, args, opts) => { events.push(args[0]); assert.equal(opts.bin, '/usr/local/bin/dashnet', 'cleanup uses the current dashnet'); return 0; },
     step: (r, name) => { const s = { name }; steps.push(s); return (status) => { s.status = status; }; },
-    save: () => {}, write: () => {}, pinBinary: () => 'dashnet', binary: 'dashnet',
+    save: () => {}, write: () => {}, pinBinary: () => 'pinned/dashnet', binary: '/usr/local/bin/dashnet',
   };
   const devnets = createDevnets({ ctx, dirs, key: { path: '/k' }, pool: {}, getSettings: () => settings, region: 'us-west-2', log: () => {}, clients: { ec2, r53, ssm: {} }, wait: async () => {} });
   await devnets.executeDelete({ id: 'op', network: 'devnet-gone', actor: { login: 'ktechmidas' } });
