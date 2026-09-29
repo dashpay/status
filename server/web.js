@@ -11,6 +11,7 @@ import { createAuth } from './auth.js';
 import { createCi } from './ci.js';
 import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, loadSettings, memberOf, operatorFor, readJSON, saveSettings, validateSettings, writeAtomic } from '../shared/settings.js';
 import { evaluateNetwork, projectNetwork } from '../shared/evaluate.js';
+import { devnetFiles } from '../shared/devnet-files.js';
 import { validateRequest } from '../agent/ops.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -169,6 +170,15 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     res.json({ codes: reg?.status !== 'deleted' && reg?.promoCodes ? reg.promoCodes : {} });
   });
   const registry = () => readJSON(join(dataDir, 'devnets.json'), {});
+  // Connection files of a console devnet, like the legacy dash-network-configs
+  // outputs: members only (host addresses, masternode identities).
+  app.get('/api/networks/:name/config', requireMember, (req, res) => {
+    const n = reloadSettings().networks.find((x) => x.name === req.params.name);
+    if (!n || n.kind !== 'dashnet' || !/^devnet-[a-z0-9-]+$/.test(n.name)) return res.status(404).json({ error: 'Connection files exist for console devnets only' });
+    const facts = readJSON(join(dataDir, 'devnets', n.name, 'config.json'));
+    if (!facts) return res.status(404).json({ error: 'No connection facts yet: they appear once the devnet has a deployment plan' });
+    res.json({ facts, files: devnetFiles(facts) });
+  });
   app.post('/api/networks/:name/ops', requireOperator, auth.csrf, (req, res) => {
     const n = settings.networks.find((x) => x.name === req.params.name);
     if (!n) return res.status(404).json({ error: 'Network not found' });

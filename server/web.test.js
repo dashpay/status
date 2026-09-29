@@ -217,3 +217,23 @@ test('CI: admins issue reporter tokens; reporters post with them; infrastructure
     assert.equal((await post(`Bearer ${token}`)).status, 401);
   } finally { w.close(); }
 });
+
+test('console devnet connection files reach members only', async () => {
+  const w = await start();
+  try {
+    const reg = { 'devnet-fixture': { status: 'ready', displayName: 'Fixture', coreNetwork: 'devnet-fixture-g1' } };
+    writeFileSync(join(w.dataDir, 'devnets.json'), JSON.stringify(reg));
+    mkdirSync(join(w.dataDir, 'devnets', 'devnet-fixture'), { recursive: true });
+    writeFileSync(join(w.dataDir, 'devnets', 'devnet-fixture', 'config.json'), JSON.stringify({ name: 'devnet-fixture', displayName: 'Fixture',
+      core: { devnet: 'fixture-g1', chain: 'devnet-fixture-g1', port: 20001, blockSeconds: 10, minimumDifficultyBlocks: 1000000, highSubsidyBlocks: 500, highSubsidyFactor: 100,
+        llmq: { chainlocks: 'llmq_devnet', instantsendDip0024: 'llmq_devnet_dip0024', platform: 'llmq_devnet_platform', mnhf: 'llmq_devnet' }, sporkAddress: 'ySpork', seeds: ['198.51.100.1:20001'] },
+      platform: { chainId: 'dash-devnet-fixture-g1', initialProtocolVersion: 14, epochSeconds: 3600, quorums: { validatorSet: {}, chainLock: {}, instantLock: {} }, dapi: ['https://198.51.100.1:1443'] },
+      services: {}, faucetAddress: null, images: [], hosts: [{ name: 'validators-001', role: 'validator', instanceId: 'i-1', arch: 'arm64', publicIp: '198.51.100.1', privateIp: '10.42.0.1' }] }));
+    assert.equal((await w.req('/api/networks/devnet-fixture/config')).status, 401);
+    await w.login();
+    const r = await (await w.req('/api/networks/devnet-fixture/config')).json();
+    assert.deepEqual(r.files.map((f) => f.name), ['devnet-fixture.conf', 'devnet-fixture.inventory', 'devnet-fixture.yml']);
+    assert.match(r.files[0].text, /^devnet=fixture-g1$/m);
+    assert.equal((await w.req('/api/networks/testnet/config')).status, 404, 'managed networks have no console connection files');
+  } finally { w.close(); }
+});

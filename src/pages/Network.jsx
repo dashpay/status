@@ -3,6 +3,7 @@ import { ago, api, bytes, canOperate, canSee, clock, dash, duration, navigate, n
 import { Delta, Dot, Empty, Err, Level, Link, Meter, Section, Stat } from '../ui.jsx';
 import Operations from './Operations.jsx';
 import { COMPONENTS, OPERABLE, REPOS, cmp, newestRelease, reported } from '../releases.js';
+import Connect from './Connect.jsx';
 
 const ROLE_ORDER = ['validator', 'masternode', 'seed', 'fullnode', 'web', 'wallet', 'miner', 'mixer', 'quorums', 'metrics', 'logs', 'vpn', 'other'];
 
@@ -27,6 +28,7 @@ export default function Network({ name, tab }) {
           <div className="ml-auto flex gap-1">
             <Link to={`/n/${name}`} className={`btn ${tab === 'hosts' ? '!border-accent' : ''}`}>Hosts</Link>
             <Link to={`/n/${name}/ops`} className={`btn ${tab === 'ops' ? '!border-accent' : ''}`}>Operations</Link>
+            {n.kind === 'dashnet' && <Link to={`/n/${name}/connect`} className={`btn ${tab === 'connect' ? '!border-accent' : ''}`}>Connect</Link>}
             {session.admin && n.chainType === 'devnet' && n.kind !== 'dashnet' && <Link to={`/n/${name}/reset`} className="btn btn-danger">Platform reset…</Link>}
             {operator && n.deployable && <Link to={`/n/${name}/deploy`} className="btn btn-primary">Deploy…</Link>}
           </div>
@@ -36,7 +38,7 @@ export default function Network({ name, tab }) {
       {n.lifecycle && <Lifecycle n={n} member={member} admin={session.admin} />}
       {operator && n.deployable && !['starting', 'stopped'].includes(n.lifecycle?.platform) && <Updates n={n} />}
 
-      {tab === 'ops' && member ? <Operations network={n} operator={operator} /> : (
+      {tab === 'ops' && member ? <Operations network={n} operator={operator} /> : tab === 'connect' && member && n.kind === 'dashnet' ? <Connect name={name} /> : (
         <>
           <div className="mt-3 grid gap-2 grid-cols-2 sm:grid-cols-4 lg:grid-cols-8">
             <Stat label="Core height" value={num(s.core?.height)} sub={coreAge != null ? `last block ${ago(s.core.blockTime, now)}` : '—'} level={coreAge > 1800 ? 'warn' : undefined} />
