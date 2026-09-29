@@ -64,6 +64,42 @@ def secret(name):
 
 
 # ---- faucet wallet --------------------------------------------------------
+# The dashnet wallet's block rewards are thousands of small coinbase outputs.
+# Inputs are chosen here, largest first and capped, so a funding transaction
+# stays well inside Core's 100 kB standard size (wallet coin selection can
+# reach for enough small coins to exceed it: "Transaction too large").
+MAX_INPUTS = 400                  # about 60 kB
+FEE_PER_KB = 0.0001               # ten times Core's minimum relay fee
+
+
+def fund_faucet(amount):
+    """Pay up to `amount` into faucet outputs of about 1000 DASH. Returns
+    (txid, paid); (None, 0) when the largest coins cannot cover 50 DASH."""
+    coins = sorted((c for c in rpc('listunspent', [1], wallet='dashnet') if c.get('spendable', True) and c.get('safe', True)),
+                   key=lambda c: -c['amount'])[:MAX_INPUTS]
+    fee = lambda inputs, outputs: round((10 + 148 * inputs + 34 * outputs) / 1000 * FEE_PER_KB, 8) + 0.0001
+    chosen, total = [], 0.0
+    for c in coins:
+        if total >= amount + fee(len(chosen), 102):
+            break
+        chosen.append(c)
+        total += c['amount']
+    amount = min(amount, total - fee(len(chosen), 102))
+    if amount < 50:
+        return None, 0
+    parts = max(20, min(100, int(amount // 1000)))
+    each = int(amount / parts * 1e8) / 1e8
+    outs = {rpc('getnewaddress', wallet='faucet'): each for _ in range(parts)}
+    change = round(total - each * parts - fee(len(chosen), parts + 1), 8)
+    if change >= 0.001:
+        outs[rpc('getrawchangeaddress', wallet='dashnet')] = change
+    raw = rpc('createrawtransaction', [[dict(txid=c['txid'], vout=c['vout']) for c in chosen], outs])
+    signed = rpc('signrawtransactionwithwallet', [raw], wallet='dashnet')
+    if not signed.get('complete'):
+        raise RuntimeError('faucet funding transaction not fully signed')
+    return rpc('sendrawtransaction', [signed['hex']]), round(each * parts, 8)
+
+
 def faucet_wallet():
     loaded = rpc('listwallets')
     if 'faucet' not in loaded:
@@ -74,22 +110,26 @@ def faucet_wallet():
                 raise
             # Legacy (non-descriptor) wallet: the faucet uses dumpprivkey.
             rpc('createwallet', ['faucet', False, False, '', False, False, True])
-    bal = rpc('getbalance', wallet='faucet')
+    # Funding that is still confirming counts: before the devnet's InstantSend
+    # quorums are active it gets no lock, and miners hold unlocked transactions
+    # back for up to ten minutes. A run in that window must not fund again.
+    mine = rpc('getbalances', wallet='faucet')['mine']
+    bal = mine['trusted'] + mine['untrusted_pending']
     funding = float(cfg['faucetFunding'])
     if bal < funding / 2:
         free = rpc('getbalance', wallet='dashnet')
         amount = min(funding - bal, max(0.0, free - 500))
         if amount >= 50:
-            # About 1000 DASH per output keeps collateral-sized payouts cheap.
-            parts = max(20, min(100, int(amount // 1000)))
-            outs = {rpc('getnewaddress', wallet='faucet'): round(amount / parts, 8) for _ in range(parts)}
-            txid = rpc('sendmany', ['', outs], wallet='dashnet')
-            log(f'funded faucet wallet with {amount:.2f} in {parts} outputs: {txid}')
+            try:
+                txid, paid = fund_faucet(amount)
+                log(f'funded faucet wallet with {paid:.2f}: {txid}' if txid else 'dashnet wallet has no large coins left; faucet funding deferred')
+            except RuntimeError as e:
+                # The 15-minute top-up tries again; no service depends on it.
+                log(f'faucet funding deferred: {e}')
         else:
             log(f'dashnet wallet has {free:.2f} spendable; faucet funding deferred')
-    # Include the funding that is still confirming.
-    b = rpc('getbalances', wallet='faucet')['mine']
-    return round(b['trusted'] + b['untrusted_pending'], 8)
+    mine = rpc('getbalances', wallet='faucet')['mine']
+    return round(mine['trusted'] + mine['untrusted_pending'], 8)
 
 
 # ---- builds ---------------------------------------------------------------
