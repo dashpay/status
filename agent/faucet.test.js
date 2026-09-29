@@ -30,6 +30,7 @@ def rpc(method, params=None, wallet=None):
         state['tx'] = dict(inputs=len(params[0]), outputs=params[1]); return 'raw'
     if method == 'signrawtransactionwithwallet': return dict(hex='signed', complete=True)
     if method == 'sendrawtransaction':
+        if scenario.get('failSend') == 'transport': raise ConnectionResetError('connection reset by peer')
         if scenario.get('failSend'): raise RuntimeError('sendrawtransaction: min relay fee not met')
         state['pending'] += sum(v for k, v in state['tx']['outputs'].items() if k.startswith('yF')); return 'f' * 64
     raise AssertionError(method)
@@ -77,6 +78,7 @@ test('a failed funding is deferred to the top-up, not fatal', { skip: !python &&
   const r = run({ coins: bonsia, failSend: true });
   assert.equal(r.balance, 0);
   assert.match(r.logs.join('\n'), /faucet funding deferred: sendrawtransaction/);
+  assert.match(run({ coins: bonsia, failSend: 'transport' }).logs.join('\n'), /faucet funding deferred: connection reset/);
   const dust = run({ coins: repeat(10, 3) });
   assert.equal(dust.tx, null);
   assert.match(dust.logs.join('\n'), /deferred/);

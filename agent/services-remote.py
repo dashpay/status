@@ -123,7 +123,7 @@ def faucet_wallet():
             try:
                 txid, paid = fund_faucet(amount)
                 log(f'funded faucet wallet with {paid:.2f}: {txid}' if txid else 'dashnet wallet has no large coins left; faucet funding deferred')
-            except RuntimeError as e:
+            except (RuntimeError, OSError, ValueError) as e:  # RPC error, lost connection, bad reply
                 # The 15-minute top-up tries again; no service depends on it.
                 log(f'faucet funding deferred: {e}')
         else:
