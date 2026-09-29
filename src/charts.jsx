@@ -112,7 +112,7 @@ export function HBars({ rows, format, bind, tip, color }) {
         <div key={r.label} tabIndex={0} className="grid grid-cols-[minmax(120px,38%)_1fr] items-center gap-3 text-[12px] outline-none group" {...bind(() => tip(r))}>
           <span className="truncate text-dim" title={r.label}>{r.label}</span>
           <span className="flex items-center gap-2 min-w-0">
-            <span className="h-3.5 rounded-r-[4px] group-hover:brightness-125 shrink-0" style={{ width: `${Math.max(0.5, (r.value / max) * 85)}%`, background: color }} />
+            <span className="h-3.5 rounded-r-[4px] group-hover:brightness-125 shrink-0" style={{ width: `${Math.max(0.5, (r.value / max) * 72)}%`, background: color }} />
             <span className="mono text-fg shrink-0">{format(r.value)}</span>
           </span>
         </div>

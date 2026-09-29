@@ -318,5 +318,40 @@ export function createCi({ dataDir, fetcher = fetch, clock = Date.now, github = 
     };
   }
 
-  return { addReporter, removeReporter, authenticate, ingest, summary, tick, reporters };
+  // Before sign-in: the same statistics without anything that identifies a
+  // person, host or network location. Host and runner names (which carry
+  // people's names), hostnames, paths, containers, errors, branches, links and
+  // private repositories are replaced or left out.
+  function publicSummary() {
+    const s = summary();
+    const privateRepos = new Set(allJobs().filter((j) => j.repo && j.visibility !== 'public').map((j) => j.repo));
+    const repo = (r) => (!r ? null : privateRepos.has(r) ? 'private repository' : r);
+    const masked = (r, text) => (r && privateRepos.has(r) ? 'private workflow' : text);
+    const family = (os) => (/mac/i.test(os || '') ? 'macOS' : /ubuntu|debian|linux/i.test(os || '') ? 'Linux' : 'Runner');
+    const hostLabel = new Map(), counts = {};
+    for (const h of s.hosts) { const f = family(h.os); counts[f] = (counts[f] || 0) + 1; hostLabel.set(h.id, `${f} host ${counts[f]}`); }
+    const runnerLabel = new Map();
+    for (const [id, label] of hostLabel) {
+      const mine = s.runners.filter((r) => r.host === id);
+      mine.forEach((r, i) => runnerLabel.set(r.name, mine.length > 1 ? `${label} · runner ${i + 1}` : `${label} runner`));
+    }
+    const runnerOf = (name) => runnerLabel.get(name) || 'runner';
+    const usage = (d) => (d && !d.error ? Object.fromEntries(['images', 'containers', 'volumes', 'buildCache'].map((k) => [k, d[k] ? { bytes: d[k].bytes, reclaimable: d[k].reclaimable } : null])) : null);
+    return {
+      public: true, at: s.at, totals: s.totals,
+      hosts: s.hosts.map((h) => ({ id: hostLabel.get(h.id), label: hostLabel.get(h.id), receivedAt: h.receivedAt, stale: h.stale, os: h.os, arch: h.arch, cpus: h.cpus,
+        load: h.load, memTotal: h.memTotal, memUsed: h.memUsed, uptimeSec: h.uptimeSec, disks: (h.disks || []).map((d) => ({ total: d.total, free: d.free })), docker: usage(h.docker) })),
+      runners: s.runners.map((r) => ({ host: hostLabel.get(r.host), hostLabel: hostLabel.get(r.host), name: runnerOf(r.name), status: r.status, stale: r.stale, receivedAt: r.receivedAt,
+        kind: r.kind, version: r.version, day: r.day, hours: r.hours,
+        job: r.job && { name: masked(r.job.repo, r.job.name), repo: repo(r.job.repo), workflow: masked(r.job.repo, r.job.workflow), start: r.job.start } })),
+      queue: s.queue && { at: s.queue.at, jobs: s.queue.jobs.filter((j) => !privateRepos.has(j.repo)).map((j) => ({ id: j.id, repo: j.repo, workflow: j.workflow, name: j.name, labels: j.labels, createdAt: j.createdAt })) },
+      workflows: s.workflows.map((w) => ({ ...w, repo: repo(w.repo), workflow: masked(w.repo, w.workflow) })),
+      daily: s.daily,
+      recent: s.recent.map((j) => ({ runnerName: runnerOf(j.runnerName), start: j.start, end: j.end, name: masked(j.repo, j.name), repo: repo(j.repo), workflow: masked(j.repo, j.workflow),
+        result: j.result, durationSec: j.durationSec, queueSec: j.queueSec ?? null })),
+      github: { enabled: s.github.enabled },
+    };
+  }
+
+  return { addReporter, removeReporter, authenticate, ingest, summary, publicSummary, tick, reporters };
 }

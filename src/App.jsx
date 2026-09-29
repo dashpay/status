@@ -53,7 +53,7 @@ function Header({ networks, active, session }) {
               <Dot level={n.level} />{n.displayName}
             </Link>
           ))}
-          {(session.allNetworks || session.memberOf?.length > 0) && <>
+          {<>
             <span className="w-px h-4 bg-line mx-1 shrink-0" aria-hidden="true" />
             <Link to="/ci" className={`px-2.5 py-1 rounded whitespace-nowrap ${active === 'ci' ? 'bg-panel-2 text-fg' : 'text-dim hover:text-fg'}`}>CI</Link>
             <Link to="/aws" className={`px-2.5 py-1 rounded whitespace-nowrap ${active === 'aws' ? 'bg-panel-2 text-fg' : 'text-dim hover:text-fg'}`}>AWS</Link>

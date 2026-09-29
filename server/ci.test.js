@@ -85,3 +85,25 @@ test('GitHub timing adds queue time; queued self-hosted jobs are listed', async 
   assert.equal(calls.filter((c) => c.url.includes('/attempts/')).length, before);
   assert.ok(JSON.parse(readFileSync(join(dataDir, 'ci', 'github.json'), 'utf8')).rate.remaining > 0);
 });
+
+test('before sign-in: statistics without names, hosts, branches, links or private repositories', () => {
+  const ci = createCi({ dataDir: mkdtempSync(join(tmpdir(), 'ci-')), clock: () => T0 });
+  const { id } = ci.addReporter('mac-runner-brian');
+  ci.ingest(id, report([
+    job(120, 30, { headRef: 'claude/strange-elbakyan', ref: 'refs/pull/5/merge' }),
+    job(60, 20, { repo: 'dashpay/secret-infra', visibility: 'private', workflow: 'Deploy prod', name: 'ship it' }),
+  ], { busy: true, job: { name: 'Rust tests', start: iso(T0 - 15 * 60_000), repo: 'dashpay/platform', runId: 7, workflow: 'Tests', headRef: 'feat/x' } }));
+  const p = ci.publicSummary();
+  const text = JSON.stringify(p);
+  for (const leak of ['brian', 'mac-runner', '/Users/', 'actions-runner', 'claude/strange', 'refs/pull', 'secret-infra', 'Deploy prod', 'ship it', 'github.com', 'feat/x', 'platform-repositories'])
+    assert.ok(!text.includes(leak), `leaked ${leak}`);
+  assert.equal(p.public, true);
+  assert.equal(p.hosts[0].label, 'macOS host 1');
+  assert.equal(p.hosts[0].hostname, undefined);
+  assert.equal(p.runners[0].name, 'macOS host 1 runner');
+  assert.equal(p.runners[0].job.repo, 'dashpay/platform');
+  assert.deepEqual(p.recent.map((j) => j.repo).sort(), ['dashpay/platform', 'private repository']);
+  assert.equal(p.recent[0].runnerName, 'macOS host 1 runner');
+  assert.equal(p.totals.jobs24h, 2);
+  assert.equal(p.reporters, undefined);
+});

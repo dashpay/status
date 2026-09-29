@@ -158,6 +158,19 @@ try {
     await page.screenshot({ path: `artifacts/aws-${label}.png`, fullPage: true });
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), `${label}: no horizontal page scroll`);
   }
+  // Signed out: the sanitized views, nothing that names or locates a host.
+  const anon = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
+  await anon.goto(origin + '/ci');
+  await anon.getByText('Public view').waitFor();
+  const ciText = await anon.locator('body').innerText();
+  assert.ok(ciText.includes('macOS host 1') && !ciText.includes('mac-runner-fixture') && !ciText.includes('fixture.lan'), 'public CI anonymised');
+  await anon.screenshot({ path: 'artifacts/ci-public.png', fullPage: true });
+  await anon.goto(origin + '/aws');
+  await anon.getByText('Running instances by network').waitFor();
+  const awsText = await anon.locator('body').innerText();
+  assert.ok(!awsText.includes('192.0.2.9') && !awsText.includes('dn-testnet-masternode-1') && !awsText.includes('Worth a look'), 'public AWS has totals only');
+  await anon.screenshot({ path: 'artifacts/aws-public.png', fullPage: true });
+  await anon.close();
   console.log(JSON.stringify({ public: 'passed', deployRequest: q.id, settings: 'user added' }));
 } finally {
   await browser.close();
