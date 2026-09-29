@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch, open
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createAuth } from './auth.js';
+import { createCi } from './ci.js';
 import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, loadSettings, memberOf, operatorFor, readJSON, saveSettings, validateSettings, writeAtomic } from '../shared/settings.js';
 import { evaluateNetwork, projectNetwork } from '../shared/evaluate.js';
 import { validateRequest } from '../agent/ops.js';
@@ -16,7 +17,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 
 const LIFECYCLE_ACTIONS = ['create-devnet', 'delete-devnet', 'devnet-services', 'devnet-platform', 'platform-reset'];
 
-export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, clock = Date.now } = {}) {
+export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, clock = Date.now, ciGithub = null } = {}) {
   const settingsPath = join(dataDir, 'settings.json');
   const dirs = { state: join(dataDir, 'state'), requests: join(dataDir, 'requests'), ops: join(dataDir, 'ops') };
   for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
@@ -26,6 +27,9 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   const auth = createAuth({ origin }, { store: join(dataDir, 'sessions.json'), ...authDeps });
   const clients = new Set();
   const cache = new Map();
+  const ci = createCi({ dataDir, fetcher, clock, github: ciGithub, log: (...a) => console.log(new Date(clock()).toISOString(), ...a) });
+  const awsDir = join(dataDir, 'aws');
+  mkdirSync(awsDir, { recursive: true });
 
   // nginx on the host reaches the container through the Docker bridge gateway.
   app.set('trust proxy', ['loopback', 'uniquelocal']);
@@ -33,6 +37,20 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   app.use('/api', rateLimit({ windowMs: 60_000, limit: 600, standardHeaders: true, legacyHeaders: false }));
   app.use('/api/auth/github', rateLimit({ windowMs: 10 * 60_000, limit: 20, standardHeaders: true, legacyHeaders: false }));
   app.use(['/api/ops/:id', '/api/ops/:id/*rest'], (req, res, next) => (UUID.test(req.params.id) ? next() : res.status(404).json({ error: 'Operation not found' })));
+  // CI reporters authenticate with their own bearer token (no session, no CSRF)
+  // and send larger bodies than the console does.
+  app.post('/api/ci/report', (req, res, next) => {
+    // Authenticate before reading the body.
+    req.reporter = ci.authenticate(req.get('authorization'));
+    return req.reporter ? next() : res.status(401).json({ error: 'unknown reporter token' });
+  }, express.json({ limit: '1mb' }), (req, res) => {
+    try {
+      const r = ci.ingest(req.reporter, req.body);
+      clearTimeout(debounce.get('ci'));
+      debounce.set('ci', setTimeout(() => push('ci', { at: new Date(clock()).toISOString() }, (c) => memberOf(settings, c.user)), 2000));
+      res.json(r);
+    } catch (e) { res.status(400).json({ error: e.message }); }
+  });
   app.use(express.json({ limit: '64kb' }));
   app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
   auth.install(app);
@@ -109,8 +127,13 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
       if (r) push('op', { id, network: r.network, status: r.status, updatedAt: r.updatedAt }, (c) => memberOf(settings, c.user, r.network));
     }, 250));
   }
+  const onAwsFile = (file) => {
+    if (file !== 'inventory.json') return;
+    clearTimeout(debounce.get('aws'));
+    debounce.set('aws', setTimeout(() => push('aws', { at: new Date(clock()).toISOString() }, (c) => memberOf(settings, c.user)), 500));
+  };
   const watchers = [];
-  for (const [dir, fn] of [[dirs.state, onStateFile], [dirs.ops, onOpFile]]) {
+  for (const [dir, fn] of [[dirs.state, onStateFile], [dirs.ops, onOpFile], [awsDir, onAwsFile]]) {
     try { watchers.push(watch(dir, (_, f) => f && !f.endsWith('.tmp') && fn(f))); } catch { /* directory created by the agent later */ }
   }
 
@@ -258,6 +281,24 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     next.operators = next.operators.filter((o) => o.id !== id);
   }));
 
+  // Infrastructure pages: any account with access. CI reporters: admins.
+  const anyAccess = (req, res, next) => (memberOf(settings, user(req)) ? next() : res.status(user(req) ? 403 : 401).json({ error: 'Sign in with an account that has access' }));
+  app.get('/api/ci', anyAccess, (req, res) => res.json(ci.summary({ admin: isAdmin(req) })));
+  app.post('/api/ci/reporters', ...adminWrite, (req, res) => {
+    try {
+      const { id, token } = ci.addReporter(req.body?.label);
+      res.status(201).json({ id, token, url: `${origin}/api/ci/report` });
+    } catch (e) { res.status(400).json({ error: e.message }); }
+  });
+  app.delete('/api/ci/reporters/:id', ...adminWrite, (req, res) => {
+    try { ci.removeReporter(req.params.id); res.json({ ok: true }); } catch (e) { res.status(404).json({ error: e.message }); }
+  });
+  app.get('/api/aws', anyAccess, (req, res) => {
+    const inv = readJSON(join(awsDir, 'inventory.json'));
+    if (!inv) return res.status(404).json({ error: 'No AWS inventory yet; the agent collects it every 10 minutes' });
+    res.json(inv);
+  });
+
   // GitHub account lookup so admins can grant access by login.
   app.get('/api/github/users/:login', async (req, res) => {
     if (!isAdmin(req)) return res.status(403).json({ error: 'Only admins can add users' });
@@ -295,8 +336,9 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     app.use(express.static(dist, { index: false, maxAge: '1h', setHeaders: (res, p) => { if (p.endsWith('.html')) res.set('Cache-Control', 'no-cache'); } }));
     app.get('/{*path}', (req, res) => res.set('Cache-Control', 'no-cache').sendFile(join(dist, 'index.html')));
   }
-  app.use((error, req, res, next) => { if (res.headersSent) return next(error); res.status(error.status === 400 ? 400 : 500).json({ error: 'Request could not be processed' }); });
+  app.use((error, req, res, next) => { if (res.headersSent) return next(error); res.status([400, 413].includes(error.status) ? error.status : 500).json({ error: error.status === 413 ? 'Request body too large' : 'Request could not be processed' }); });
   app.close = () => { for (const w of watchers) w.close(); for (const c of clients) c.res.end(); };
+  app.ci = ci;
   return app;
 }
 
@@ -313,7 +355,11 @@ function tail(path, bytes) {
 export function startWeb() {
   const dataDir = process.env.STATUS_DATA_DIR || '/var/lib/dash-status';
   const origin = process.env.PUBLIC_ORIGIN || 'https://status.testnet.networks.dash.org';
-  const app = createWeb({ dataDir, origin });
+  const id = process.env.GITHUB_OAUTH_CLIENT_ID, secret = process.env.GITHUB_OAUTH_CLIENT_SECRET;
+  // The OAuth app's client credentials raise GitHub's public-API limit to 5000/h.
+  const app = createWeb({ dataDir, origin, ciGithub: id && secret ? { id, secret } : null });
+  const ciTimer = setInterval(() => app.ci.tick(), 60_000);
+  ciTimer.unref();
   const server = app.listen(Number(process.env.PORT) || 3001, process.env.BIND_ADDRESS || '127.0.0.1', () => console.log(`dash-status web on ${process.env.PORT || 3001}`));
   for (const s of ['SIGTERM', 'SIGINT']) process.on(s, () => { app.close(); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 3000).unref(); });
   return server;

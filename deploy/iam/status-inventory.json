@@ -1,0 +1,28 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "InventoryReadOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeRegions",
+        "ec2:DescribeInstances",
+        "ec2:DescribeInstanceTypes",
+        "ec2:DescribeVolumes",
+        "ec2:DescribeAddresses",
+        "ec2:DescribeNatGateways",
+        "ec2:DescribeSnapshots",
+        "elasticloadbalancing:DescribeLoadBalancers",
+        "cloudfront:ListDistributions",
+        "lambda:ListFunctions",
+        "dynamodb:ListTables",
+        "ecr:DescribeRepositories",
+        "ecr:DescribeImages",
+        "s3:ListAllMyBuckets",
+        "ce:GetCostAndUsage",
+        "ce:GetCostForecast"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

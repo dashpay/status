@@ -93,13 +93,56 @@ AWS account/region changes take effect after an agent restart.
 
 Mainnet is monitored only.
 
+## Infrastructure pages
+
+Visible to any account with access (any role).
+
+**CI** (`/ci`) covers the self-hosted GitHub Actions runners. Each runner host
+runs [ci/reporter/dash-ci-reporter.py](ci/reporter/dash-ci-reporter.py) from
+cron every minute. It uses Python 3.9+ and the standard library only, and is
+read-only on the host. It POSTs to `/api/ci/report` with the host's own bearer
+token. Each report carries:
+
+- host load, memory, disk and Docker usage;
+- per runner (native directory or Docker container): registration, runner
+  version, listener/worker state, the running job and the size of `_diag`;
+- every finished job, parsed from the listener log (`Runner_*.log`), with
+  repository, workflow, run and branch taken from the job's worker log.
+
+Undelivered jobs are kept and retried. A new host needs an admin to issue a token
+on the CI page, then:
+
+```sh
+DASH_CI_TOKEN=dcr_... DASH_CI_RUNNERS='[{"dir":"'$HOME'/actions-runner"}]' sh ci/reporter/install.sh
+# a runner in Docker: DASH_CI_RUNNERS='[{"container":"dash-ci-runner"}]'
+```
+
+The web adds queue times (GitHub job `created_at` → `started_at`) and the jobs
+currently waiting for a self-hosted runner. It gets these from the GitHub API for
+public repositories, authenticated with the OAuth app's client credentials (5000
+requests/h). Data is kept in `data/ci/` for 30 days.
+
+**AWS** (`/aws`) is an account-wide, read-only inventory collected by the agent
+through the inline policy [status-inventory](deploy/iam/status-inventory.json)
+on `dash-status-server`:
+
+- Every 10 minutes, across all enabled regions: instances, EBS volumes, Elastic
+  IPs, NAT gateways, load balancers, Lambda, DynamoDB, CloudFront and S3.
+- Every 6 hours: ECR repository sizes, snapshots and instance-type facts.
+- Every 12 hours: Cost Explorer month-to-date by service, daily cost and the
+  month-end forecast. Each request is billed at $0.01.
+
+The page lists idle resources that still bill: unattached volumes, unassociated
+EIPs, stopped instances' EBS, and unbounded ECR repositories. Data is stored in
+`data/aws/inventory.json`.
+
 ## Develop
 
 ```sh
 npm ci --include=dev
 npm test && npm run lint && npm run build
 npx playwright install chromium
-node scripts/browser-check.mjs        # fixture state, public + operator flow, screenshots in artifacts/
+node scripts/browser-check.mjs        # fixture state, public + operator flow, CI/AWS pages, screenshots in artifacts/
 STATUS_MODE=web STATUS_DATA_DIR=./data PUBLIC_ORIGIN=http://localhost:3001 npm start
 ```
 

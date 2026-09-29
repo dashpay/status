@@ -8,6 +8,8 @@ import Operation from './pages/Operation.jsx';
 import Settings from './pages/Settings.jsx';
 import NewDevnet from './pages/NewDevnet.jsx';
 import ResetPlatform from './pages/ResetPlatform.jsx';
+import CI from './pages/CI.jsx';
+import Aws from './pages/Aws.jsx';
 
 export default function App() {
   const route = useRoute();
@@ -22,6 +24,8 @@ export default function App() {
   else if (parts[0] === 'n' && parts[1] && parts[2] === 'ops' && parts[3]) page = <Operation name={parts[1]} id={parts[3]} />;
   else if (parts[0] === 'n' && parts[1]) page = <Network name={parts[1]} tab={parts[2] || 'hosts'} />;
   else if (parts[0] === 'settings') page = <Settings />;
+  else if (parts[0] === 'ci') page = <CI />;
+  else if (parts[0] === 'aws') page = <Aws />;
   else if (parts[0] === 'devnets' && parts[1] === 'new') page = <NewDevnet />;
   else page = <Overview overview={overview} />;
   return (
@@ -49,14 +53,19 @@ function Header({ networks, active, session }) {
               <Dot level={n.level} />{n.displayName}
             </Link>
           ))}
+          {(session.allNetworks || session.memberOf?.length > 0) && <>
+            <span className="w-px h-4 bg-line mx-1 shrink-0" aria-hidden="true" />
+            <Link to="/ci" className={`px-2.5 py-1 rounded whitespace-nowrap ${active === 'ci' ? 'bg-panel-2 text-fg' : 'text-dim hover:text-fg'}`}>CI</Link>
+            <Link to="/aws" className={`px-2.5 py-1 rounded whitespace-nowrap ${active === 'aws' ? 'bg-panel-2 text-fg' : 'text-dim hover:text-fg'}`}>AWS</Link>
+          </>}
         </nav>
         <div className="ml-auto flex items-center gap-3 text-[12px] shrink-0">
           {newest && <span className="text-dim mono hidden sm:inline" title={`agent state written ${newest}`}><span className={`dot mr-1.5 ${now - Date.parse(newest) < 120_000 ? 'bg-lv-ok live' : 'bg-lv-down'}`} />{ago(newest, now)}</span>}
           {session.user ? (
             <>
-              {session.admin && <Link to="/devnets/new" className={`hover:text-fg ${active === 'devnets' ? 'text-fg' : 'text-dim'}`}>New devnet</Link>}
+              {session.admin && <Link to="/devnets/new" title="New devnet" className={`hover:text-fg ${active === 'devnets' ? 'text-fg' : 'text-dim'}`}><span className="hidden md:inline">New devnet</span><span className="md:hidden" aria-label="New devnet">+ devnet</span></Link>}
               {(session.allNetworks || session.memberOf?.length > 0) && <Link to="/settings" className={`hover:text-fg ${active === 'settings' ? 'text-fg' : 'text-dim'}`}>Settings</Link>}
-              <span className="flex items-center gap-1.5 text-dim"><img src={`https://avatars.githubusercontent.com/u/${session.user.id}?s=40`} alt="" className="w-5 h-5 rounded-full" />{session.user.login}{session.role && <span className="tag">{session.role}</span>}</span>
+              <span className="flex items-center gap-1.5 text-dim" title={session.user.login}><img src={`https://avatars.githubusercontent.com/u/${session.user.id}?s=40`} alt="" className="w-5 h-5 rounded-full" /><span className="hidden md:inline">{session.user.login}</span>{session.role && <span className="hidden md:inline"><span className="tag">{session.role}</span></span>}</span>
               <button className="text-dim hover:text-fg" onClick={logout}>Sign out</button>
             </>
           ) : session.loaded && session.loginAvailable ? (

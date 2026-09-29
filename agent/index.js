@@ -10,6 +10,7 @@ import { createDiscovery } from './discover.js';
 import { createPool, loadOrCreateKey } from './ssh.js';
 import { createCollector } from './collector.js';
 import { createOps, manifestFor } from './ops.js';
+import { createAwsInventory } from './aws.js';
 
 const DATA = process.env.STATUS_DATA_DIR || '/var/lib/dash-status';
 const PRIVATE = process.env.AGENT_PRIVATE_DIR || '/var/lib/dash-status-agent';
@@ -24,6 +25,7 @@ const pool = createPool({ key, stateDir: PRIVATE, region: settings.aws.region, a
 let discover = createDiscovery({ region: settings.aws.region, tagKey: settings.aws.tagKey });
 let awsKey = JSON.stringify([settings.aws.region, settings.aws.tagKey]);
 const collector = createCollector({ pool, stateDir: dirs.state, log });
+const aws = createAwsInventory({ dataDir: DATA, home: settings.aws.region, log });
 const wake = new Set();
 const ops = createOps({
   settings: () => settings, dirs, key, pool, binary: BINARY, log,
@@ -121,6 +123,10 @@ async function main() {
       if (network && !busy.has(n)) { busy.add(n); collect(network).catch(() => {}).finally(() => busy.delete(n)); }
     }
   }, 1000);
+  // AWS inventory runs on its own schedule; a slow account scan never delays probes.
+  const inventoryTick = () => aws.collect().catch((e) => log('aws inventory failed:', e.message));
+  setTimeout(inventoryTick, 20_000);
+  setInterval(inventoryTick, 10 * 60_000);
   for (;;) {
     await loop().catch((e) => log('loop:', e.message));
     await new Promise((r) => setTimeout(r, 2000));

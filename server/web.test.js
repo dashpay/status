@@ -186,3 +186,34 @@ test('access changes save at once and survive a reload; admins cannot lock thems
     assert.equal((await w.req('/api/access/583231', { method: 'PUT', body: '{}', headers: { 'content-type': 'application/json' } })).status, 403, 'CSRF required');
   } finally { w.close(); }
 });
+
+test('CI: admins issue reporter tokens; reporters post with them; infrastructure pages need access', async () => {
+  const w = await start();
+  try {
+    assert.equal((await w.req('/api/ci')).status, 401);
+    assert.equal((await w.req('/api/aws')).status, 401);
+    const csrf = await w.login();
+    const created = await w.req('/api/ci/reporters', { method: 'POST', body: JSON.stringify({ label: 'ubuntu-server-2' }), headers: { 'content-type': 'application/json', 'x-csrf-token': csrf } });
+    assert.equal(created.status, 201);
+    const { id, token, url } = await created.json();
+    assert.equal(url, 'http://127.0.0.1/api/ci/report');
+    const body = JSON.stringify({ v: 1, at: '2026-09-29T12:00:00Z', host: { hostname: 'ubuntu-server-2', cpus: 32, load: [0.2, 0.5, 2.4], disks: [] }, runners: [{ key: 'dash-ci-runner', name: 'ubuntu-server-2', kind: 'docker', listening: true, busy: false }],
+      jobs: Array.from({ length: 250 }, (_, i) => ({ runner: 'dash-ci-runner', runnerName: 'ubuntu-server-2', name: `job ${i} ${'x'.repeat(200)}`, start: new Date(Date.now() - i * 60_000).toISOString().replace(/\.\d+Z/, 'Z'), result: 'Succeeded' })) });
+    const post = (auth) => w.req('/api/ci/report', { method: 'POST', body, headers: { 'content-type': 'application/json', authorization: auth } });
+    assert.equal((await post('Bearer dcr_nope_0000000000000')).status, 401);
+    const ok = await post(`Bearer ${token}`);
+    assert.equal(ok.status, 200);
+    assert.deepEqual(await ok.json(), { accepted: 250 });
+    const huge = JSON.stringify({ v: 1, host: {}, runners: [], pad: 'x'.repeat(1_100_000) });
+    assert.equal((await w.req('/api/ci/report', { method: 'POST', body: huge, headers: { 'content-type': 'application/json' } })).status, 401);
+    assert.equal((await w.req('/api/ci/report', { method: 'POST', body: huge, headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` } })).status, 413);
+    const s = await (await w.req('/api/ci')).json();
+    assert.equal(s.runners[0].name, 'ubuntu-server-2');
+    assert.equal(s.reporters[0].id, id);
+    assert.equal((await w.req('/api/aws')).status, 404);
+    writeFileSync(join(w.dataDir, 'aws', 'inventory.json'), JSON.stringify({ at: 'now', instances: [] }));
+    assert.equal((await (await w.req('/api/aws')).json()).at, 'now');
+    assert.equal((await w.req(`/api/ci/reporters/${id}`, { method: 'DELETE', headers: { 'x-csrf-token': csrf } })).status, 200);
+    assert.equal((await post(`Bearer ${token}`)).status, 401);
+  } finally { w.close(); }
+});
