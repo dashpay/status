@@ -73,7 +73,12 @@ function fakeDashnet(calls) {
       if (cmd === 'managed-import') writeFileSync(out, JSON.stringify({ id: 'a'.repeat(64), nodes: { 'seed-2': { components: { tenderdash: { image: 'dashpay/tenderdash:1.8.1', digests: ['dashpay/tenderdash@sha256:' + 'b'.repeat(64)] } } } } }));
       if (cmd === 'managed-enroll') { child.stderr.emit('data', 'runner: ' + 'c'.repeat(32) + '\nenrolled seed-2; services unchanged\n'); writeFileSync(out, '{}'); }
       if (cmd === 'managed-plan') writeFileSync(out, JSON.stringify({ id: 'd'.repeat(64), operation: 'upgrade', images: { 'seed-2': { tenderdash: 'index.docker.io/dashpay/tenderdash@sha256:' + 'e'.repeat(64) } } }));
-      if (cmd === 'managed-upgrade') child.stderr.emit('data', 'managed-staging\nmanaged target seed-2 applying\nmanaged-applying\nmanaged target seed-2 starting: Core starting (Loading block index)\nmanaged target seed-2 ready\nmanaged-verifying\nmanaged target seed-2 applied\nmanaged-verifying\n');
+      if (cmd === 'managed-upgrade') {
+        child.stderr.emit('data', 'managed-staging\nmanaged target seed-2 applying\nmanaged-applying\nmanaged target seed-2 starting: Core starting (Loading block index)\n');
+        // The node is starting until the next lines: long enough to be observed.
+        setTimeout(() => { child.stderr.emit('data', 'managed target seed-2 ready\nmanaged-verifying\nmanaged target seed-2 applied\nmanaged-verifying\n'); child.emit('close', 0); }, 150);
+        return;
+      }
       child.emit('close', cmd === 'managed-operation' ? 1 : 0);
     });
     return child;
@@ -103,6 +108,9 @@ test('operation lifecycle: request -> enroll -> plan -> review -> confirm -> upg
   ops.tick();
   assert.equal(read().status, 'review');
   writeFileSync(join(dirs.requests, `${id}.confirm-b.json`), JSON.stringify({ type: 'confirm', id, network: 'testnet', planId: r.review.planId, actor }));
+  for (let i = 0; i < 100 && !read().progress?.starting; i++) { ops.tick(); await new Promise((res) => setTimeout(res, 5)); }
+  assert.equal(read().progress.starting, 'seed-2: Core starting (Loading block index)');
+  assert.equal(read().progress.phase, 'node-startup');
   r = await until('succeeded');
   assert.deepEqual(r.progress.completed, ['seed-2']);
   const upgrade = calls.find((a) => a[0] === 'managed-upgrade');
@@ -445,4 +453,5 @@ test('the operation timeout is a per-node budget', () => {
   assert.deepEqual(operationBudget('110m', 36), { ms: 36 * 110 * 60_000, flag: '3960m' });
   assert.deepEqual(operationBudget('90s', 3), { ms: 270_000, flag: '270s' });
   assert.equal(operationBudget('2h', 0).flag, '120m');
+  assert.deepEqual(operationBudget('4h', 200), { ms: 7 * 24 * 3_600_000, flag: '10080m' });
 });

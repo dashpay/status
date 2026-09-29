@@ -451,7 +451,9 @@ export function toMs(d) {
   const m = /^(\d+)(s|m|h)$/.exec(d);
   return Number(m[1]) * { s: 1000, m: 60_000, h: 3_600_000 }[m[2]];
 }
+// A week at most: longer is a typo, and Node timers top out near 24.8 days.
+const MAX_BUDGET_MS = 7 * 24 * 3_600_000;
 export function operationBudget(perNode, nodes) {
-  const ms = toMs(perNode) * Math.max(1, nodes || 1);
+  const ms = Math.min(MAX_BUDGET_MS, toMs(perNode) * Math.max(1, nodes || 1));
   return { ms, flag: ms % 60_000 ? `${Math.ceil(ms / 1000)}s` : `${ms / 60_000}m` };
 }
