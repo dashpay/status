@@ -246,6 +246,7 @@ function DevnetDefaults({ d, ro, update }) {
           <TextField label="Security groups (comma separated)" value={d.securityGroupIds.join(', ')} ro={ro} mono onChange={(v) => update((x) => { x.securityGroupIds = v.split(',').map((g) => g.trim()).filter(Boolean); })} />
           {T('EC2 key pair (agent key)', 'keyName')}{T('BYOIP IPAM pool', 'ipamPoolId')}{T('Route 53 zone', 'dnsZoneId')}{T('DNS suffix', 'dnsSuffix')}{N('Root disk GiB', 'rootVolumeGiB')}
           {N('Validators', 'validators')}{T('Validator type', 'validatorType')}{T('Validator arch', 'validatorArch')}{N('Platform protocol', 'protocol')}
+          <NumberField label="Platform epoch, seconds (3600 = 1 h)" value={d.platformEpochSeconds ?? 3600} ro={ro} onChange={(v) => update((x) => { x.platformEpochSeconds = v; })} />
           {T('Wallet + services type', 'walletType')}{T('Wallet + services arch', 'walletArch')}
         </div>
         <div className="px-3 pb-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">

@@ -417,9 +417,18 @@ test('block time is part of a devnet request and bounded', async () => {
   for (const bad of [5, 7, 601, 2.5]) assert.throws(() => validateDevnetRequest(s, q(bad), {}), /blockTimeSeconds/);
 });
 
+test('Platform epoch is part of a devnet request: one hour by default, 60 s .. 30 days', async () => {
+  const { validateDevnetRequest } = await import('./devnets.js');
+  const s = structuredClone(settings);
+  const q = (devnet) => ({ id: '6c8139ad-e92f-40da-943d-1e001efacc05', network: 'devnet-epochs', action: 'create-devnet', devnet });
+  assert.equal(validateDevnetRequest(s, q({}), {}).platformEpochSeconds, 3600);
+  assert.equal(validateDevnetRequest(s, q({ platformEpochSeconds: 600 }), {}).platformEpochSeconds, 600);
+  for (const bad of [59, 30 * 86400 + 1, 1.5, '3600']) assert.throws(() => validateDevnetRequest(s, q({ platformEpochSeconds: bad }), {}), /platformEpochSeconds/);
+});
+
 test('services before Platform skip only the Platform-dependent checks', async () => {
   const { deployServices } = await import('./services.js');
-  const dplan = { coreNetwork: 'console-9-g1', platformChainId: 'dash-devnet-console-9', ports: {},
+  const dplan = { coreNetwork: 'console-9-g1', platformChainId: 'dash-devnet-console-9', ports: {}, platformEpochSeconds: 600,
     targets: [{ name: 'wallet-001', role: 'wallet', instanceId: 'i-0aaaaaaaaaaaaaaa1', sshAddress: '198.51.100.9' },
       { name: 'validators-001', role: 'validator', instanceId: 'i-0aaaaaaaaaaaaaaa2', sshAddress: '198.51.100.10', peerAddress: '198.51.100.10', privateAddress: '10.0.0.10' }] };
   const d = { displayName: 'Console 9', dnsZoneId: 'Z1', dnsSuffix: 'networks.dash.org', services: { quorumServer: 'dashpay/quorum-list-server:0.7.0', insightImage: 'dashpay/insight:4.0.10', explorerVersion: '2.5.3', faucetRef: 'b'.repeat(40) } };
@@ -435,6 +444,7 @@ test('services before Platform skip only the Platform-dependent checks', async (
   const args = { r: { id: 'op' }, write: () => {}, dplan, d, name: 'devnet-console-9', pool, r53 };
   const out = await deployServices({ ...args, platformPending: true });
   assert.equal(sent.platformPending, true);
+  assert.equal(sent.epochSeconds, 600, 'the explorer follows the Platform epoch in the deployment plan');
   assert.match(out.summary, /Platform Explorer follows Platform/);
   await assert.rejects(deployServices(args), /explorerApi/, 'full checks once Platform runs');
 });

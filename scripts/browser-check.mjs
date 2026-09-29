@@ -114,6 +114,7 @@ try {
   const created = readdirSync(join(dataDir, 'requests')).map((f) => JSON.parse(readFileSync(join(dataDir, 'requests', f), 'utf8'))).find((x) => x.action === 'create-devnet');
   assert.equal(created.network, 'devnet-fixture');
   assert.equal(created.devnet.validators, 13);
+  assert.equal(created.devnet.platformEpochSeconds, 3600, 'Platform epochs default to one hour');
   assert.equal(created.devnet.subnetId, undefined, 'placement is never sent by the browser');
   await page.goto(origin + '/settings');
   await page.getByPlaceholder('GitHub login, e.g. octocat').fill('octocat');

@@ -49,7 +49,9 @@ function servicesConfig(name, d, dplan) {
     quorumServerImage: d.services.quorumServer.startsWith('docker.io/') ? d.services.quorumServer : `docker.io/${d.services.quorumServer}`,
     insightImage: (d.services.insightImage || 'dashpay/insight:4.0.9').replace(/^(?!docker\.io\/)/, 'docker.io/'),
     explorerVersion: d.services.explorerVersion, faucetRef: d.services.faucetRef, faucetAmount: d.services.faucetAmount,
-    faucetRateLimit: d.services.faucetRateLimit, faucetFunding: d.services.faucetFunding, epochSeconds: d.services.epochSeconds,
+    faucetRateLimit: d.services.faucetRateLimit, faucetFunding: d.services.faucetFunding,
+    // The explorer's epoch clock follows the Platform epoch the devnet runs.
+    epochSeconds: dplan.platformEpochSeconds || d.services.epochSeconds,
     tenderdashUrl: `http://${vpc(relay)}:${RELAY_PORT}`,
     // Validators with Let's Encrypt certificates are verified; self-signed ones are not.
     trustedGateways: !!dplan.gatewayTls,
