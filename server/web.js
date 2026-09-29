@@ -14,7 +14,7 @@ import { validateRequest } from '../agent/ops.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
-const LIFECYCLE_ACTIONS = ['create-devnet', 'delete-devnet', 'devnet-services', 'platform-reset'];
+const LIFECYCLE_ACTIONS = ['create-devnet', 'delete-devnet', 'devnet-services', 'devnet-platform', 'platform-reset'];
 
 export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, clock = Date.now } = {}) {
   const settingsPath = join(dataDir, 'settings.json');

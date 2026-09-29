@@ -292,7 +292,11 @@ def compose(faucet_image, frontend_image):
         svc_spec['labels'] = {**svc_spec.get('labels', {}), 'devnet.config': digest}
     write('compose.json', json.dumps(spec, indent=1))
     sh('docker', 'compose', '-f', str(ROOT / 'compose.json'), 'pull', '--quiet', 'quorums', 'insight', 'postgres', 'explorer-migrate', 'explorer-api', 'caddy', timeout=1200)
-    sh('docker', 'compose', '-f', str(ROOT / 'compose.json'), 'up', '-d', '--remove-orphans', timeout=1200)
+    # The explorer's indexer and API read Platform; until Platform starts
+    # (after the quorums form) run everything else.
+    pending = ['explorer-indexer', 'explorer-api'] if cfg.get('platformPending') else []
+    sh('docker', 'compose', '-f', str(ROOT / 'compose.json'), 'up', '-d', '--remove-orphans',
+       *[name for name in spec['services'] if name not in pending], timeout=1200)
 
 
 def topup_cron():
@@ -364,9 +368,12 @@ faucet_image = build_faucet()
 frontend_image = build_explorer_frontend()
 compose(faucet_image, frontend_image)
 topup_cron()
+platform = not cfg.get('platformPending')
 result = dict(faucetBalance=balance, faucetImage=faucet_image, frontendImage=frontend_image,
-              quorums=wait('http://127.0.0.1:8080/health'), quorumList=wait_quorums(),
+              quorums=wait('http://127.0.0.1:8080/health'), quorumList=wait_quorums() if platform else None,
               insight=wait('http://127.0.0.1:3001/insight-api/status'), insightBlocks=insight_blocks(), faucet=wait('http://127.0.0.1:8000/health'),
-              explorerApi=wait('http://127.0.0.1:3005/status', 300), explorerValidators=wait('http://127.0.0.1:3005/validators?limit=1', 180), explorerFrontend=wait('http://127.0.0.1:3000/', 300),
+              explorerApi=wait('http://127.0.0.1:3005/status', 300) if platform else None,
+              explorerValidators=wait('http://127.0.0.1:3005/validators?limit=1', 180) if platform else None,
+              explorerFrontend=wait('http://127.0.0.1:3000/', 300),
               walletAddress=rpc('getnewaddress', wallet='faucet'), promoCodes=promo_codes())
 print(json.dumps(result))
