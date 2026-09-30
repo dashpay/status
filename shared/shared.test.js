@@ -6,6 +6,23 @@ import { evaluateNetwork, projectNetwork, tagOf } from './evaluate.js';
 const settings = structuredClone(DEFAULT_SETTINGS);
 const network = settings.networks[0];
 
+test('report-backed networks never claim health without a fresh report', () => {
+  const mainnet = settings.networks.find((n) => n.name === 'mainnet');
+  const now = Date.parse('2026-09-30T08:00:00Z');
+  for (const state of [undefined, { hosts: [] }, { hosts: [], generatedAt: '2026-09-30T07:00:00Z' }, { hosts: [], generatedAt: '2026-09-30T09:00:00Z' }]) {
+    assert.equal(evaluateNetwork(mainnet, state, settings, now).level, 'unreachable');
+  }
+  const state = { generatedAt: new Date(now).toISOString(), hosts: [{
+    name: 'mainnet-observer', role: 'fullnode', state: 'running', probe: { ok: true, data: {
+      core: { chain: 'main', blocks: 100 }, mainnet: { chainLockHeight: 100, platformHeight: 50, quorumServer: { status: 200 } },
+    } },
+  }] };
+  assert.equal(evaluateNetwork(mainnet, state, settings, now).level, 'ok');
+  const stale = evaluateNetwork(mainnet, state, settings, now + 31 * 60_000);
+  assert.equal(stale.level, 'unreachable');
+  assert.equal(stale.summary.counts.unreachable, 1);
+});
+
 test('default settings validate; bad edits are rejected with a reason', () => {
   assert.ok(validateSettings(settings));
   const bad = structuredClone(settings);
