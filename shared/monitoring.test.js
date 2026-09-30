@@ -73,3 +73,15 @@ test('sync completion cannot inherit time stalled during initial sync; stale obs
   assert.equal(e.rows[0].level,'unreachable');
   assert.equal(e.summary.monitoring.dapi.queries.observed,0);
 });
+
+test('architecture-specific reviewed creation digests prove tag intent; unresolved tag/digest is not drift', () => {
+  const h={...host(now),arch:'arm64'}, c={repo:'dashpay/dashd',image:'index.docker.io/dashpay/dashd@sha256:arm',digest:'sha256:arm',running:true};
+  const network={images:{core:'dashpay/dashd:23'}};
+  const comp={'dashpay/dashd':'core'};
+  assert.equal(convergence(h,{containers:[c]},network,{},comp)[0].status,'unknown');
+  const op={createdAt:new Date(now).toISOString(),confirmedAt:new Date(now).toISOString(),status:'succeeded',request:{action:'create-devnet'},review:{images:{core:{ref:'dashpay/dashd:23',digests:{amd64:'sha256:amd',arm64:'sha256:arm'}}}}};
+  assert.equal(convergence(h,{containers:[c]},network,expectations([op],now),comp)[0].status,'matched');
+  assert.equal(convergence({...h,arch:'amd64'},{containers:[c]},network,expectations([op],now),comp)[0].status,'drift');
+  network.images.core='dashpay/dashd:24';
+  assert.equal(convergence(h,{containers:[c]},network,expectations([op],now),comp)[0].status,'unknown','old creation intent must not override a later tag');
+});

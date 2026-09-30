@@ -56,8 +56,8 @@ export default function Network({ name, tab }) {
           </div>
 
           {(n.endpoints.length > 0 || Object.keys(s.versions).length > 0) && (
-            <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
-              <div className="panel">
+            <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
+              <div className="panel min-w-0 overflow-x-auto">
                 <div className="px-3 py-2 border-b border-line label">Public endpoints</div>
                 <table className="grid"><tbody className="[&_tr]:!cursor-default">
                   {n.endpoints.map((e) => (
@@ -68,7 +68,7 @@ export default function Network({ name, tab }) {
                   {!n.endpoints.length && <tr><td className="text-dim">none configured</td></tr>}
                 </tbody></table>
               </div>
-              <div className="panel">
+              <div className="panel min-w-0 overflow-x-auto">
                 <div className="px-3 py-2 border-b border-line label">Running versions (container count)</div>
                 <table className="grid"><tbody className="[&_tr]:!cursor-default">
                   {Object.entries(s.versions).map(([c, vs]) => (
