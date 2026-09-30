@@ -1,13 +1,18 @@
 // Only observed evidence is green. Missing, idle or protected sources stay
 // explicitly unknown; none of these probes sends a payment or changes a node.
+const normalize = (ref) => ref?.replace(/^(index\.)?docker\.io\//, '');
 const sameImage = (container, reference) => {
   if (typeof reference !== 'string') return false;
   const digest = reference.split('@')[1];
+  if (!digest && container.image?.includes('@')) return null; // no tag-resolution evidence
   return digest ? container.digest === digest || container.image?.endsWith('@' + digest) : container.image?.replace(/^(index\.)?docker\.io\//, '') === reference.replace(/^(index\.)?docker\.io\//, '');
 };
 export function expectations(operations = [], now = Date.now()) {
   const targets = {};
   for (const op of [...operations].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))) {
+    if (op.confirmedAt && op.status === 'succeeded' && op.request?.action === 'create-devnet' && op.review?.images) {
+      targets['*'] = op.review.images;
+    }
     if (!op.confirmedAt || !op.progress || !['running', 'succeeded', 'failed', 'interrupted', 'cancelled'].includes(op.status)) continue;
     const active = op.status === 'running' && now - Date.parse(op.updatedAt) < 15 * 60_000;
     for (const c of [...(op.review?.changes || []), ...(op.artifacts?.phases || []).flatMap((p) => p.changes || [])]) {
@@ -25,9 +30,12 @@ export function convergence(host, data, network, expected, componentOf) {
     const component = componentOf[c.repo];
     if (!component) continue;
     const pin = pins[component];
-    const target = pin?.to || network.images?.[component];
+    const baseline = expected['*']?.[component];
+    const locked = normalize(baseline?.ref) === normalize(network.images?.[component]) ? baseline?.digests?.[host.arch] : null;
+    const target = pin?.to || (locked ? `${network.images[component].split(/[@:]/)[0]}@${locked}` : network.images?.[component]);
     if (!target) { checks.push({ component, status: 'unknown' }); continue; }
-    const status = sameImage(c, target) ? 'matched' : pin && Date.parse(host.probe?.at) < Date.parse(pin.since) ? 'awaiting-sample'
+    const match = sameImage(c, target);
+    const status = match === null ? 'unknown' : match ? 'matched' : pin && Date.parse(host.probe?.at) < Date.parse(pin.since) ? 'awaiting-sample'
       : pin?.active && (!pin.from || sameImage(c, pin.from)) ? 'rolling' : 'drift';
     checks.push({ component, status, expected: target });
   }

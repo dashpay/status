@@ -25,7 +25,7 @@ function state(name, chain, platform) {
   add('web-1', 'web', { core: { chain, blocks: 1000, subversion: '/Dash Core:23.0.0/' }, insight: { blocks: 1000, syncStatus: 'finished', syncPercentage: 100 }, faucet: { status: 200, latencyMs: 300, title: 'Dash Faucet' }, containers: [container('insight', 'dashpay/insight:4.0.10'), container('faucet', 'dashpay/multifaucet:0.9.2')] }, 20);
   add('wallet-1', 'wallet', { core: { chain, blocks: 1000, wallets: [{ name: 'dashd-wallet-1-faucet', trusted: 147078.24 }, { name: 'dashd-wallet-1-mno', trusted: 298406.03 }] }, containers: [container('dashd', 'dashpay/dashd:22.1.0')] }, 21);
   hosts.push({ name: 'masternode-9', role: 'masternode', state: 'running', publicIp: '192.0.2.40', instanceId: 'i-PRIVATE000000040', tagged: true, probe: { ok: false, at, ms: 12000, error: 'Timed out while waiting for handshake' } });
-  return { network: name, generatedAt: at, pollSeconds: 30, discovery: { at }, endpoints: [{ label: 'Insight', url: 'https://insight.example/', status: 200, ok: true, ms: 40 }], hosts };
+  return { network: name, generatedAt: at, pollSeconds: 30, discovery: { at }, endpoints: [{ label: 'Insight', url: 'https://insight.testnet.networks.dash.org/insight/', status: 200, ok: true, ms: 40 }], hosts };
 }
 
 const dataDir = join(temp, 'data');
@@ -61,6 +61,7 @@ try {
     await page.getByRole('region', { name: 'Functional monitoring' }).waitFor();
     const search = page.getByPlaceholder('filter: name, IP, version, reason…');
     assert.ok((await search.boundingBox()).width >= 160, 'search stays usable on mobile');
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'long real endpoint URLs must not widen the document');
     const text = await page.locator('body').innerText();
     assert.ok(text.includes('seed-2') && text.includes('wallet-1') && text.includes('web-1'));
     assert.ok(!text.includes('i-PRIVATE') && !text.includes('10.0.0.'), 'public view must not expose instance IDs or private IPs');
