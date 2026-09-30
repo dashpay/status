@@ -78,12 +78,33 @@ export default function Network({ name, tab }) {
               </div>
             </div>
           )}
+          {s.monitoring && <Monitoring m={s.monitoring} />}
           {member && n.journal && <Journal j={n.journal} now={now} />}
           <Hosts n={n} now={now} member={member} operator={operator} />
         </>
       )}
     </div>
   );
+}
+
+function Monitoring({ m }) {
+  const checks = (v) => v ? `${v.observed - v.failed}/${v.total} passed${v.failed ? ` · ${v.failed} failed` : ''}${v.total > v.observed ? ` · ${v.total - v.observed} unobserved` : ''}` : 'unobserved';
+  const rows = [
+    ['Quorums / ChainLocks', `${checks(m.quorum.locks)} locks · ${m.quorum.dkgSessions} DKG sessions (${m.quorum.dkgAborted} aborted) · ${m.quorum.recentInstantLocks}/${m.quorum.observedPayouts} observed payouts InstantLocked (24h)`],
+    ['Wallets / faucets', `${m.wallets.confirmed}/${m.wallets.recentPayouts} recent payouts confirmed · wallet RPC ${m.wallets.rpcMaxMs ?? '—'} ms${m.wallets.queues.map((q) => ` · ${q.host} legacy queue: ${q.ok ? q.queued : 'unobserved'}`).join('')}${m.wallets.publicFaucets.map((f) => ` · ${f.label} API: ${f.ok ? f.state : 'failed'}`).join('')}`],
+    ['Explorer queries', `${checks(m.explorers.queries)} · recent block → transaction → address`],
+    ['DAPI / Drive', `${checks(m.dapi.queries)} epoch queries · max ${m.dapi.maxMs ?? '—'} ms · seeds ${checks(m.dapi.seeds)} · height spread ${m.dapi.seedHeightSpread ?? '—'}`],
+    ['Platform consensus', `${checks(m.consensus.commits)} threshold commits · round ≤ ${m.consensus.maxRound ?? '—'} · ${m.consensus.activeMembers} observed set members · ${m.consensus.intervalSeconds ?? '—'} s/block`],
+    ['Core behavior', `headers ahead ≤ ${m.core.headerLag ?? '—'} · outbound groups ≥ ${m.core.minOutboundGroups ?? '—'} · ${m.core.paymentsAdvanced} MN payments advanced since previous sample`],
+    ['Role services', `${checks(m.services.checks)} app checks${m.services.unobservedRoles.length ? ` · ${m.services.unobservedRoles.join(', ')}: EC2 state only` : ''}`],
+    ['Upgrade convergence', `${m.convergence.matched} matched · ${m.convergence.rolling} rolling/awaiting sample · ${m.convergence.drift} drift/missing · ${m.convergence.unknown} without target · ${m.convergence.restarts ?? '—'} restarts/replacements since previous sample`],
+  ];
+  return <section className="panel mt-3" aria-label="Functional monitoring">
+    <div className="px-3 py-2 border-b border-line label">Functional evidence <span className="normal-case font-normal text-dim">· read-only · no recent payout means unproven, not passed</span></div>
+    <dl className="grid grid-cols-1 sm:grid-cols-[max-content_minmax(0,1fr)] gap-x-5 gap-y-1 px-3 py-2 text-[12px]">
+      {rows.map(([title, detail]) => <Fragment key={title}><dt className="text-dim">{title}</dt><dd className="mono break-words min-w-0">{detail}</dd></Fragment>)}
+    </dl>
+  </section>;
 }
 
 function Journal({ j, now }) {
@@ -245,6 +266,16 @@ function HostDetail({ h, now, member, operator, network }) {
       <div>
         <div className="label mb-1">Status</div>
         {h.reasons.length ? h.reasons.map((r, i) => <div key={i} className="flex gap-2 text-[12px]"><Level level={r.level} /><span className="mono break-all">{r.text}</span></div>) : <div className="lv-ok text-[12px]">all checks passed</div>}
+        <div className="label mt-3 mb-1">Functional checks</div>
+        <KV rows={[
+          h.dapi?.query && ['Drive query', `${h.dapi.query.method}: ${h.dapi.query.ok ? `${h.dapi.query.latencyMs} ms · epoch ${h.dapi.query.epoch} · protocol ${h.dapi.query.protocol}` : 'failed'}`],
+          h.platform && ['consensus', `round ${h.platform.round ?? '—'} · commit ${h.platform.thresholdSigned == null ? 'unobserved' : h.platform.thresholdSigned ? 'threshold signed' : 'unsigned'} · proposer ${h.platform.proposer || '—'}`],
+          h.core?.peerDiversity && ['outbound diversity', `${h.core.peerDiversity.outbound} peers / ${h.core.peerDiversity.groups} network groups`],
+          h.core?.dkg?.length > 0 && ['DKG', h.core.dkg.map((d) => `${d.type}: phase ${d.phase ?? '—'}${d.aborted ? ' ABORTED' : ''}, contributions ${d.receivedContributions ?? '—'}`).join(' · ')],
+          h.convergence?.length > 0 && ['image targets', h.convergence.map((c) => `${c.component}: ${c.status}${c.expected ? ` (${c.expected})` : ''}`).join(' · ')],
+          h.services?.length > 0 && ['services', h.services.map((c) => `${c.service}: ${c.ok == null ? 'unobserved' : c.ok ? 'passed' : 'failed'}${c.reason ? ` (${c.reason})` : ''}`).join(' · ')],
+          h.observation && ['sampling window', `${h.observation.windowSeconds ?? 0} s · ${h.observation.continuous ? 'continuous' : 'awaiting continuity'}`],
+        ]} />
         <div className="label mt-3 mb-1">Host</div>
         <KV rows={[
           ['instance', member ? `${h.instanceId} · ${h.instanceType} · ${h.arch} · ${h.az}` : `${h.instanceType} · ${h.arch} · ${h.az}`],

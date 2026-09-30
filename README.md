@@ -184,3 +184,26 @@ masternode list, not the quorum server's subset. A large-ban alert defaults to
 20 newly banned masternodes over an hour; historical bans remain visible without
 triggering this alert. The quorum-list check requires both nonempty masternode and
 quorum JSON responses. No payouts, signing operations or fleet mutations occur.
+
+## Functional monitoring evidence
+
+The network page and `summary.monitoring` report eight independent areas: quorum/ChainLocks,
+wallet/faucet outcomes, Explorer queries, DAPI/Drive queries, Platform consensus, Core behavior,
+role services and upgrade convergence. Probes are read-only: they never submit payments or mine blocks.
+
+- DAPI `getEpochsInfo` exercises Drive. Insight queries a recent block, its transaction and an address.
+- Last-day faucet-wallet sends and legacy faucet records are checked for confirmations/InstantLocks.
+  No recent traffic means **unproven**, not a successful synthetic payout. Legacy queue checks are
+  labelled separately from the public faucet's `/api/status`; no recipient, user IP, promo code or txid is exported.
+- DKG phases/aborts, threshold commit signatures, round/proposer, set membership and voting power are facts,
+  not claims that this fleet is the entire network or that a rotating nonmember is unhealthy.
+- Miner service/container, CoinJoin state, Grafana DB, Prometheus targets, Elasticsearch and Kibana
+  health are observed where available. Protected endpoints and unprobed VPNs stay explicitly unobserved.
+- Bounded one-hour progress history survives agent restarts. Failed/gapped samples, replacement instance
+  identities and initial sync cannot establish a chain stall. Payment and restart deltas are per sample.
+- Confirmed, actually executing operations establish per-node/component image targets. Pending review
+  never changes intent; active rollout, awaiting a fresh post-operation sample, drift and absent targets
+  are separate. Mutable tags are compared as tags; digest evidence is used when the reviewed target pins a digest.
+
+New functional failures can expose old service problems hidden by homepage-only checks. Inspect the
+individual source and timestamps before changing the monitored service.

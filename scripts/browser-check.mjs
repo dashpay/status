@@ -58,6 +58,9 @@ try {
     await page.screenshot({ path: `artifacts/overview-${label}.png`, fullPage: true });
     await page.goto(origin + '/n/testnet');
     await page.getByText('Seeds · 2').waitFor();
+    await page.getByRole('region', { name: 'Functional monitoring' }).waitFor();
+    const search = page.getByPlaceholder('filter: name, IP, version, reason…');
+    assert.ok((await search.boundingBox()).width >= 160, 'search stays usable on mobile');
     const text = await page.locator('body').innerText();
     assert.ok(text.includes('seed-2') && text.includes('wallet-1') && text.includes('web-1'));
     assert.ok(!text.includes('i-PRIVATE') && !text.includes('10.0.0.'), 'public view must not expose instance IDs or private IPs');

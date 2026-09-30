@@ -11,6 +11,7 @@ import { createAuth } from './auth.js';
 import { createCi } from './ci.js';
 import { publicInventory } from './aws-public.js';
 import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, loadSettings, memberOf, operatorFor, readJSON, saveSettings, validateSettings, writeAtomic } from '../shared/settings.js';
+import { expectations } from '../shared/monitoring.js';
 import { evaluateNetwork, projectNetwork } from '../shared/evaluate.js';
 import { devnetFiles } from '../shared/devnet-files.js';
 import { validateRequest } from '../agent/ops.js';
@@ -82,7 +83,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
 
   function view(network, operator) {
     const state = stateOf(network.name);
-    const evaluation = evaluateNetwork(network, state, settings, clock(), readJSON(join(dirs.state, 'image-tags.json'), {}));
+    const evaluation = evaluateNetwork(network, state, settings, clock(), readJSON(join(dirs.state, 'image-tags.json'), {}), expectations(listOps(network.name), clock()));
     return projectNetwork(network, evaluation, state, operator);
   }
   function brief(v) {
