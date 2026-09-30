@@ -40,7 +40,8 @@ const pct = (used, total) => (total ? Math.round((used / total) * 1000) / 10 : n
 export function evaluateNetwork(network, state, settings, now = Date.now(), tags = {}, expected = {}) {
   const t = settings.thresholds;
   const hosts = state?.hosts || [];
-  const live = (h) => (h?.probe?.ok ? h.probe.data : null);
+  const fresh = (h) => { const at = Date.parse(h?.probe?.at); return !Number.isFinite(at) || (now - at <= Math.max(180_000, (state?.pollSeconds || 30) * 3000) && at <= now + 60_000); };
+  const live = (h) => (h?.probe?.ok && fresh(h) ? h.probe.data : null);
   const coreTip = Math.max(0, ...hosts.map((h) => live(h)?.core?.blocks || 0));
   const platformTip = Math.max(0, ...hosts.map((h) => live(h)?.tenderdash?.height || live(h)?.dapi?.height || 0));
   const tipHost = hosts.find((h) => live(h)?.core?.blocks === coreTip);
@@ -54,6 +55,7 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
     const flag = (l, text) => { reasons.push({ level: l, text }); if (RANK[l] > RANK[level]) level = l; };
     if (h.state !== 'running') flag('stopped', `instance ${h.state}`);
     else if (h.probe?.skipped) { flag('info', 'service health not observed; EC2 state only'); }
+    else if (!fresh(h)) flag('unreachable', 'host observation is stale');
     else if (!h.probe?.ok) flag('unreachable', `probe failed: ${h.probe?.error || 'no result yet'}`);
     else {
       const c = d.core;

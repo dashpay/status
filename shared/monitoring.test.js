@@ -64,3 +64,12 @@ test('real query failures and mismatched endpoints affect status while rotating 
   assert.equal(pub.hosts[0].observation.samples,undefined);
   assert.equal(pub.hosts[0].instanceId,undefined);
 });
+
+test('sync completion cannot inherit time stalled during initial sync; stale observations cannot stay green', () => {
+  let previous;
+  for (let t=0;t<=1860_000;t+=60_000) { const h=host(now+t); h.probe.data.core.ibd=true; previous={hosts:observe([h],previous,now+t)}; }
+  assert.equal(observe([host(now+1920_000)],previous,now+1920_000)[0].observation.core.stalledSeconds,null);
+  const e=evaluateNetwork(DEFAULT_SETTINGS.networks[0],{hosts:[host(now)]},DEFAULT_SETTINGS,now+240_000);
+  assert.equal(e.rows[0].level,'unreachable');
+  assert.equal(e.summary.monitoring.dapi.queries.observed,0);
+});
