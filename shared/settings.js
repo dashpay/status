@@ -130,6 +130,7 @@ export function validateSettings(input) {
     if (!/^[a-z][a-z0-9-]{0,62}$/.test(n.coreNetwork)) throw new Error(`${n.name}: coreNetwork invalid`);
     int(n.p2pPort, 1, 65535, `${n.name} p2pPort`);
     for (const k of ['public', 'deployable', 'showBalances']) if (typeof n[k] !== 'boolean') throw new Error(`${n.name}: ${k} must be true/false`);
+    if (n.observeVpn !== undefined && (typeof n.observeVpn !== 'boolean' || n.chainType === 'mainnet')) throw new Error(`${n.name}: observeVpn is a non-mainnet boolean`);
     if (n.deployable && n.chainType === 'mainnet') throw new Error(`${n.name}: mainnet workloads are not deployable from the console`);
     if (n.chainType === 'mainnet' && (n.source !== 'report' || n.tag === 'mainnet-support')) throw new Error('Mainnet must use the separate report observer, never mainnet-support');
     if (n.mainnetSignals?.bigBanThreshold !== undefined) int(n.mainnetSignals.bigBanThreshold, 1, 10000, 'bigBanThreshold');
