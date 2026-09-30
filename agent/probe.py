@@ -5,6 +5,7 @@ Only local sources are queried (Docker, Core RPC through dash-cli, Tenderdash RP
 DAPI gRPC through the local gateway, Insight, the faucet). Nothing is written.
 """
 import calendar
+import base64
 import ipaddress
 import json
 import os
@@ -17,10 +18,17 @@ import sys
 import tempfile
 import time
 import urllib.request
+import urllib.parse
 
 START = time.time()
 ROLE = sys.argv[1] if len(sys.argv) > 1 else ''
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args):
+        return None
+
+# Credentials from local containers must never follow a redirect off-host.
+LOCAL_AUTH_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 errors = []
 
 
@@ -443,7 +451,20 @@ def insight(raw):
         block = http_json(base + 'block/' + tip)
         tx = http_json(base + 'tx/' + block['tx'][0])
         addresses = [a for v in tx.get('vout', []) for a in v.get('scriptPubKey', {}).get('addresses', [])]
-        if not addresses: raise ValueError('no transaction address to query')
+        # Legacy Insight omits decoded addresses on devnets. Decode this public
+        # output through the same host's Core, not a hardcoded network prefix.
+        if not addresses:
+            cli, _ = core_cli(raw)
+            for v in tx.get('vout', [])[:3] if cli else []:
+                script = v.get('scriptPubKey', {}).get('hex', '')
+                if not re.fullmatch(r'[0-9a-fA-F]{2,10000}', script): continue
+                decoded = parse(run(cli + ['decodescript', script], timeout=4))
+                if not isinstance(decoded, dict): continue
+                addresses = decoded.get('addresses') or ([decoded['address']] if decoded.get('address') else [])
+                if addresses: break
+        if not addresses:
+            return dict(query=dict(ok=None, reason='recent transaction has no decodable address', blockAndTransaction=bool(tx.get('txid')) and block.get('height') == info['blocks']),
+                        blocks=info.get('blocks'), syncStatus=sync.get('status'), syncHeight=sync.get('height'))
         address = http_json(base + 'addr/' + addresses[0] + '?noTxList=1')
         functional = dict(ok=block.get('height') == info['blocks'] and bool(tx.get('txid')) and bool(address.get('addrStr')),
                           latencyMs=round((time.monotonic() - t) * 1000), height=block.get('height'))
@@ -470,10 +491,10 @@ def http_check(raw, repos, port):
     return dict(status=code, latencyMs=round((time.time() - t) * 1000), title=title.group(1).strip()[:80] if title else None)
 
 
-def get_json(url, timeout=8):
+def get_json(url, timeout=8, opener=OPENER):
     t = time.time()
     try:
-        with OPENER.open(url, timeout=timeout) as r:
+        with opener.open(url, timeout=timeout) as r:
             return r.status, json.loads(r.read(2 * 1024 * 1024) or b'null'), round((time.time() - t) * 1000)
     except urllib.error.HTTPError as e:
         try:
@@ -563,7 +584,29 @@ def role_services(raw):
         if not c: continue
         try:
             host, bound = host_port(c, port)
-            code, data, ms = get_json('http://%s:%d%s' % (host,bound,path),4)
+            if name == 'prometheus':
+                cmd = c['Config'].get('Cmd') or []
+                def flag_value(flag):
+                    for i, arg in enumerate(cmd):
+                        if arg.startswith(flag + '='): return arg.split('=', 1)[1]
+                        if arg == flag and i + 1 < len(cmd): return cmd[i + 1]
+                    return None
+                prefix = flag_value('--web.route-prefix')
+                if prefix is None: prefix = urllib.parse.urlparse(flag_value('--web.external-url') or '').path
+                path = '/' + (prefix or '').strip('/') + path if (prefix or '').strip('/') else path
+            # Inspect the local container endpoint; never send a local service
+            # credential through a public reverse proxy or redirect.
+            local_ip = next((n.get('IPAddress') for n in (c.get('NetworkSettings', {}).get('Networks') or {}).values() if n.get('IPAddress')), None)
+            if local_ip and ipaddress.ip_address(local_ip).is_private: host, bound = local_ip, port
+            request = 'http://%s:%d%s' % (host,bound,path)
+            opener = OPENER
+            if name == 'elasticsearch':
+                password = next((v.split('=',1)[1] for v in c['Config'].get('Env',[]) if v.startswith('ELASTIC_PASSWORD=')), None)
+                if password:
+                    credential = base64.b64encode(('elastic:' + password).encode()).decode()
+                    request = urllib.request.Request(request, headers={'Authorization':'Basic ' + credential})
+                    opener = LOCAL_AUTH_OPENER
+            code, data, ms = get_json(request,4,opener)
             ok = code == 200
             facts = {}
             if code in (401,403):
