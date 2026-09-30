@@ -88,7 +88,7 @@ export default function Network({ name, tab }) {
 }
 
 function Monitoring({ m }) {
-  const checks = (v) => v ? `${v.observed - v.failed}/${v.total} passed${v.failed ? ` · ${v.failed} failed` : ''}${v.total > v.observed ? ` · ${v.total - v.observed} unobserved` : ''}` : 'unobserved';
+  const checks = (v) => v?.total === 0 ? 'no targets' : v ? `${v.observed - v.failed}/${v.total} passed${v.failed ? ` · ${v.failed} failed` : ''}${v.total > v.observed ? ` · ${v.total - v.observed} unobserved` : ''}` : 'unobserved';
   const rows = [
     ['Quorums / ChainLocks', `${checks(m.quorum.locks)} locks · ${m.quorum.dkgSessions} DKG sessions (${m.quorum.dkgAborted} aborted) · ${m.quorum.recentInstantLocks}/${m.quorum.observedPayouts} observed payouts InstantLocked (24h)`],
     ['Wallets / faucets', `${m.wallets.confirmed}/${m.wallets.recentPayouts} recent payouts confirmed · wallet RPC ${m.wallets.rpcMaxMs ?? '—'} ms${m.wallets.queues.map((q) => ` · ${q.host} legacy queue: ${q.ok ? q.queued : 'unobserved'}`).join('')}${m.wallets.publicFaucets.map((f) => ` · ${f.label} API: ${f.ok ? f.state : 'failed'}`).join('')}`],
