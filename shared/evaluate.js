@@ -1,5 +1,6 @@
 // Turns agent state into what the board shows. Every status comes with the
 // concrete facts that produced it; there is no status without a reason.
+import { convergence, monitoringSummary } from './monitoring.js';
 import { COMPONENT_REPOS, SIDECAR_REPOS } from './settings.js';
 
 export const LEVELS = ['ok', 'warn', 'down', 'unreachable', 'stopped', 'deploying'];
@@ -36,10 +37,11 @@ function versionOf(component, container, data, tags = {}) {
 
 const pct = (used, total) => (total ? Math.round((used / total) * 1000) / 10 : null);
 
-export function evaluateNetwork(network, state, settings, now = Date.now(), tags = {}) {
+export function evaluateNetwork(network, state, settings, now = Date.now(), tags = {}, expected = {}) {
   const t = settings.thresholds;
   const hosts = state?.hosts || [];
-  const live = (h) => (h?.probe?.ok ? h.probe.data : null);
+  const fresh = (h) => { const at = Date.parse(h?.probe?.at); return !Number.isFinite(at) || (now - at <= Math.max(180_000, (state?.pollSeconds || 30) * 3000) && at <= now + 60_000); };
+  const live = (h) => (h?.probe?.ok && fresh(h) ? h.probe.data : null);
   const coreTip = Math.max(0, ...hosts.map((h) => live(h)?.core?.blocks || 0));
   const platformTip = Math.max(0, ...hosts.map((h) => live(h)?.tenderdash?.height || live(h)?.dapi?.height || 0));
   const tipHost = hosts.find((h) => live(h)?.core?.blocks === coreTip);
@@ -52,7 +54,8 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
     let level = 'ok';
     const flag = (l, text) => { reasons.push({ level: l, text }); if (RANK[l] > RANK[level]) level = l; };
     if (h.state !== 'running') flag('stopped', `instance ${h.state}`);
-    else if (h.probe?.skipped) { /* reachable per EC2; host is not probed (vpn) */ }
+    else if (h.probe?.skipped) { flag('info', 'service health not observed; EC2 state only'); }
+    else if (!fresh(h)) flag('unreachable', 'host observation is stale');
     else if (!h.probe?.ok) flag('unreachable', `probe failed: ${h.probe?.error || 'no result yet'}`);
     else {
       const c = d.core;
@@ -63,6 +66,11 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
           if (c.ibd) flag('warn', `Core initial sync ${Math.round((c.progress || 0) * 1000) / 10}%`);
           const lag = coreTip - (c.blocks || 0);
           if (lag > t.coreLagBlocks) flag('warn', `Core ${lag} blocks behind tip`);
+          if (Number.isFinite(c.headers) && c.headers - c.blocks > t.coreLagBlocks) flag('warn', `Core headers ${c.headers - c.blocks} ahead of validated blocks`);
+          if (!c.ibd && c.chainLockTime && now / 1000 - c.chainLockTime > 1800) flag('warn', 'ChainLock older than 30 minutes');
+          if (!c.ibd && c.chainLockHeight != null && c.blocks - c.chainLockHeight > Math.max(t.coreLagBlocks, 6)) flag('warn', 'ChainLock is behind the Core tip');
+          if ((c.dkg || []).some((v) => v.aborted)) flag('warn', 'DKG session aborted');
+          if (c.peerDiversity?.outbound === 0 && !c.ibd) flag('warn', 'no outbound Core peers');
           if (c.synced === false) flag('warn', 'masternode sync not finished');
           const mn = c.masternode;
           if (['validator', 'masternode'].includes(h.role)) {
@@ -84,6 +92,10 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
           if (lag > t.platformLagBlocks) flag('warn', `Platform ${lag} blocks behind tip`);
         }
         if (d.dapi && !d.dapi.ok) flag('down', `DAPI getStatus failed${d.dapi.error ? `: ${d.dapi.error}` : ''}`);
+        if (d.dapi?.query?.ok === false) flag('down', 'DAPI Drive epoch query failed');
+        if (d.dapi?.query?.protocol != null && d.tenderdash?.protocolApp && d.dapi.query.protocol !== d.tenderdash.protocolApp) flag('warn', 'DAPI epoch and consensus protocol disagree');
+        if (d.dapi?.chainId && d.tenderdash?.network && d.dapi.chainId !== d.tenderdash.network) flag('down', 'DAPI and consensus chain IDs disagree');
+        if (d.tenderdash?.round > 5) flag('warn', `consensus round ${d.tenderdash.round}`);
         // Short-lived (about 6 day) IP certificates renew with 3 days left.
         const tlsLeft = d.dapi?.tls?.expired ? 0 : d.dapi?.tls?.trusted && d.dapi.tls.expiresAt ? Date.parse(d.dapi.tls.expiresAt) - now : null;
         if (tlsLeft !== null && tlsLeft < 36 * 3600_000) flag(tlsLeft <= 0 ? 'down' : 'warn', tlsLeft <= 0 ? 'gateway certificate expired' : `gateway certificate expires in ${Math.max(1, Math.round(tlsLeft / 3600_000))} h; renewal is not succeeding`);
@@ -104,6 +116,19 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
         if (mem >= t.memWarnPercent) flag('warn', `memory ${mem}%`);
       }
       if (d.insight && (d.insight.syncStatus !== 'finished' || coreTip - (d.insight.blocks || 0) > t.coreLagBlocks)) flag('warn', `Insight ${d.insight.syncStatus || 'unknown'} at ${d.insight.blocks}`);
+      if (d.insight?.query?.ok === false) flag('down', 'Insight block/transaction/address query failed');
+      if (d.faucet?.queue?.ok === false) flag('warn', 'legacy faucet queue unavailable');
+      if (d.faucet?.queue?.queued > 0 && d.faucet.queue.oldestQueuedAt && now / 1000 - d.faucet.queue.oldestQueuedAt > 3600) flag('warn', 'legacy faucet has requests queued over one hour');
+      if (h.role === 'mixer' && d.core?.coinjoin?.enabled === true && d.core.coinjoin.running === false) flag('warn', 'CoinJoin is enabled but not running');
+      for (const service of d.services || []) {
+        if (service.ok === false) flag('warn', `${service.service} functional health check failed`);
+        else if (service.ok == null) flag('info', `${service.service} health not observed (${service.reason || 'unavailable'})`);
+        else if (service.down > 0) flag('warn', `${service.service} has ${service.down} failing scrape targets`);
+      }
+      for (const [chain, value] of Object.entries({ Core: h.observation?.core, Platform: h.observation?.platform })) {
+        if (value?.stalledSeconds >= 1800) flag('down', `${chain} height unchanged through 30 minutes of continuous observation`);
+      }
+      if (h.observation?.restarts > 0) flag('info', `${h.observation.restarts} container restart/replacement(s) since previous sample`);
       if (d.faucet?.kind === 'dash-faucet') {
         if (d.faucet.state === 'low_balance') flag('warn', `faucet balance ${d.faucet.balance} below payout reserve`);
         else if (d.faucet.status !== 200) flag('down', `faucet /api/status HTTP ${d.faucet.status}`);
@@ -137,12 +162,15 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
         if (banned != null && banned >= banThreshold) flag('warn', `mainnet newly PoSe-banned masternodes ${banned} in one hour`);
       }
     }
+    const imageChecks = convergence(h, d, network, expected, COMPONENT_OF);
+    if (imageChecks.some((c) => ['drift', 'missing'].includes(c.status))) flag('warn', 'running images differ from the last confirmed deployment target');
+    if (imageChecks.some((c) => c.status === 'rolling')) flag('info', 'image rollout in progress');
     // A console devnet under construction is not failing: say what is happening.
     if (building && level !== 'ok' && level !== 'stopped') {
       reasons.unshift({ level: 'deploying', text: `devnet ${network.lifecycle.status}; services start as the creation operation reaches them` });
       level = 'deploying';
     }
-    return { host: h, data: d, level, reasons };
+    return { host: h, data: d, level, reasons, convergence: imageChecks };
   });
 
   const counts = Object.fromEntries(LEVELS.map((l) => [l, rows.filter((r) => r.level === l).length]));
@@ -172,7 +200,7 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
   const validatorRows = rows.filter((r) => r.host.role === 'validator');
   const summary = {
     core: coreTip ? { height: coreTip, blockTime: tipData.core?.blockTime ? tipData.core.blockTime * 1000 : null, chainLock: Math.max(0, ...rows.map((r) => r.data.core?.chainLockHeight || 0)) || null, difficulty: tipData.core?.difficulty, protocol: tipData.core?.protocol, chain: tipData.core?.chain } : null,
-    platform: platformTip ? { height: platformTip, blockTime: platformHost ? Date.parse(live(platformHost).tenderdash.blockTime) : null, chainId: validatorRows.map((r) => r.data.tenderdash?.network).find(Boolean) || null, protocol: validatorRows.map((r) => r.data.tenderdash?.protocolApp).find(Boolean) || null, validatorSet: validatorRows.map((r) => r.data.tenderdash?.validatorSetSize).find(Boolean) || null } : null,
+    platform: platformTip ? { height: platformTip, blockTime: platformHost ? Date.parse(live(platformHost).tenderdash.blockTime) : null, chainId: rows.map((r) => r.data.tenderdash?.network).find(Boolean) || null, protocol: validatorRows.map((r) => r.data.tenderdash?.protocolApp).find(Boolean) || null, validatorSet: validatorRows.map((r) => r.data.tenderdash?.validatorSetSize).find(Boolean) || null } : null,
     counts, versions,
     masternodes: {
       ready: rows.filter((r) => r.data.core?.masternode?.state === 'READY').length,
@@ -181,6 +209,7 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
     },
     dapi: { ok: validatorRows.filter((r) => r.data.dapi?.ok).length, total: validatorRows.filter((r) => r.host.state === 'running').length },
   };
+  if (network.chainType !== 'mainnet') summary.monitoring = monitoringSummary(rows, state?.endpoints || [], now);
   const mainnetRow = rows.find((r) => r.host.role === 'fullnode' && r.data.mainnet);
   if (network.chainType === 'mainnet' && mainnetRow) {
     const m = mainnetRow.data.mainnet || {};
@@ -195,8 +224,11 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
       platformSyncing: m.platformSyncing ?? null, newBans: m.newBans ?? null,
     };
   }
+  const endpointFailure = (state?.endpoints || []).some((e) => e.ok === false);
+  const seedChains = summary.monitoring?.dapi.seedChains || [];
+  const seedMismatch = seedChains.length > 1 || summary.monitoring?.dapi.seedHeightSpread > t.platformLagBlocks;
   const level = rows.reduce((a, r) => (r.host.duplicate || r.host.role === 'vpn' ? a : RANK[r.level] > RANK[a] ? r.level : a), 'ok');
-  return { level: reportStale ? 'unreachable' : building ? 'deploying' : level === 'stopped' ? 'ok' : level, rows, summary, tags, generatedAt: state?.generatedAt || null, ageSeconds: state?.generatedAt ? Math.round((now - Date.parse(state.generatedAt)) / 1000) : null };
+  return { level: reportStale ? 'unreachable' : building ? 'deploying' : (endpointFailure || seedMismatch) && RANK[level] < RANK.warn ? 'warn' : level === 'stopped' ? 'ok' : level, rows, summary, tags, generatedAt: state?.generatedAt || null, ageSeconds: state?.generatedAt ? Math.round((now - Date.parse(state.generatedAt)) / 1000) : null };
 }
 
 function chainMatches(chain, network) {
@@ -207,16 +239,17 @@ function chainMatches(chain, network) {
 // Projection. Public: facts useful to infra engineers, without instance IDs,
 // private addresses, raw probe errors or (unless enabled) wallet balances.
 export function projectNetwork(network, evaluation, state, operator) {
-  const hosts = evaluation.rows.map(({ host: h, data: d, level, reasons }) => {
+  const hosts = evaluation.rows.map(({ host: h, data: d, level, reasons, convergence: imageChecks }) => {
     const c = d.core || {}, td = d.tenderdash || {}, s = d.system || {};
     const row = {
       name: h.name, role: h.role, level, reasons: reasons.map((r) => ({ level: r.level, text: operator ? r.text : publicReason(r.text, network) })),
       publicIp: h.publicIp, instanceType: h.instanceType, arch: h.arch, state: h.state, az: h.az, duplicate: !!h.duplicate,
       probedAt: h.probe?.at || null, probeMs: h.probe?.ms ?? null,
-      core: d.core ? { height: c.blocks, headers: c.headers, chainLock: c.chainLockHeight, version: c.subversion, protocol: c.protocol, peers: c.connections, peersIn: c.connectionsIn, ibd: c.ibd, synced: c.synced, sizeOnDisk: c.sizeOnDisk, mempool: c.mempool, bestBlock: c.bestBlockHash, blockTime: c.blockTime } : null,
+      convergence: imageChecks, observation: h.observation ? { ...h.observation, samples: undefined } : null, services: d.services || [],
+      core: d.core ? { height: c.blocks, headers: c.headers, chainLock: c.chainLockHeight, version: c.subversion, protocol: c.protocol, peers: c.connections, peersIn: c.connectionsIn, ibd: c.ibd, synced: c.synced, sizeOnDisk: c.sizeOnDisk, mempool: c.mempool, bestBlock: c.bestBlockHash, blockTime: c.blockTime, rpcLatencyMs: c.rpcLatencyMs, peerDiversity: c.peerDiversity, dkg: c.dkg, quorums: c.quorums, coinjoin: c.coinjoin, mining: c.mining, payouts: c.payouts } : null,
       masternode: c.masternode ? { state: c.masternode.state, type: c.masternode.type, proTxHash: c.masternode.proTxHash, pose: c.masternode.posePenalty, lastPaid: c.masternode.lastPaidHeight, registered: c.masternode.registeredHeight, service: c.masternode.service } : null,
-      platform: d.tenderdash ? { height: td.height, blockTime: td.blockTime, peers: td.peers, catchingUp: td.catchingUp, network: td.network, protocol: td.protocolApp, version: td.version, votingPower: td.votingPower, inValidatorSet: td.inValidatorSet, nodeId: td.nodeId } : null,
-      dapi: d.dapi ? { ok: d.dapi.ok, latencyMs: d.dapi.latencyMs, height: d.dapi.height, dapiVersion: d.dapi.dapiVersion, driveVersion: d.dapi.driveVersion, tls: d.dapi.tls || null, error: operator ? d.dapi.error : undefined } : null,
+      platform: d.tenderdash ? { height: td.height, blockTime: td.blockTime, peers: td.peers, catchingUp: td.catchingUp, network: td.network, protocol: td.protocolApp, version: td.version, votingPower: td.votingPower, inValidatorSet: td.inValidatorSet, nodeId: td.nodeId, proposer: td.proposer, round: td.round, commitRound: td.commitRound, thresholdSigned: td.thresholdSigned } : null,
+      dapi: d.dapi ? { ok: d.dapi.ok, query: d.dapi.query, latencyMs: d.dapi.latencyMs, height: d.dapi.height, dapiVersion: d.dapi.dapiVersion, driveVersion: d.dapi.driveVersion, tls: d.dapi.tls || null, error: operator ? d.dapi.error : undefined } : null,
       insight: d.insight || null, faucet: d.faucet ? (operator || network.showBalances ? d.faucet : { ...d.faucet, balance: undefined, utxos: undefined }) : null, quorumServer: d.quorumServer || null, explorer: d.explorer || null,
       wallets: c.wallets && (network.showBalances || operator) ? c.wallets.filter((w) => w.name).map((w) => ({ name: w.name, trusted: w.trusted, pending: w.pending, immature: w.immature, coinjoin: w.coinjoin })) : c.wallets ? { count: c.wallets.filter((w) => w.name).length } : null,
       system: d.system ? { load: s.load, cpus: s.cpus, memPercent: pct(s.memTotal - s.memAvailable, s.memTotal), memTotal: s.memTotal, swapPercent: s.swapTotal ? pct(s.swapTotal - s.swapFree, s.swapTotal) : null, disks: (s.disks || []).map((x) => ({ mount: x.mount, percent: pct(x.used, x.size), size: x.size, avail: x.avail })), uptime: s.uptime, os: s.os, kernel: s.kernel } : null,
@@ -238,7 +271,7 @@ export function projectNetwork(network, evaluation, state, operator) {
     name: network.name, displayName: network.displayName, description: network.description || '', chainType: network.chainType, coreNetwork: network.coreNetwork,
     public: network.public, deployable: network.deployable, kind: network.kind || 'managed', upgradeScopes: network.upgradeScopes || null, images: network.images || null, dashmate: !!network.dashmate, lifecycle: network.lifecycle || null, observationWindow: network.observationWindow, operationTimeout: network.operationTimeout, level: evaluation.level, generatedAt: evaluation.generatedAt, ageSeconds: evaluation.ageSeconds,
     pollSeconds: state?.pollSeconds || null, discovery: state?.discovery ? { at: state.discovery.at, error: operator ? state.discovery.error : state.discovery.error ? 'discovery failed' : null } : null,
-    summary: evaluation.summary, endpoints: (state?.endpoints || []).map((e) => ({ label: e.label, kind: e.kind, url: e.url, status: e.status, ok: e.ok, ms: e.ms, error: e.error, height: e.height, version: e.version, chainId: e.chainId })),
+    summary: evaluation.summary, endpoints: (state?.endpoints || []).map((e) => ({ label: e.label, kind: e.kind, url: e.url, status: e.status, ok: e.ok, ms: e.ms, error: e.error, height: e.height, version: e.version, chainId: e.chainId, state: e.state })),
     hosts, journal: operator ? state?.journal || null : undefined,
   };
 }

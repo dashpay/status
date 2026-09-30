@@ -11,6 +11,7 @@ import { createAuth } from './auth.js';
 import { createCi } from './ci.js';
 import { publicInventory } from './aws-public.js';
 import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, loadSettings, memberOf, operatorFor, readJSON, saveSettings, validateSettings, writeAtomic } from '../shared/settings.js';
+import { expectations } from '../shared/monitoring.js';
 import { evaluateNetwork, projectNetwork } from '../shared/evaluate.js';
 import { devnetFiles } from '../shared/devnet-files.js';
 import { validateRequest } from '../agent/ops.js';
@@ -82,7 +83,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
 
   function view(network, operator) {
     const state = stateOf(network.name);
-    const evaluation = evaluateNetwork(network, state, settings, clock(), readJSON(join(dirs.state, 'image-tags.json'), {}));
+    const evaluation = evaluateNetwork(network, state, settings, clock(), readJSON(join(dirs.state, 'image-tags.json'), {}), expectations(listOps(network.name), clock()));
     return projectNetwork(network, evaluation, state, operator);
   }
   function brief(v) {
@@ -369,7 +370,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   const dist = fileURLToPath(new URL('../dist/', import.meta.url));
   if (existsSync(dist)) {
     app.use(express.static(dist, { index: false, maxAge: '1h', setHeaders: (res, p) => { if (p.endsWith('.html')) res.set('Cache-Control', 'no-cache'); } }));
-    app.get('/{*path}', (req, res) => res.set('Cache-Control', 'no-cache').sendFile(join(dist, 'index.html')));
+    app.get('/{*path}', (req, res) => res.set('Cache-Control', 'no-cache').sendFile('index.html', { root: dist }));
   }
   app.use((error, req, res, next) => { if (res.headersSent) return next(error); res.status([400, 413].includes(error.status) ? error.status : 500).json({ error: error.status === 413 ? 'Request body too large' : 'Request could not be processed' }); });
   app.close = () => { for (const w of watchers) w.close(); for (const c of clients) c.res.end(); };

@@ -17,7 +17,7 @@ export const COMPONENT_REPOS = {
 export const SIDECAR_REPOS = { 'osminogin/tor-simple': 'Tor', 'envoyproxy/ratelimit': 'rate limiter', 'prom/statsd-exporter': 'rate limiter metrics' };
 const endpoints = (net, extra = []) => [
   { label: 'Insight', url: `https://insight.${net}.networks.dash.org/insight/` },
-  { label: 'Faucet', url: `https://faucet.${net}.networks.dash.org/` },
+  { label: 'Faucet', kind: 'faucet', url: `https://faucet.${net}.networks.dash.org/` },
   ...extra,
 ];
 
@@ -139,7 +139,7 @@ export function validateSettings(input) {
       if (typeof e.label !== 'string' || !e.label.trim() || e.label.length > 40) throw new Error(`${n.name}: endpoint label required`);
       let url; try { url = new URL(e.url); } catch { throw new Error(`${n.name}: endpoint URL invalid`); }
       if (url.protocol !== 'https:' || url.username || url.password) throw new Error(`${n.name}: endpoints must be credential-free https URLs`);
-      if (e.kind !== undefined && !['http', 'dapi', 'quorum'].includes(e.kind)) throw new Error(`${n.name}: endpoint kind must be http, dapi or quorum`);
+      if (e.kind !== undefined && !['http', 'dapi', 'quorum', 'faucet'].includes(e.kind)) throw new Error(`${n.name}: endpoint kind must be http, dapi, quorum or faucet`);
     }
     if (n.description !== undefined && (typeof n.description !== 'string' || n.description.length > 500)) throw new Error(`${n.name}: description too long`);
     if (n.kind !== undefined && !['managed', 'dashnet', 'external'].includes(n.kind)) throw new Error(`${n.name}: kind must be managed, dashnet or external`);
@@ -227,7 +227,7 @@ export function devnetEntry(name, reg) {
       dns.insight && { label: 'Insight', url: `https://${dns.insight.host}/insight-api/status` },
       dns.quorums && { label: 'Quorums', url: `https://${dns.quorums.host}/health` },
       dns.explorer && { label: 'Explorer', url: `https://${dns.explorer.host}/` },
-      dns.faucet && { label: 'Faucet', url: `https://${dns.faucet.host}/api/status` },
+      dns.faucet && { label: 'Faucet', kind: 'faucet', url: `https://${dns.faucet.host}/api/status` },
     ].filter(Boolean),
     observationWindow: '30s', operationTimeout: '110m',
   };

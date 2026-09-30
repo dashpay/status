@@ -4,7 +4,8 @@
 import { readFileSync } from 'node:fs';
 import { connect as tcpConnect } from 'node:net';
 import { join } from 'node:path';
-import { writeAtomic } from '../shared/settings.js';
+import { observe } from './trends.js';
+import { readJSON, writeAtomic } from '../shared/settings.js';
 
 const PROBE = readFileSync(new URL('./probe.py', import.meta.url), 'utf8');
 const SKIP_PROBE = new Set(['vpn']);
@@ -34,7 +35,7 @@ export async function httpCheck(url, timeoutMs = 8000) {
   try {
     const r = await fetch(url, { method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) });
     await r.body?.cancel();
-    return { url, status: r.status, ok: r.status < 500, ms: Date.now() - start };
+    return { url, status: r.status, ok: r.status >= 200 && r.status < 400, ms: Date.now() - start };
   } catch (e) {
     return { url, status: null, ok: false, ms: Date.now() - start, error: e.cause?.code || e.name || e.message };
   }
@@ -94,6 +95,16 @@ export async function dapiCheck(url, timeoutMs = 8000) {
   }
 }
 
+export async function faucetCheck(url, timeoutMs = 8000) {
+  const start = Date.now();
+  try {
+    const r = await fetch(new URL('/api/status', url), { signal: AbortSignal.timeout(timeoutMs) });
+    const v = await r.json();
+    return { url, status: r.status, ok: r.ok && v.status === 'ok' && Number.isFinite(v.blockHeight ?? v.block_height),
+      state: ['ok', 'low_balance'].includes(v.status) ? v.status : 'unknown', height: v.blockHeight ?? v.block_height ?? null, ms: Date.now() - start };
+  } catch (e) { return { url, ok: false, status: null, ms: Date.now() - start, error: e.name }; }
+}
+
 export function createCollector({ pool, stateDir, log = console.log }) {
   const previous = new Map();
 
@@ -129,7 +140,8 @@ export function createCollector({ pool, stateDir, log = console.log }) {
       const last = probe.ok ? null : previous.get(key) || null;
       return { ...host, probe, lastGood: last ? { at: last.at, data: last.data } : null, p2p, dapiPublic };
     });
-    const endpoints = await Promise.all((network.endpoints || []).map(async (e) => ({ label: e.label, kind: e.kind || 'http', ...(await (e.kind === 'dapi' ? dapiCheck(e.url) : httpCheck(e.url))) })));
+    const endpoints = await Promise.all((network.endpoints || []).map(async (e) => ({ label: e.label, kind: e.kind || 'http', ...(await (e.kind === 'dapi' ? dapiCheck(e.url) : e.kind === 'faucet' ? faucetCheck(e.url) : httpCheck(e.url))) })));
+    observe(results, readJSON(join(stateDir, `${network.name}.json`)));
     const state = { network: network.name, generatedAt: new Date().toISOString(), ...meta, endpoints, hosts: results };
     writeAtomic(join(stateDir, `${network.name}.json`), JSON.stringify(state));
     const failed = results.filter((h) => h.probe.error).length;

@@ -5,6 +5,7 @@ Only local sources are queried (Docker, Core RPC through dash-cli, Tenderdash RP
 DAPI gRPC through the local gateway, Insight, the faucet). Nothing is written.
 """
 import calendar
+import ipaddress
 import json
 import os
 import re
@@ -109,7 +110,7 @@ def docker():
         for port, binds in (c['HostConfig'].get('PortBindings') or {}).items():
             for b in binds or []:
                 ports.append('%s:%s->%s' % (b.get('HostIp') or '0.0.0.0', b.get('HostPort'), port))
-        out.append(dict(name=name, image=ref, repo=repo(ref), digest=digest.split('@')[1] if digest else None,
+        out.append(dict(id=c['Id'], name=name, image=ref, repo=repo(ref), digest=digest.split('@')[1] if digest else None,
                         imageCreated=img.get('Created'), state=st['Status'], running=bool(st['Running']) and not st.get('Restarting'),
                         health=(st.get('Health') or {}).get('Status'), startedAt=st.get('StartedAt'),
                         finishedAt=st.get('FinishedAt'), exitCode=st.get('ExitCode'), restarts=c.get('RestartCount', 0),
@@ -121,6 +122,7 @@ def docker():
 
 def find(raw, repos, running=True):
     for name, c in sorted(raw.items()):
+        if (c.get('Config', {}).get('Labels') or {}).get('com.docker.compose.service') == 'miner': continue
         if repo(c['Config']['Image']) in repos and (not running or c['State']['Running']):
             return c
     return None
@@ -160,9 +162,11 @@ def core(raw):
     if not cli:
         return None
     call = lambda *a: parse(run(cli + [str(x) for x in a], timeout=20))
+    t = time.monotonic()
     bc = call('getblockchaininfo')
+    rpc_ms = round((time.monotonic() - t) * 1000)
     net = attempt('core getnetworkinfo', call, 'getnetworkinfo') or {}
-    out = dict(source=where, chain=bc.get('chain'), blocks=bc.get('blocks'), headers=bc.get('headers'),
+    out = dict(rpcLatencyMs=rpc_ms, source=where, chain=bc.get('chain'), blocks=bc.get('blocks'), headers=bc.get('headers'),
                bestBlockHash=bc.get('bestblockhash'), blockTime=bc.get('time'), medianTime=bc.get('mediantime'),
                ibd=bc.get('initialblockdownload'), progress=bc.get('verificationprogress'), sizeOnDisk=bc.get('size_on_disk'),
                pruned=bc.get('pruned'), difficulty=bc.get('difficulty'),
@@ -174,6 +178,36 @@ def core(raw):
     cl = attempt('core chainlock', call, 'getbestchainlock')
     if isinstance(cl, dict):
         out['chainLockHeight'] = cl.get('height')
+        if cl.get('blockhash'):
+            header = attempt('ChainLock header', call, 'getblockheader', cl['blockhash']) or {}
+            out['chainLockTime'] = header.get('time')
+    peers = attempt('core peers', call, 'getpeerinfo')
+    if isinstance(peers, list):
+        groups = set()
+        networks = {}
+        for peer in peers:
+            if peer.get('inbound'):
+                continue
+            kind = peer.get('network', 'unknown')
+            networks[kind] = networks.get(kind, 0) + 1
+            address = peer.get('addr', '').rsplit(':', 1)[0].strip('[]')
+            try:
+                ip = ipaddress.ip_address(address)
+                groups.add(str(ipaddress.ip_network(str(ip) + ('/16' if ip.version == 4 else '/32'), strict=False)))
+            except ValueError:
+                if kind in ('onion', 'i2p'): groups.add(address)
+        out['peerDiversity'] = dict(outbound=sum(networks.values()), groups=len(groups), networks=networks)
+    if ROLE in ('seed', 'wallet'):
+        qs = attempt('quorum list', call, 'quorum', 'list')
+        if isinstance(qs, dict):
+            out['quorums'] = {kind: len(hashes) for kind, hashes in qs.items() if isinstance(hashes, list)}
+    if ROLE in ('validator', 'masternode'):
+        dkg = attempt('DKG status', call, 'quorum', 'dkgstatus', '0')
+        if isinstance(dkg, dict):
+            out['dkg'] = [dict(type=v.get('llmqType'), phase=v.get('status', {}).get('phase'), height=v.get('status', {}).get('quorumHeight'), aborted=v.get('status', {}).get('aborted'),
+                               receivedContributions=v.get('status', {}).get('receivedContributions'), receivedComplaints=v.get('status', {}).get('receivedComplaints'),
+                               receivedJustifications=v.get('status', {}).get('receivedJustifications'), receivedPrematureCommitments=v.get('status', {}).get('receivedPrematureCommitments'))
+                          for v in dkg.get('session', []) if isinstance(v, dict)]
     mp = attempt('core mempool', call, 'getmempoolinfo')
     if isinstance(mp, dict):
         out['mempool'] = mp.get('size')
@@ -185,15 +219,28 @@ def core(raw):
                                      service=mn.get('service'), type=mn.get('type'), posePenalty=st.get('PoSePenalty'),
                                      poseBanHeight=st.get('PoSeBanHeight'), lastPaidHeight=st.get('lastPaidHeight'),
                                      registeredHeight=st.get('registeredHeight'))
-    wallets = attempt('core listwallets', call, 'listwallets')
+    wallets = attempt('core listwallets', call, 'listwallets') if ROLE in ('wallet', 'mixer', 'miner') else None
     if isinstance(wallets, list) and wallets:
         out['wallets'] = []
+        out['payouts'] = []
         for w in wallets[:20]:
             b = attempt('core wallet ' + w, call, '-rpcwallet=' + w, 'getbalances')
             if isinstance(b, dict):
                 mine = b.get('mine') or {}
                 out['wallets'].append(dict(name=w, trusted=mine.get('trusted'), pending=mine.get('untrusted_pending'),
                                            immature=mine.get('immature'), coinjoin=mine.get('coinjoin')))
+            if ROLE == 'wallet' and 'faucet' in w.lower():
+                txs = attempt('faucet recent transactions', call, '-rpcwallet=' + w, 'listtransactions', '*', '20')
+                if isinstance(txs, list):
+                    sent = {v['txid']: v for v in txs if v.get('category') == 'send' and v.get('txid')}
+                    for tx in list(sent.values())[-3:]:
+                        detail = attempt('payout confirmation', call, '-rpcwallet=' + w, 'gettransaction', tx['txid']) or {}
+                        out['payouts'].append(dict(time=tx.get('time'), confirmations=detail.get('confirmations'),
+                                                   instantlock=detail.get('instantlock'), chainlock=detail.get('chainlock'),
+                                                   abandoned=detail.get('abandoned', tx.get('abandoned', False))))
+    if ROLE == 'mixer':
+        cj = attempt('coinjoin info', call, 'getcoinjoininfo')
+        if isinstance(cj, dict): out['coinjoin'] = {k: cj.get(k) for k in ('enabled', 'running', 'queue_size', 'sessions') if isinstance(cj.get(k), (bool, int))}
     if ROLE == 'miner':
         mi = attempt('core mining', call, 'getmininginfo')
         if isinstance(mi, dict):
@@ -257,6 +304,18 @@ def tenderdash(raw):
             out['validatorSetSize'] = int(vals.get('total') or len(vals.get('validators') or []))
             out['inValidatorSet'] = any((v.get('pro_tx_hash') or '').lower() == (out['proTxHash'] or '').lower()
                                         for v in vals.get('validators') or [])
+    if ROLE == 'validator':
+        consensus = attempt('consensus state', get, 'consensus_state') or {}
+        rs = consensus.get('round_state', {})
+        hrs = str(rs.get('height/round/step', '')).split('/')
+        out['round'] = int(hrs[1]) if len(hrs) > 1 and hrs[1].isdigit() else None
+        block = attempt('latest commit', get, 'block') or {}
+        block = block.get('block', {})
+        header = block.get('header', {})
+        out['proposer'] = header.get('proposer_pro_tx_hash') or header.get('proposer_address')
+        out['commitRound'] = (block.get('last_commit') or {}).get('round')
+        # Tenderdash has a threshold block signature, not individual Tendermint signatures.
+        out['thresholdSigned'] = bool((block.get('last_commit') or {}).get('threshold_block_signature'))
     return out
 
 
@@ -267,6 +326,7 @@ def protobuf(raw):
         nonlocal i
         shift = value = 0
         while True:
+            if i >= len(raw) or shift > 63: raise ValueError('truncated protobuf')
             b = raw[i]; i += 1
             value |= (b & 0x7f) << shift
             if b < 0x80:
@@ -284,6 +344,7 @@ def protobuf(raw):
             value = raw[i:i + 4]; i += 4
         else:
             raise ValueError('protobuf wire type')
+        if i > len(raw): raise ValueError('truncated protobuf')
         fields[number] = value
     return fields
 
@@ -299,21 +360,24 @@ def dapi(raw, address):
     if not port:
         port = next((int(b['HostPort']) for k, v in ports.items() for b in v or [] if b.get('HostPort') == '443'), 443)
     cert = [m['Source'] for m in gw['Mounts'] if m['Destination'].endswith('/bundle.crt')]
-    with tempfile.TemporaryDirectory(prefix='status-probe-') as d:
-        headers = os.path.join(d, 'h')
-        args = ['curl', '--silent', '--show-error', '--fail', '--noproxy', '*', '--max-time', '10', '--http2',
-                '-D', headers, '-H', 'content-type: application/grpc', '-H', 'te: trailers', '--data-binary', '@-']
-        args += (['--cacert', cert[0], '--connect-to', '%s:%d:127.0.0.1:%d' % (address, port, port),
-                  'https://%s:%d/org.dash.platform.dapi.v0.Platform/getStatus' % (address, port)]
-                 if cert and address else ['-k', 'https://127.0.0.1:%d/org.dash.platform.dapi.v0.Platform/getStatus' % port])
-        t = time.time()
-        body = run(args, timeout=15, stdin=b'\x00\x00\x00\x00\x02\x0a\x00')
-        latency = round((time.time() - t) * 1000)
-        if 'grpc-status: 0' not in open(headers).read().lower():
-            raise RuntimeError('grpc-status not ok')
-    if len(body) < 5 or body[0] != 0:
+    def query(method, payload):
+        with tempfile.TemporaryDirectory(prefix='status-probe-') as d:
+            headers = os.path.join(d, 'h')
+            args = ['curl', '--silent', '--show-error', '--fail', '--noproxy', '*', '--max-time', '10', '--http2',
+                    '-D', headers, '-H', 'content-type: application/grpc', '-H', 'te: trailers', '--data-binary', '@-']
+            args += (['--cacert', cert[0], '--connect-to', '%s:%d:127.0.0.1:%d' % (address, port, port),
+                      'https://%s:%d/org.dash.platform.dapi.v0.Platform/%s' % (address, port, method)]
+                     if cert and address else ['-k', 'https://127.0.0.1:%d/org.dash.platform.dapi.v0.Platform/%s' % (port, method)])
+            t = time.time()
+            body = run(args, timeout=15, stdin=b'\x00' + len(payload).to_bytes(4, 'big') + payload)
+            latency = round((time.time() - t) * 1000)
+            if 'grpc-status: 0' not in open(headers).read().lower():
+                raise RuntimeError('grpc-status not ok')
+        return body, latency
+    body, latency = query('getStatus', b'\x0a\x00')
+    if len(body) < 5 or body[0] != 0 or int.from_bytes(body[1:5], 'big') > len(body)-5:
         raise RuntimeError('bad grpc frame')
-    v0 = protobuf(protobuf(body[5:])[1])
+    v0 = protobuf(protobuf(body[5:5 + int.from_bytes(body[1:5], 'big')])[1])
     version = protobuf(v0.get(1, b''))
     software = protobuf(version.get(1, b''))
     protocol = protobuf(version.get(2, b''))
@@ -322,7 +386,19 @@ def dapi(raw, address):
     txt = lambda b: b.decode(errors='replace') if isinstance(b, bytes) else None
     tdp = protobuf(protocol.get(1, b'')) if protocol.get(1) else {}
     drp = protobuf(protocol.get(2, b'')) if protocol.get(2) else {}
-    return dict(ok=True, latencyMs=latency, dapiVersion=txt(software.get(1)), driveVersion=txt(software.get(2)),
+    drive_query = None
+    try:
+        # Latest epoch: count=1, descending, non-proof response. This hits Drive.
+        response, elapsed = query('getEpochsInfo', b'\x0a\x02\x10\x01')
+        if len(response) < 5 or response[0] != 0 or len(response) - 5 < int.from_bytes(response[1:5], 'big'):
+            raise ValueError('truncated epoch response')
+        v = protobuf(protobuf(response[5:5 + int.from_bytes(response[1:5], 'big')])[1])
+        epoch = protobuf(protobuf(v[1])[1])
+        drive_query = dict(ok=True, method='getEpochsInfo', latencyMs=elapsed, epoch=epoch.get(1, 0),
+                           firstBlockHeight=epoch.get(2), protocol=epoch.get(6))
+    except Exception as exc:
+        drive_query = dict(ok=False, method='getEpochsInfo', error=type(exc).__name__)
+    return dict(query=drive_query, ok=True, latencyMs=latency, dapiVersion=txt(software.get(1)), driveVersion=txt(software.get(2)),
                 tenderdashVersion=txt(software.get(3)), height=chain.get(4), catchingUp=bool(chain.get(1, 0)),
                 chainId=txt(network.get(1)), peers=network.get(2),
                 driveProtocol=drp.get(2) or drp.get(1), tenderdashP2P=tdp.get(1),
@@ -360,7 +436,20 @@ def insight(raw):
     base = 'http://%s:%d/insight-api/' % (host, port)
     info = http_json(base + 'status?q=getInfo').get('info', {})
     sync = attempt('insight sync', http_json, base + 'sync') or {}
-    return dict(blocks=info.get('blocks'), version=info.get('version'), network=info.get('network'),
+    functional = dict(ok=False)
+    try:
+        t = time.monotonic()
+        tip = http_json(base + 'block-index/' + str(info['blocks']))['blockHash']
+        block = http_json(base + 'block/' + tip)
+        tx = http_json(base + 'tx/' + block['tx'][0])
+        addresses = [a for v in tx.get('vout', []) for a in v.get('scriptPubKey', {}).get('addresses', [])]
+        if not addresses: raise ValueError('no transaction address to query')
+        address = http_json(base + 'addr/' + addresses[0] + '?noTxList=1')
+        functional = dict(ok=block.get('height') == info['blocks'] and bool(tx.get('txid')) and bool(address.get('addrStr')),
+                          latencyMs=round((time.monotonic() - t) * 1000), height=block.get('height'))
+    except Exception as exc:
+        functional['error'] = type(exc).__name__
+    return dict(query=functional, blocks=info.get('blocks'), version=info.get('version'), network=info.get('network'),
                 syncStatus=sync.get('status'), syncPercentage=sync.get('syncPercentage'),
                 syncHeight=sync.get('height') or sync.get('blockChainHeight'), error=sync.get('error'))
 
@@ -427,21 +516,105 @@ def new_faucet(raw):
                 utxos=v.get('available_utxos') or v.get('availableUtxos'), kind='dash-faucet')
 
 
-result = dict(role=ROLE, system=attempt('system', system))
-containers, raw = attempt('docker', docker) or (None, {})
-result['containers'] = containers
-address = sys.argv[2] if len(sys.argv) > 2 else ''
-result['core'] = attempt('core', core, raw)
-result['tenderdash'] = attempt('tenderdash', tenderdash, raw)
-if ROLE == 'validator':
-    try:
-        result['dapi'] = dapi(raw, address)
-    except Exception as e:
-        result['dapi'] = dict(ok=False, error=str(e)[:200])
-result['insight'] = attempt('insight', insight, raw)
-result['faucet'] = attempt('faucet', new_faucet, raw) or attempt('faucet', http_check, raw, ['dashpay/multifaucet'], 80)
-result['quorumServer'] = attempt('quorum server', quorum_server, raw)
-result['explorer'] = attempt('explorer', explorer, raw)
-result['errors'] = errors
-result['probeMs'] = round((time.time() - START) * 1000)
-print(json.dumps(result, separators=(',', ':')))
+
+def legacy_faucet(raw):
+    c = find(raw, ['dashpay/multifaucet'])
+    if not c:
+        return None
+    out = http_check(raw, ['dashpay/multifaucet'], 80)
+    out['kind'] = 'multifaucet'
+    php = """<?php
+error_reporting(0);
+try {
+require '/var/www/html/config/db.conf.php';
+$db = mysqli_init(); $db->options(MYSQLI_OPT_CONNECT_TIMEOUT, 4);
+$db->real_connect(DB_HOST, DB_USER, DB_PASS, DB_NAME);
+$q = $db->query("SELECT COUNT(*) total, SUM(txid IS NULL OR txid='') queued, MIN(IF(txid IS NULL OR txid='', UNIX_TIMESTAMP(timestamp),NULL)) oldestQueuedAt, MAX(IF(txid IS NOT NULL AND txid!='', UNIX_TIMESTAMP(lastupdate),NULL)) lastBroadcastAt FROM faucet_payouts");
+$v = $q->fetch_assoc();
+$r = $db->query("SELECT txid FROM faucet_payouts WHERE txid IS NOT NULL AND txid!='' ORDER BY id DESC LIMIT 3");
+$v['recent'] = array(); while ($row = $r->fetch_assoc()) $v['recent'][] = $row['txid'];
+echo json_encode($v);
+} catch (Throwable $e) { echo '{"error":"database unavailable"}'; exit(1); }
+"""
+    db = attempt('faucet queue', lambda: json.loads(run(['docker','exec','-i',c['Id'],'php'], timeout=10, stdin=php.encode())))
+    if not db or 'error' in db:
+        out['queue'] = dict(ok=False)
+        return out
+    out['queue'] = dict(ok=True, **{k: int(db[k]) if db.get(k) is not None else None for k in ('total','queued','oldestQueuedAt','lastBroadcastAt')})
+    cli, _ = core_cli(raw)
+    out['payouts'] = []
+    if cli:
+        for txid in db.get('recent', []):
+            if not re.fullmatch('[0-9a-fA-F]{64}', txid): continue
+            tx = attempt('faucet broadcast confirmation', lambda: json.loads(run(cli + ['getrawtransaction',txid,'true'],timeout=6)))
+            if isinstance(tx, dict):
+                out['payouts'].append(dict(confirmations=tx.get('confirmations',0), instantlock=tx.get('instantlock'), chainlock=tx.get('chainlock'), time=tx.get('time')))
+    return out
+
+
+def role_services(raw):
+    checks = []
+    specs = [('grafana', ['grafana/grafana'], 3000, '/api/health'),
+             ('prometheus', ['prom/prometheus'], 9090, '/api/v1/targets'),
+             ('elasticsearch', ['docker.elastic.co/elasticsearch/elasticsearch'], 9200, '/_cluster/health'),
+             ('kibana', ['docker.elastic.co/kibana/kibana'], 5601, '/api/status')]
+    for name, repos, port, path in specs:
+        c = find(raw, repos)
+        if not c: continue
+        try:
+            host, bound = host_port(c, port)
+            code, data, ms = get_json('http://%s:%d%s' % (host,bound,path),4)
+            ok = code == 200
+            facts = {}
+            if code in (401,403):
+                checks.append(dict(service=name,ok=None,status=code,reason='authentication required'))
+                continue
+            if not isinstance(data,dict):
+                checks.append(dict(service=name,ok=False,status=code,reason='invalid health response'))
+                continue
+            if name == 'prometheus':
+                targets = (data.get('data') or {}).get('activeTargets')
+                ok = ok and data.get('status') == 'success' and isinstance(targets,list) and len(targets)>0
+                facts = dict(targets=len(targets or []), down=sum(t.get('health')!='up' for t in targets or []))
+            if name == 'grafana': ok = ok and data.get('database') == 'ok'
+            if name == 'elasticsearch':
+                facts = dict(cluster=data.get('status'), unassigned=data.get('unassigned_shards'))
+                ok = ok and data.get('status') in ('green','yellow')
+            if name == 'kibana':
+                overall=(data.get('status') or {}).get('overall') or {}
+                ok = ok and (overall.get('level') in ('available','degraded') or overall.get('state') in ('green','yellow'))
+            checks.append(dict(service=name,ok=bool(ok),status=code,latencyMs=ms,**facts))
+        except Exception as exc:
+            checks.append(dict(service=name,ok=False,error=type(exc).__name__))
+    if ROLE == 'miner':
+        # Service status only; never start the miner or generate a block.
+        mining = [c for c in raw.values() if (c.get('Config', {}).get('Labels') or {}).get('com.docker.compose.service') == 'miner']
+        active = ('active' if any(c['State']['Running'] and not c['State'].get('Restarting') for c in mining) else 'inactive') if mining else subprocess.run(['systemctl','is-active','dashd-generate-miner.service'],capture_output=True,timeout=4).stdout.decode().strip()
+        checks.append(dict(service='miner',ok=active=='active',state=active or 'unavailable'))
+    return checks
+
+
+def main():
+    result = dict(role=ROLE, system=attempt('system', system))
+    containers, raw = attempt('docker', docker) or (None, {})
+    result['containers'] = containers
+    address = sys.argv[2] if len(sys.argv) > 2 else ''
+    result['core'] = attempt('core', core, raw)
+    result['tenderdash'] = attempt('tenderdash', tenderdash, raw)
+    if ROLE == 'validator':
+        try:
+            result['dapi'] = dapi(raw, address)
+        except Exception as e:
+            result['dapi'] = dict(ok=False, error=str(e)[:200])
+    result['insight'] = attempt('insight', insight, raw)
+    result['faucet'] = attempt('faucet', new_faucet, raw) or attempt('faucet', legacy_faucet, raw)
+    result['quorumServer'] = attempt('quorum server', quorum_server, raw)
+    result['explorer'] = attempt('explorer', explorer, raw)
+    result['services'] = attempt('role services', role_services, raw) or []
+    result['errors'] = errors
+    result['probeMs'] = round((time.time() - START) * 1000)
+    print(json.dumps(result, separators=(',', ':')))
+
+
+if __name__ == "__main__":
+    main()
