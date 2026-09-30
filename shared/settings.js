@@ -74,14 +74,14 @@ export const DEFAULT_SETTINGS = {
     // Mainnet is deliberately sourced from a separate observer/fullnode.  Do
     // not discover or probe the existing mainnet-support fleet here.
     {
-      name: 'mainnet', displayName: 'Mainnet', tag: 'mainnet-observer', chainType: 'mainnet', coreNetwork: 'main', p2pPort: 19999,
+      name: 'mainnet', displayName: 'Mainnet', tag: 'mainnet-observer', chainType: 'mainnet', coreNetwork: 'main', p2pPort: 9999,
       public: true, deployable: false, showBalances: false, kind: 'external', source: 'report',
       description: 'Limited mainnet signals: ChainLocks, Platform blocks, quorum list health, large PoSe bans and chain stalls.',
       endpoints: [
         { label: 'Quorum list', url: 'https://quorums.mainnet.networks.dash.org/masternodes' },
       ],
-      mainnetSignals: { bigBanThreshold: 1, coreStallSeconds: 1800, platformStallSeconds: 1800 },
-      observationWindow: '30m', operationTimeout: '110m',
+      mainnetSignals: { bigBanThreshold: 20, coreStallSeconds: 1800, platformStallSeconds: 1800 },
+      observationWindow: '3m', operationTimeout: '110m',
     },
   ],
 };
@@ -131,6 +131,8 @@ export function validateSettings(input) {
     int(n.p2pPort, 1, 65535, `${n.name} p2pPort`);
     for (const k of ['public', 'deployable', 'showBalances']) if (typeof n[k] !== 'boolean') throw new Error(`${n.name}: ${k} must be true/false`);
     if (n.deployable && n.chainType === 'mainnet') throw new Error(`${n.name}: mainnet workloads are not deployable from the console`);
+    if (n.chainType === 'mainnet' && (n.source !== 'report' || n.tag === 'mainnet-support')) throw new Error('Mainnet must use the separate report observer, never mainnet-support');
+    if (n.mainnetSignals?.bigBanThreshold !== undefined) int(n.mainnetSignals.bigBanThreshold, 1, 10000, 'bigBanThreshold');
     if (!duration.test(n.observationWindow) || !duration.test(n.operationTimeout)) throw new Error(`${n.name}: durations look like 4m / 110m`);
     if (!Array.isArray(n.endpoints) || n.endpoints.length > 20) throw new Error(`${n.name}: endpoints must be a list`);
     for (const e of n.endpoints) {

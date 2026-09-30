@@ -65,6 +65,8 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     if (!mainnetReportToken || req.get('authorization') !== `Bearer ${mainnetReportToken}`) return res.status(401).json({ error: 'observer authorization required' });
     try {
       const report = validateMainnetReport(req.body, clock());
+      const previous = readJSON(join(dirs.state, 'mainnet.json'));
+      if (previous?.generatedAt && Date.parse(report.generatedAt) < Date.parse(previous.generatedAt)) throw new Error('out-of-order report');
       writeAtomic(join(dirs.state, 'mainnet.json'), JSON.stringify(report));
       push('network', { name: 'mainnet', at: report.generatedAt });
       res.status(202).json({ accepted: true, generatedAt: report.generatedAt });

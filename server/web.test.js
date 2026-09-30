@@ -52,7 +52,7 @@ test('mainnet observer report is token-scoped and appears as limited signals', a
   try {
     const body = JSON.stringify({ network: 'mainnet', generatedAt: new Date().toISOString(), probeMs: 42,
       core: { chain: 'main', blocks: 200, headers: 200, chainLockHeight: 200, blockTime: Math.floor(Date.now() / 1000), synced: true },
-      platform: { height: 300, blockTime: new Date().toISOString(), network: 'dash-mainnet', catchingUp: false },
+      platform: { height: 300, blockTime: new Date().toISOString(), network: 'evo1', catchingUp: false },
       quorumServer: { status: 200, latencyMs: 12, quorums: 10, banned: 2, enabled: 100 },
       mainnet: { chainLockAgeSeconds: 4, bigBans: 2, coreStall: false, platformStall: false } });
     assert.equal((await w.req('/api/mainnet/report', { method: 'POST', body, headers: { 'content-type': 'application/json' } })).status, 401);

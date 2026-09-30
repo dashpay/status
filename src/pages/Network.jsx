@@ -50,8 +50,8 @@ export default function Network({ name, tab }) {
             <Stat label="DAPI getStatus" value={s.dapi.total ? `${s.dapi.ok}/${s.dapi.total}` : '—'} sub="local gRPC per evo node" level={s.dapi.ok < s.dapi.total ? 'down' : undefined} />
             <Stat label="Difficulty" value={s.core?.difficulty != null ? dash(s.core.difficulty) : '—'} sub={`${n.hosts.length} hosts`} />
             {s.mainnet && <>
-              <Stat label="PoSe bans" value={s.mainnet.bigBans ?? '—'} sub={s.mainnet.quorumCount != null ? `${s.mainnet.quorumCount} quorums` : 'quorum list unavailable'} level={(s.mainnet.bigBans || 0) > 0 ? 'warn' : undefined} />
-              <Stat label="Chain stalls" value={s.mainnet.coreStall || s.mainnet.platformStall ? 'stalled' : 'clear'} sub={s.mainnet.chainLockAgeSeconds != null ? `ChainLock ${Math.round(s.mainnet.chainLockAgeSeconds)}s old` : 'ChainLock age unavailable'} level={s.mainnet.coreStall || s.mainnet.platformStall ? 'down' : undefined} />
+              <Stat label="PoSe bans" value={s.mainnet.bigBans ?? '—'} sub={`${s.mainnet.newBans ?? '—'} newly banned / hour`} level={(s.mainnet.newBans || 0) >= 20 ? 'warn' : undefined} />
+              <Stat label="Chain stalls" value={s.mainnet.platformSyncing ? 'syncing' : s.mainnet.coreStall || s.mainnet.platformStall ? 'stalled' : s.mainnet.coreStall == null || s.mainnet.platformStall == null ? 'unknown' : 'clear'} sub={s.mainnet.chainLockAgeSeconds != null ? `ChainLock ${Math.round(s.mainnet.chainLockAgeSeconds)}s old` : 'ChainLock age unavailable'} level={s.mainnet.coreStall || s.mainnet.platformStall ? 'down' : undefined} />
             </>}
           </div>
 

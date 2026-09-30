@@ -1,166 +1,183 @@
 #!/usr/bin/env python3
-"""Read-only Mainnet observer for the separate observer/fullnode host.
-
-The observer never touches the mainnet-support fleet. It reads the local Core
-and Evolution-fullnode containers, checks the public quorum list server, and
-pushes a bounded public report to the status console.
-"""
+"""Read only the explicitly selected local Mainnet fullnode; send public facts."""
+import datetime
 import json
 import os
-import ssl
 import subprocess
-import tempfile
 import time
-import urllib.error
 import urllib.request
 from pathlib import Path
 
-STATUS_URL = os.environ.get('STATUS_URL', 'https://status.testnet.networks.dash.org').rstrip('/')
-REPORT_TOKEN = os.environ.get('MAINNET_REPORT_TOKEN', '')
 STATE = Path(os.environ.get('OBSERVER_STATE', '/var/lib/dash-mainnet-observer/last.json'))
-QUORUM_URL = os.environ.get('QUORUM_URL', 'https://quorums.mainnet.networks.dash.org')
-CORE_STALL = int(os.environ.get('CORE_STALL_SECONDS', '1800'))
-PLATFORM_STALL = int(os.environ.get('PLATFORM_STALL_SECONDS', '1800'))
-TIMEOUT = int(os.environ.get('OBSERVER_TIMEOUT_SECONDS', '30'))
+PROJECT = os.environ.get('OBSERVER_COMPOSE_PROJECT', 'dash-mainnet-observer')
+TIMEOUT = 15
 
 
-def run(args, timeout=TIMEOUT):
-    return subprocess.check_output(args, stderr=subprocess.PIPE, timeout=timeout, text=True).strip()
-
-
-def json_run(args):
-    return json.loads(run(args))
+def run(args):
+    return subprocess.check_output(args, stderr=subprocess.PIPE, timeout=TIMEOUT, text=True).strip()
 
 
 def containers():
+    ids = run(['docker', 'ps', '-aq', '--filter', 'label=com.docker.compose.project=' + PROJECT]).split()
+    if not ids:
+        raise RuntimeError('observer project has no containers')
+    # Inspect only state/identity, never Docker environment or command lines.
+    template = '{{json .State}}\t{{.Id}}\t{{.Name}}\t{{.Config.Image}}\t{{.RestartCount}}'
     rows = []
-    try:
-        raw = run(['docker', 'ps', '-a', '--format', '{{.ID}}\t{{.Image}}\t{{.Names}}\t{{.Status}}'])
-    except Exception:
-        return rows
-    for line in raw.splitlines():
-        parts = line.split('\t', 3)
-        if len(parts) != 4:
-            continue
-        cid, image, name, state = parts
-        if not any(x in image.lower() for x in ('dashpay/dashd', 'dashpay/tenderdash', 'dashpay/drive', 'dashpay/rs-dapi', 'dashpay/envoy')):
-            continue
-        rows.append({'id': cid, 'image': image, 'name': name, 'state': state})
+    for line in run(['docker', 'inspect', '--format', template, *ids]).splitlines():
+        state, cid, name, image, restarts = line.split('\t')
+        state = json.loads(state)
+        rows.append(dict(id=cid, name=name.lstrip('/'), image=image, state=state['Status'],
+                         running=state['Running'] and not state.get('Restarting'), restarts=int(restarts)))
     return rows
 
 
-def find_container(rows, needle):
-    return next((r for r in rows if needle in r['image'].lower() or needle in r['name'].lower()), None)
+def find(rows, service):
+    found = [r for r in rows if r['name'].endswith('-' + service + '-1')]
+    if len(found) != 1:
+        raise RuntimeError('exact observer service missing or ambiguous')
+    return found[0]
 
 
 def core_status(rows):
-    c = find_container(rows, 'dashd')
-    if not c:
-        raise RuntimeError('local Dash Core container not found')
+    c = find(rows, 'core')
     def cli(*args):
-        return json_run(['docker', 'exec', c['id'], 'dash-cli', *args])
-    info = cli('getblockchaininfo')
-    net = cli('getnetworkinfo')
-    lock = cli('getbestchainlock')
-    lock_height = lock.get('height') if isinstance(lock, dict) else None
-    lock_time = None
-    if isinstance(lock, dict) and lock.get('blockhash'):
+        return json.loads(run(['docker', 'exec', c['id'], 'dash-cli', *args]))
+    info, net = cli('getblockchaininfo'), cli('getnetworkinfo')
+    if info.get('chain') != 'main':
+        raise RuntimeError('observer is not on mainnet')
+    lock = {}
+    try:
+        lock = cli('getbestchainlock')
+        lock['time'] = cli('getblockheader', lock['blockhash']).get('time')
+    except Exception:
+        pass  # Core progress still reaches the board if a ChainLock is unavailable.
+    bans = None
+    if not info.get('initialblockdownload', True):
         try:
-            header = cli('getblockheader', lock['blockhash'])
-            lock_time = header.get('time')
+            bans = sorted(k for k, v in cli('masternodelist', 'status').items() if v == 'POSE_BANNED')
         except Exception:
             pass
-    return {
-        'chain': info.get('chain'), 'blocks': info.get('blocks'), 'headers': info.get('headers'),
-        'bestBlockHash': info.get('bestblockhash'), 'blockTime': info.get('time'),
-        'ibd': info.get('initialblockdownload'), 'synced': not info.get('initialblockdownload', True),
-        'subversion': net.get('subversion'), 'protocol': net.get('protocolversion'),
-        'connections': net.get('connections'), 'chainLockHeight': lock_height,
-        '_chainLockTime': lock_time,
-    }
+    return dict(chain='main', blocks=info.get('blocks'), headers=info.get('headers'),
+                bestBlockHash=info.get('bestblockhash'), blockTime=info.get('time'),
+                ibd=info.get('initialblockdownload'), synced=not info.get('initialblockdownload', True),
+                subversion=net.get('subversion'), protocol=net.get('protocolversion'),
+                connections=net.get('connections'), chainLockHeight=lock.get('height'),
+                _chainLockTime=lock.get('time'), _banned=bans)
 
 
-def tenderdash_status(rows):
-    c = find_container(rows, 'tenderdash')
-    if not c:
-        return None
-    for command in ('curl', 'wget'):
-        try:
-            if command == 'curl':
-                raw = run(['docker', 'exec', c['id'], 'curl', '-fsS', '--max-time', '10', 'http://127.0.0.1:26657/status'])
-            else:
-                raw = run(['docker', 'exec', c['id'], 'wget', '-qO-', '-T', '10', 'http://127.0.0.1:26657/status'])
-            value = json.loads(raw).get('result', {})
-            sync = value.get('sync_info', {})
-            node = value.get('node_info', {})
-            return {'height': int(sync.get('latest_block_height') or 0), 'blockTime': sync.get('latest_block_time'),
-                    'network': node.get('network'), 'catchingUp': bool(sync.get('catching_up')), 'peers': None,
-                    'version': node.get('version')}
-        except Exception:
-            continue
-    return None
+def parse_platform(value):
+    value = value.get('result', value)  # Tenderdash serves both response formats.
+    sync, node = value['sync_info'], value['node_info']
+    return dict(height=int(sync['latest_block_height']), blockTime=sync['latest_block_time'],
+                network=node['network'], catchingUp=sync['catching_up'],
+                maxPeerHeight=int(sync.get('max_peer_block_height') or 0), version=node.get('version'))
+
+
+def platform_status(rows):
+    c = find(rows, 'drive_tenderdash')
+    return parse_platform(json.loads(run(['docker', 'exec', c['id'], 'curl', '-fsS', '--max-time', '10',
+                                         'http://127.0.0.1:26657/status'])))
 
 
 def quorum_status():
-    start = time.time()
-    out = {'status': None, 'latencyMs': None, 'quorums': None, 'banned': None, 'enabled': None, 'versionFailures': None}
-    ctx = ssl.create_default_context()
-    try:
-        def get(path):
-            with urllib.request.urlopen(QUORUM_URL + path, timeout=TIMEOUT, context=ctx) as response:
-                return response.status, json.loads(response.read(4 * 1024 * 1024))
-        status, _ = get('/health')
-        out['status'] = status
-        status, body = get('/masternodes')
-        out['status'] = status if status != 200 else out['status']
-        nodes = body.get('data') if isinstance(body, dict) else None
-        if isinstance(nodes, list):
-            out['banned'] = sum(1 for n in nodes if n.get('status') == 'POSE_BANNED')
-            out['enabled'] = sum(1 for n in nodes if n.get('status') == 'ENABLED')
-            out['versionFailures'] = sum(1 for n in nodes if n.get('versionCheck') == 'fail')
-        status, body = get('/quorums')
-        data = body.get('data') if isinstance(body, dict) else None
-        if isinstance(data, list): out['quorums'] = len(data)
-    except Exception as exc:
-        out['error'] = str(exc)[:200]
-    out['latencyMs'] = round((time.time() - start) * 1000)
-    return out
+    base = 'https://quorums.mainnet.networks.dash.org'
+    start = time.monotonic()
+    def get(path):
+        with urllib.request.urlopen(base + path, timeout=TIMEOUT) as r:
+            body = json.loads(r.read(4 * 1024 * 1024))
+            if r.status != 200 or body.get('success') is not True or not isinstance(body.get('data'), list):
+                raise ValueError('invalid quorum list response')
+            return body['data']
+    nodes, quorums = get('/masternodes'), get('/quorums')
+    if not nodes or not quorums:
+        raise ValueError('empty quorum list response')
+    return dict(status=200, latencyMs=round((time.monotonic() - start) * 1000),
+                quorums=len(quorums), listed=len(nodes),
+                banned=sum(n.get('status') == 'POSE_BANNED' for n in nodes),
+                enabled=sum(n.get('status') == 'ENABLED' for n in nodes),
+                versionFailures=sum(n.get('versionCheck') == 'fail' for n in nodes))
+
+
+def signals(core, platform, previous, now):
+    """Independent progress clocks survive regular polls and process restarts.
+
+    Sampling gaps/initial sync are observer coverage gaps, not chain-stall proof.
+    The ban alert counts newly banned nodes over one hour, not historical totals.
+    """
+    state = {'at': now}
+    continuous = 0 <= now - previous.get('at', 0) <= 180
+    out = {'coreStall': None, 'platformStall': None,
+           'chainLockAgeSeconds': max(0, now - core['_chainLockTime']) if core and core.get('_chainLockTime') else None,
+           'bigBans': len(core['_banned']) if core and core.get('_banned') is not None else None,
+           'newBans': None, 'banWindowSeconds': 3600}
+    for kind, obj, field, syncing in [('core', core, 'blocks', 'ibd'), ('platform', platform, 'height', 'catchingUp')]:
+        height = obj.get(field) if obj else None
+        key = kind + 'Height'
+        eligible = height is not None and obj.get(syncing) is False
+        same = continuous and eligible and previous.get(key) == height and previous.get(kind + 'Eligible')
+        since = previous.get(kind + 'ChangedAt', now) if same else now
+        state.update({key: height, kind + 'ChangedAt': since, kind + 'Eligible': eligible})
+        out[kind + 'Stall'] = now - since >= int(os.environ.get(kind.upper() + '_STALL_SECONDS', '1800')) if eligible and continuous else None
+    bans = core.get('_banned') if core else None
+    state['banned'] = bans
+    events = [e for e in previous.get('banEvents', []) if 0 <= now - e['at'] < 3600] if continuous else []
+    if continuous and bans is not None and previous.get('banned') is not None:
+        new = set(bans) - set(previous['banned'])
+        events.extend({'at': now, 'id': key} for key in new)
+        out['newBans'] = len({e['id'] for e in events})
+    state['banEvents'] = events
+    return out, state
+
+
+def collect(previous, now):
+    errors = []
+    def sample(label, fn):
+        try:
+            return fn()
+        except Exception as exc:
+            # Never emit RPC credentials, command output or token-bearing URLs.
+            errors.append(label + ': ' + type(exc).__name__)
+            return None
+    rows = sample('local containers', containers) or []
+    core = sample('Core', lambda: core_status(rows))
+    platform = sample('Platform', lambda: platform_status(rows))
+    quorum = sample('quorum list', quorum_status)
+    observed, state = signals(core, platform, previous, now)
+    report = dict(network='mainnet', generatedAt=datetime.datetime.fromtimestamp(now, datetime.timezone.utc).isoformat(),
+                  core={k: v for k, v in core.items() if not k.startswith('_')} if core else None,
+                  platform=platform, mainnet=observed, quorumServer=quorum, errors=errors)
+    return report, state
 
 
 def main():
-    if not REPORT_TOKEN:
-        raise SystemExit('MAINNET_REPORT_TOKEN is required')
-    now = int(time.time())
-    rows = containers()
-    core = core_status(rows)
-    platform = tenderdash_status(rows)
-    quorum = quorum_status()
+    token = os.environ.get('MAINNET_REPORT_TOKEN')
+    if not token:
+        raise RuntimeError('report credential is missing')
     previous = {}
-    try: previous = json.loads(STATE.read_text())
-    except Exception: pass
-    core_same = previous.get('coreBlocks') == core.get('blocks')
-    platform_same = previous.get('platformHeight') == (platform or {}).get('height')
-    previous_at = int(previous.get('at', now))
-    report = {
-        'network': 'mainnet', 'generatedAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now)),
-        'probeMs': 0, 'core': {k: v for k, v in core.items() if not k.startswith('_')}, 'platform': platform,
-        'quorumServer': quorum,
-        'mainnet': {
-            'chainLockAgeSeconds': max(0, now - int(core['_chainLockTime'])) if core.get('_chainLockTime') else None,
-            'bigBans': quorum.get('banned'), 'coreStall': core_same and now - previous_at >= CORE_STALL,
-            'platformStall': bool(platform) and platform_same and now - previous_at >= PLATFORM_STALL,
-        },
-        'containers': [{'name': r['name'], 'repo': r['image'].split('@')[0].split(':')[0], 'image': r['image'], 'running': 'Up ' in r['state'], 'state': r['state']} for r in rows],
-    }
+    try:
+        previous = json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        pass
+    report, state = collect(previous, int(time.time()))
     STATE.parent.mkdir(parents=True, exist_ok=True)
     tmp = STATE.with_suffix('.tmp')
-    tmp.write_text(json.dumps({'at': now, 'coreBlocks': core.get('blocks'), 'platformHeight': (platform or {}).get('height')}))
+    tmp.write_text(json.dumps(state))
     tmp.replace(STATE)
-    request = urllib.request.Request(STATUS_URL + '/api/mainnet/report', data=json.dumps(report).encode(), method='POST', headers={'content-type': 'application/json', 'authorization': 'Bearer ' + REPORT_TOKEN})
-    with urllib.request.urlopen(request, timeout=TIMEOUT, context=ssl.create_default_context()) as response:
-        if response.status != 202: raise RuntimeError('status console rejected report')
-    print(json.dumps({'network': 'mainnet', 'core': core.get('blocks'), 'platform': (platform or {}).get('height'), 'bans': quorum.get('banned'), 'coreStall': report['mainnet']['coreStall'], 'platformStall': report['mainnet']['platformStall']}))
+    url = os.environ.get('STATUS_URL', 'https://status.testnet.networks.dash.org').rstrip('/')
+    req = urllib.request.Request(url + '/api/mainnet/report', data=json.dumps(report).encode(),
+                                 headers={'content-type': 'application/json', 'authorization': 'Bearer ' + token}, method='POST')
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
+        if response.status != 202:
+            raise RuntimeError('report rejected')
+    print(json.dumps({'accepted': True, 'core': (report['core'] or {}).get('blocks'),
+                      'platform': (report['platform'] or {}).get('height'),
+                      'platformSyncing': (report['platform'] or {}).get('catchingUp'), 'errors': report['errors']}))
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as exc:
+        print('observer failed: ' + type(exc).__name__, flush=True)
+        raise SystemExit(1)

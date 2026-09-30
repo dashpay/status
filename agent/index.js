@@ -109,7 +109,7 @@ async function loop() {
     await refreshInventory();
   }
   for (const n of settings.networks) {
-    if (n.source === 'report') continue;
+    if (n.source === 'report' || n.chainType === 'mainnet' || n.tag === 'mainnet-support') continue;
     if (busy.has(n.name) || Date.now() - (lastRun.get(n.name) || 0) < settings.pollSeconds * 1000) continue;
     busy.add(n.name); lastRun.set(n.name, Date.now());
     collect(n).catch((e) => log(`collect ${n.name} failed:`, e.message)).finally(() => busy.delete(n.name));

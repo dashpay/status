@@ -124,14 +124,17 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
         const coreStall = m.coreStall === true;
         const platformStall = m.platformStall === true;
         if (!Number.isFinite(m.chainLockHeight) || m.chainLockHeight <= 0) flag('down', 'mainnet ChainLock unavailable');
-        if (chainLockAge !== null && chainLockAge > 300) flag('warn', `mainnet ChainLock is ${Math.round(chainLockAge)}s old`);
+        if (chainLockAge !== null && chainLockAge > 1800) flag('warn', `mainnet ChainLock is ${Math.round(chainLockAge)}s old`);
+        if (m.platformSyncing === true) flag('warn', 'mainnet observer Platform is catching up; live chain status not yet known');
+        if (m.bigBans == null) flag('warn', 'mainnet PoSe census unavailable');
+        if (chainLockAge === null) flag('warn', 'mainnet ChainLock age unavailable');
         if (coreStall) flag('down', 'mainnet Core chain stalled');
         if (platformStall) flag('down', 'mainnet Platform chain stalled');
         if (!Number.isFinite(m.platformHeight) || m.platformHeight <= 0) flag('down', 'mainnet Platform height unavailable');
-        if (m.quorumServer?.status !== 200) flag('down', `mainnet quorum list HTTP ${m.quorumServer?.status ?? 'unavailable'}`);
-        const banned = Number(m.bigBans ?? m.quorumServer?.banned ?? 0);
-        const banThreshold = Number.isFinite(signals.bigBanThreshold) ? signals.bigBanThreshold : 1;
-        if (banned >= banThreshold) flag('warn', `mainnet PoSe-banned masternodes ${banned}`);
+        if (m.quorumServer?.status !== 200 || !m.quorumServer?.quorums || !m.quorumServer?.listed) flag('down', `mainnet quorum list HTTP ${m.quorumServer?.status ?? 'unavailable'}`);
+        const banned = m.newBans;
+        const banThreshold = Number.isFinite(signals.bigBanThreshold) ? signals.bigBanThreshold : 20;
+        if (banned != null && banned >= banThreshold) flag('warn', `mainnet newly PoSe-banned masternodes ${banned} in one hour`);
       }
     }
     // A console devnet under construction is not failing: say what is happening.
@@ -147,7 +150,7 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
   if (network.source === 'report') {
     const observed = Date.parse(state?.generatedAt || '');
     const window = /^([0-9]+)(s|m|h)$/.exec(network.observationWindow || '30m');
-    const maxAge = window ? Number(window[1]) * (window[2] === 'h' ? 3600_000 : window[2] === 'm' ? 60_000 : 1000) : 30 * 60_000;
+    const maxAge = network.chainType === 'mainnet' ? 180_000 : window ? Number(window[1]) * (window[2] === 'h' ? 3600_000 : window[2] === 'm' ? 60_000 : 1000) : 30 * 60_000;
     const stale = !Number.isFinite(observed) || now - observed > maxAge || observed > now + 60_000;
     reportStale = stale;
     if (stale) {
@@ -187,8 +190,9 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
       platformHeight: m.platformHeight ?? mainnetRow.data.tenderdash?.height ?? null,
       bigBans: m.bigBans ?? m.quorumServer?.banned ?? null,
       quorumCount: m.quorumServer?.quorums ?? null,
-      coreStall: !!m.coreStall,
-      platformStall: !!m.platformStall,
+      coreStall: m.coreStall ?? null,
+      platformStall: m.platformStall ?? null,
+      platformSyncing: m.platformSyncing ?? null, newBans: m.newBans ?? null,
     };
   }
   const level = rows.reduce((a, r) => (r.host.duplicate || r.host.role === 'vpn' ? a : RANK[r.level] > RANK[a] ? r.level : a), 'ok');
@@ -222,7 +226,8 @@ export function projectNetwork(network, evaluation, state, operator) {
       mainnet: d.mainnet ? {
         chainLockHeight: d.mainnet.chainLockHeight, chainLockAgeSeconds: d.mainnet.chainLockAgeSeconds,
         platformHeight: d.mainnet.platformHeight, bigBans: d.mainnet.bigBans,
-        coreStall: !!d.mainnet.coreStall, platformStall: !!d.mainnet.platformStall,
+        coreStall: d.mainnet.coreStall ?? null, platformStall: d.mainnet.platformStall ?? null,
+        platformSyncing: d.mainnet.platformSyncing ?? null, newBans: d.mainnet.newBans ?? null,
         quorumServer: d.mainnet.quorumServer || null,
       } : null,
     };

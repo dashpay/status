@@ -14,7 +14,7 @@ test('report-backed networks never claim health without a fresh report', () => {
   }
   const state = { generatedAt: new Date(now).toISOString(), hosts: [{
     name: 'mainnet-observer', role: 'fullnode', state: 'running', probe: { ok: true, data: {
-      core: { chain: 'main', blocks: 100 }, mainnet: { chainLockHeight: 100, platformHeight: 50, quorumServer: { status: 200 } },
+      core: { chain: 'main', blocks: 100 }, mainnet: { chainLockHeight: 100, chainLockAgeSeconds: 1, bigBans: 0, platformHeight: 50, quorumServer: { status: 200, listed: 10, quorums: 4 } },
     } },
   }] };
   assert.equal(evaluateNetwork(mainnet, state, settings, now).level, 'ok');
