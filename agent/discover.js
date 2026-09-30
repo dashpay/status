@@ -46,7 +46,7 @@ export function createDiscovery({ region, tagKey }, client = new EC2Client({ reg
     // External/report-backed networks are intentionally not discovered from
     // EC2.  Mainnet uses a separately managed observer/fullnode and must not
     // accidentally enroll or monitor the existing mainnet-support fleet.
-    const discovered = networks.filter((n) => n.source !== 'report');
+    const discovered = networks.filter((n) => n.source !== 'report' && n.chainType !== 'mainnet' && n.tag !== 'mainnet-support');
     const tags = discovered.map((n) => n.tag);
     if (!tags.length) return Object.fromEntries(networks.map((n) => [n.name, []]));
     const [tagged, named] = await Promise.all([

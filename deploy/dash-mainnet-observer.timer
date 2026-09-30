@@ -1,0 +1,10 @@
+[Unit]
+Description=Sample limited Mainnet signals once a minute
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

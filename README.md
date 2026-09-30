@@ -163,3 +163,24 @@ back if the web health check fails. nginx proxies `/` and `/api/` to
 [nginx-legacy-api.conf](deploy/nginx-legacy-api.conf) go to the legacy container
 on `127.0.0.1:3002`. Operation history and agent state survive redeploys; an
 agent restart during a running operation marks it interrupted (resumable).
+
+### Separate Mainnet observer
+
+Mainnet is report-only and never an EC2/support-fleet target. On the authorized
+fullnode host, install `deploy/mainnet-observer.py` under `/opt/dash-mainnet-observer/`
+and the matching service/timer under `/etc/systemd/system/`. Configure root-only
+`/etc/dash-mainnet-observer/env` with `MAINNET_REPORT_TOKEN`, `STATUS_URL` and
+`OBSERVER_COMPOSE_PROJECT` (the exact local fullnode Compose project). The web
+container receives the matching credential via `/etc/dash-status/mainnet.env`.
+Enable `dash-mainnet-observer.timer`; the bounded oneshot runs every minute,
+never concurrently, and retains independent progress clocks in its StateDirectory.
+The root service needs the host Docker socket to execute only read-only RPCs in
+that project; it has no AWS/SSH credentials. Do not give the web process this socket.
+
+Missing reports expire after three minutes. Core and Platform stalls require
+30 minutes without progress in a continuously sampled, synced observer; initial
+sync and collection gaps remain unknown. PoSe totals come from Core's whole-network
+masternode list, not the quorum server's subset. A large-ban alert defaults to
+20 newly banned masternodes over an hour; historical bans remain visible without
+triggering this alert. The quorum-list check requires both nonempty masternode and
+quorum JSON responses. No payouts, signing operations or fleet mutations occur.

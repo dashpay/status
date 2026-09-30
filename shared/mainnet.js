@@ -1,66 +1,41 @@
-// Validation and normalization boundary for the separate mainnet observer.
-// The observer is not the status agent and never receives cloud/SSH authority.
-
-const finite = (value) => Number.isFinite(value) ? value : null;
-const safeString = (value, max = 200) => typeof value === 'string' ? value.slice(0, max) : null;
+// Public-data-only boundary. Failure samples are data, never manufactured health.
+const integer = (v) => Number.isSafeInteger(v) && v >= 0 ? v : null;
+const finite = (v) => Number.isFinite(v) && v >= 0 ? v : null;
+const text = (v, max = 80) => typeof v === 'string' ? v.slice(0, max) : null;
+const boolean = (v) => typeof v === 'boolean' ? v : null;
+const timestamp = (v) => typeof v === 'string' && Number.isFinite(Date.parse(v)) ? new Date(v).toISOString() : null;
 
 export function validateMainnetReport(input, now = Date.now()) {
   if (!input || input.network !== 'mainnet') throw new Error('mainnet report required');
-  const at = Date.parse(input.generatedAt);
-  if (!Number.isFinite(at) || at > now + 60_000) throw new Error('mainnet report timestamp invalid');
-  if (!input.core || !Number.isSafeInteger(input.core.blocks) || input.core.blocks < 0) throw new Error('mainnet Core height required');
-  const core = {
-    chain: input.core.chain === 'main' ? 'main' : safeString(input.core.chain, 32),
-    blocks: input.core.blocks,
-    headers: Number.isSafeInteger(input.core.headers) ? input.core.headers : input.core.blocks,
-    chainLockHeight: Number.isSafeInteger(input.core.chainLockHeight) ? input.core.chainLockHeight : null,
-    bestBlockHash: safeString(input.core.bestBlockHash, 128),
-    blockTime: finite(input.core.blockTime),
-    ibd: input.core.ibd === true,
-    synced: input.core.synced !== false,
-    subversion: safeString(input.core.subversion, 80),
-    protocol: finite(input.core.protocol),
-    connections: finite(input.core.connections),
-  };
-  const platform = input.platform && Number.isSafeInteger(input.platform.height) ? {
-    height: input.platform.height,
-    blockTime: finite(input.platform.blockTime),
-    network: safeString(input.platform.network, 80),
-    catchingUp: input.platform.catchingUp === true,
-    peers: finite(input.platform.peers),
-    version: safeString(input.platform.version, 80),
-  } : null;
-  const q = input.quorumServer && typeof input.quorumServer === 'object' ? {
-    status: Number.isInteger(input.quorumServer.status) ? input.quorumServer.status : null,
-    latencyMs: finite(input.quorumServer.latencyMs),
-    quorums: Number.isSafeInteger(input.quorumServer.quorums) ? input.quorumServer.quorums : null,
-    banned: Number.isSafeInteger(input.quorumServer.banned) ? input.quorumServer.banned : null,
-    enabled: Number.isSafeInteger(input.quorumServer.enabled) ? input.quorumServer.enabled : null,
-    versionFailures: Number.isSafeInteger(input.quorumServer.versionFailures) ? input.quorumServer.versionFailures : null,
-  } : null;
-  const mainnet = {
-    chainLockHeight: core.chainLockHeight,
-    chainLockAgeSeconds: finite(input.mainnet?.chainLockAgeSeconds),
-    platformHeight: platform?.height ?? null,
-    bigBans: Number.isSafeInteger(input.mainnet?.bigBans) ? input.mainnet.bigBans : q?.banned ?? null,
-    quorumServer: q,
-    coreStall: input.mainnet?.coreStall === true,
-    platformStall: input.mainnet?.platformStall === true,
-  };
-  const host = {
-    name: 'mainnet-observer', role: 'fullnode', state: 'running', publicIp: null, privateIp: null,
-    probe: { ok: true, at: input.generatedAt, ms: finite(input.probeMs) ?? 0, data: {
-      core, tenderdash: platform, mainnet,
-      containers: Array.isArray(input.containers) ? input.containers.slice(0, 32).map((c) => ({
-        name: safeString(c.name, 120), repo: safeString(c.repo, 120), image: safeString(c.image, 200),
-        running: c.running !== false, state: safeString(c.state, 32) || 'running', restarts: finite(c.restarts),
-      })) : [],
-      system: null, errors: Array.isArray(input.errors) ? input.errors.map((e) => safeString(e, 240)).filter(Boolean).slice(0, 20) : [],
-    } },
-  };
-  return { network: 'mainnet', generatedAt: new Date(at).toISOString(), pollSeconds: 60,
-    discovery: { at: new Date(at).toISOString(), error: null }, endpoints: [{
-      label: 'Quorum list', kind: 'quorum', url: 'https://quorums.mainnet.networks.dash.org/masternodes',
-      status: q?.status, ok: q?.status === 200, ms: q?.latencyMs,
-    }], hosts: [host] };
+  const at = timestamp(input.generatedAt);
+  if (!at || Date.parse(at) > now + 60_000 || now - Date.parse(at) > 180_000) throw new Error('mainnet report timestamp invalid or stale');
+  let core = null;
+  if (input.core != null) {
+    if (input.core.chain !== 'main' || integer(input.core.blocks) === null) throw new Error('mainnet Core chain and height required');
+    const c = input.core;
+    core = { chain: 'main', blocks: c.blocks, headers: integer(c.headers), chainLockHeight: integer(c.chainLockHeight),
+      bestBlockHash: /^[a-f0-9]{64}$/i.test(c.bestBlockHash || '') ? c.bestBlockHash : null,
+      blockTime: finite(c.blockTime), ibd: boolean(c.ibd), synced: boolean(c.synced),
+      subversion: text(c.subversion), protocol: integer(c.protocol), connections: integer(c.connections) };
+  }
+  let platform = null;
+  if (input.platform != null) {
+    const p = input.platform;
+    if (p.network !== 'evo1' || integer(p.height) === null) throw new Error('mainnet Platform chain and height required');
+    platform = { height: p.height, blockTime: timestamp(p.blockTime), network: p.network,
+      catchingUp: boolean(p.catchingUp), maxPeerHeight: integer(p.maxPeerHeight), peers: integer(p.peers), version: text(p.version) };
+  }
+  const q = input.quorumServer;
+  const quorum = q && typeof q === 'object' ? Object.fromEntries(['status', 'quorums', 'listed', 'banned', 'enabled', 'versionFailures'].map((k) => [k, integer(q[k])])) : null;
+  if (quorum) quorum.latencyMs = finite(q.latencyMs);
+  const mainnet = { chainLockHeight: core?.chainLockHeight ?? null, chainLockAgeSeconds: finite(input.mainnet?.chainLockAgeSeconds),
+    platformHeight: platform?.height ?? null, platformSyncing: platform?.catchingUp ?? null,
+    bigBans: integer(input.mainnet?.bigBans), newBans: integer(input.mainnet?.newBans), banWindowSeconds: 3600,
+    quorumServer: quorum, coreStall: core?.ibd === false ? boolean(input.mainnet?.coreStall) : null,
+    platformStall: platform?.catchingUp === false ? boolean(input.mainnet?.platformStall) : null };
+  return { network: 'mainnet', generatedAt: at, pollSeconds: 60, discovery: { at, error: null },
+    endpoints: [{ label: 'Quorum list', kind: 'quorum', url: 'https://quorums.mainnet.networks.dash.org/masternodes',
+      status: quorum?.status ?? null, ok: quorum?.status === 200 && quorum.quorums > 0 && quorum.listed > 0, ms: quorum?.latencyMs ?? null }],
+    hosts: [{ name: 'mainnet-observer', role: 'fullnode', state: 'running', publicIp: null, privateIp: null,
+      probe: { ok: true, at, ms: finite(input.probeMs) ?? 0, data: { core, tenderdash: platform, mainnet, containers: [], system: null } } }] };
 }
