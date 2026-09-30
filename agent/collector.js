@@ -8,7 +8,6 @@ import { observe } from './trends.js';
 import { readJSON, writeAtomic } from '../shared/settings.js';
 
 const PROBE = readFileSync(new URL('./probe.py', import.meta.url), 'utf8');
-const SKIP_PROBE = new Set(['vpn']);
 
 export async function mapLimit(items, limit, fn) {
   const out = new Array(items.length);
@@ -112,10 +111,12 @@ export function createCollector({ pool, stateDir, log = console.log }) {
     const at = new Date().toISOString(), start = Date.now();
     const result = { at, ms: 0, ok: false };
     if (host.state !== 'running' || !host.publicIp) return { ...result, skipped: host.state || 'no address' };
-    if (SKIP_PROBE.has(host.role)) return { ...result, skipped: 'not probed' };
+    if (host.role === 'vpn' && !network.observeVpn) return { ...result, skipped: 'read-only VPN observation not enabled' };
     try {
       // The remote timeout kills a stuck probe so cycles never pile up on a host.
-      const raw = await pool.exec(host, `timeout -k 5 75 sudo -n python3 - ${host.role} ${host.publicIp}`, PROBE, 85_000);
+      const raw = host.role === 'vpn'
+        ? await pool.exec(host, 'sudo -n /usr/bin/python3 /usr/local/libexec/dash-status-vpn-probe.py', null, 15_000)
+        : await pool.exec(host, `timeout -k 5 75 sudo -n python3 - ${host.role} ${host.publicIp}`, PROBE, 85_000);
       result.data = JSON.parse(raw.trim().split('\n').pop());
       result.ok = true;
     } catch (e) {

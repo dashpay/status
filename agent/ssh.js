@@ -44,6 +44,9 @@ export function createPool({ key, stateDir, region, accountId, log = console.log
   const savePins = () => writeAtomic(pinsPath, JSON.stringify(pins, null, 1), 0o600);
 
   function open(host) {
+    // VPN observation is opt-in, with independently verified pins and a
+    // forced-command authorization. Never bootstrap general shell access.
+    if (host.role === 'vpn' && !pins[host.instanceId]) return Promise.reject(new Error('VPN host key must be independently verified before observation'));
     return new Promise((resolve, reject) => {
       let mismatch = null;
       const client = connect({
@@ -86,7 +89,7 @@ export function createPool({ key, stateDir, region, accountId, log = console.log
     if (current?.address === host.publicIp) return current.promise;
     current?.promise.then((c) => c.end()).catch(() => {});
     const promise = open(host).catch((e) => {
-      if (e.hostKey || e.level !== 'client-authentication') throw e;
+      if (host.role === 'vpn' || e.hostKey || e.level !== 'client-authentication') throw e;
       return provision(host);
     });
     const entry = { address: host.publicIp, promise };
