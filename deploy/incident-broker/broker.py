@@ -171,7 +171,7 @@ def remediation_snapshot(db, root):
                       'pendingEvents': sum(r['status'] == 'queued' for r in rows),
                       'waitReason': wait.get('reason'), 'heldBy': wait.get('heldBy', []),
                       'retryAt': stamp(wait.get('retryAt')), 'lifecycle': bounded(life['note']) if life else None,
-                      'lastResponse': {'runId': run, 'outcome': receipt['outcome'],
+                      'lastResponse': {'runId': run, 'outcome': detail.get('outcome') if detail.get('outcome') in {'resolved', 'blocked', 'no_change'} else receipt['outcome'],
                                        'summary': bounded(detail.get('summary')), 'blocker': bounded(detail.get('blocker')),
                                        'nextAction': bounded(detail.get('nextAction')),
                                        'changes': [bounded(x, 300) for x in detail.get('changes', [])[:8] if isinstance(x, str)] if isinstance(detail.get('changes'), list) else []}
@@ -374,7 +374,7 @@ def claim(db, cooldown=900, config=None, admission_path=None):
             for r in active:
                 db.execute("update events set status='running',started=?,session_key=? where id=?", (started, session, r['id']))
                 db.execute('insert or replace into event_locks values(?,?)', (r['id'], json.dumps(sorted(event_resources(config, r))) if event_resources(config, r) is not None else 'null'))
-            return [(dict(r), session) for r in active]
+            return [({**dict(r), 'started': started}, session) for r in active]
     return []
 
 
@@ -562,8 +562,8 @@ def recover_interrupted(root, config):
     with connect(root / 'inbox.sqlite') as db:
         groups = db.execute("select scope,session_key,started from events where status='running' group by scope,session_key,started").fetchall()
         for group in groups:
-            rows = db.execute("select id,result from events where status='running' and scope=? and started=? order by received", (group['scope'], group['started'])).fetchall()
-            run = next((r['result'] for r in rows if r['result']), None) or hashlib.sha256('|'.join(r['id'] for r in rows).encode()).hexdigest()[:24]
+            rows = db.execute("select id,result,started from events where status='running' and scope=? and started=? order by received", (group['scope'], group['started'])).fetchall()
+            run = next((r['result'] for r in rows if r['result']), None) or attempt_id(rows)
             with db:
                 for row in rows:
                     db.execute("update events set status='uncertain',result=? where id=?", (run, row['id']))
@@ -590,6 +590,10 @@ def scheduler_snapshot(db, config, enabled, now=None):
             'activeScopes': list(occupied), 'queued': queued, 'lifecycle': lifecycle}
 
 
+def attempt_id(rows):
+    return hashlib.sha256('|'.join(r['id'] + '@' + repr(r['started']) for r in rows).encode()).hexdigest()[:24]
+
+
 def worker(args, stop):
     root = pathlib.Path(args.state_dir)
     policy = pathlib.Path(args.policy).read_text()
@@ -609,7 +613,9 @@ def worker(args, stop):
             continue
         session = batch[0][1]
         # Stable file name is derived locally, never a supplied filesystem path.
-        run = hashlib.sha256('|'.join(r['id'] for r, _ in batch).encode()).hexdigest()[:24]
+        # Readmission is a new attempt, not permission to overwrite the previous
+        # receipt/report. Persisted admission time makes restart recovery stable.
+        run = attempt_id([r for r, _ in batch])
         # Persist before invoking anything; restart recovery can identify the run.
         with connect(root / 'inbox.sqlite') as db:
             with db:
@@ -647,7 +653,7 @@ def worker(args, stop):
             + 'After all work and child sessions have actually finished (or a concrete blocker is recorded), write ' + args.container_state_dir + '/' + run + '.completion.json'
             + ' with JSON fields runId (this exact run ID), terminal:true, pendingChildren:0, outcome (resolved, blocked, or no_change), finishedAt (current UTC ISO timestamp), and report (local report path or short summary). Never write terminal:true while any child or mutation is still running. Then give your concise final result. This receipt ends the response turn; fresh monitoring independently decides service recovery.\n')
         with message.open('a') as stream:
-            stream.write('For the administrator remediation board, also include a concise redacted summary, changes (array of verified changes only), blocker (if any), and nextAction in the receipt. Do not include secrets, raw logs, private personal data or speculative fixes. A blocked response can list partial changes without calling the whole incident fixed.\n')
+            stream.write('For the administrator remediation board, also include a concise redacted summary, changes (array of verified changes only), blocker (if any), and nextAction in the receipt. Include issues keyed by each incident issue ID, each with its own outcome (resolved, blocked, or no_change), summary, changes, blocker, and nextAction. Do not apply one remaining blocker to unrelated successfully repaired issues. Distinguish response completion, verified repair, and future observation. Do not include secrets, raw logs, private personal data or speculative fixes. A blocked response can list partial changes without calling the whole incident fixed.\n')
         message.chmod(0o600)
         try:
             route = pin_session_route(session)

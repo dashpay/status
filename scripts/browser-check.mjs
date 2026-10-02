@@ -184,7 +184,7 @@ try {
   } } } };
   for (const [id, workerState, outcome, status] of [
     ['working', 'running', null, 'open'], ['queued', 'queued', null, 'open'],
-    ['blocked', 'completed', 'blocked', 'resolved'], ['fixed', 'completed', 'resolved', 'resolved'],
+    ['blocked', 'completed', 'blocked', 'open'], ['followup', 'completed', 'blocked', 'resolved'], ['fixed', 'completed', 'resolved', 'resolved'],
     ['verifying', 'completed', 'resolved', 'open'],
   ]) {
     board.issues.push({ id, domain: 'network', scope: 'testnet', target: `private-${id}-host`,
@@ -205,12 +205,16 @@ try {
     await page.locator('[data-issue-id="blocked"] summary').click();
     await page.getByText('Root cause still open').waitFor();
     assert.ok((await page.locator('[data-issue-id="blocked"]').innerText()).includes('Blocked'));
+    assert.ok((await page.locator('[data-issue-id="followup"]').innerText()).includes('Recovered · follow-up'));
     await page.evaluate(() => scrollTo(0, 0));
     await page.screenshot({ path: `artifacts/remediation-${label}.png`, fullPage: true });
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `${label}: remediation fits viewport`);
     await page.getByLabel('Remediation state').selectOption('fixed');
     assert.equal(await page.locator('[data-issue-id]').count(), 1);
     assert.ok(await page.locator('[data-issue-id="fixed"]').count());
+    await page.getByLabel('Remediation state').selectOption('followup');
+    assert.equal(await page.locator('[data-issue-id]').count(), 1);
+    assert.ok(await page.locator('[data-issue-id="followup"]').count());
     await page.getByLabel('Remediation state').selectOption('all');
     await page.getByLabel('Filter remediation issues').fill('private-queued-host');
     assert.equal(await page.locator('[data-issue-id]').count(), 1);

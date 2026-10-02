@@ -3,8 +3,8 @@ import { ago, clock, useNow, useResource, useSession } from '../lib.js';
 import { Empty, Err, Section } from '../ui.jsx';
 
 const STAGES = { working: ['Working', 'lv-deploying'], queued: ['Queued', 'text-dim'], blocked: ['Blocked', 'lv-warn'],
-  verifying: ['Verifying', 'lv-warn'], fixed: ['Verified fixed', 'lv-ok'], recovered: ['Recovered', 'lv-ok'],
-  review: ['Review only', 'text-dim'], unknown: ['Awaiting status', 'text-dim'] };
+  verifying: ['Verifying', 'lv-warn'], followup: ['Recovered · follow-up', 'text-dim'], fixed: ['Verified fixed', 'lv-ok'], recovered: ['Recovered', 'lv-ok'],
+  classified: ['Monitoring corrected', 'text-dim'], review: ['Review only', 'text-dim'], unknown: ['Awaiting status', 'text-dim'] };
 
 export default function Remediation() {
   const session = useSession();
@@ -38,8 +38,8 @@ export default function Remediation() {
         {data.public && <p className="mt-2 text-dim">Public view · target names and repair notes are available to signed-in administrators.</p>}
         {data.truncated && <p className="mt-2 lv-warn">The worker history is truncated; some response details are unavailable.</p>}
       </div>
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-2 mt-3">
-        {['queued', 'working', 'blocked', 'verifying', 'fixed'].map((stage) => <button key={stage} onClick={() => setFilter(stage)}
+      <div className="grid grid-cols-2 lg:grid-cols-6 gap-2 mt-3">
+        {['queued', 'working', 'blocked', 'followup', 'verifying', 'fixed'].map((stage) => <button key={stage} onClick={() => setFilter(stage)}
           className={`panel text-left px-3 py-3 ${filter === stage ? 'ring-1 ring-[#58a6ff]' : ''}`} aria-pressed={filter === stage}>
           <span className="label">{STAGES[stage][0]}</span><span className={`block mono text-2xl mt-1 ${STAGES[stage][1]}`}>{data.counts[stage]}</span>
         </button>)}
@@ -57,7 +57,7 @@ export default function Remediation() {
         {!cases.length ? <Empty>{data.cases.length ? 'No issues match this filter.' : stale ? 'No remediation data has arrived yet.' : 'No issues in the current monitoring history.'}</Empty>
           : <div className="space-y-2">{cases.map((item) => <Issue key={item.id} item={item} now={now} />)}</div>}
       </Section>
-      <p className="text-dim text-[11px] mt-4">Verified fixed requires a completed repair and independent monitoring recovery. Recovered means monitoring improved without an attributed repair. Blocked work keeps its unresolved follow-up, even if symptoms improve.</p>
+      <p className="text-dim text-[11px] mt-4">Verified fixed requires a completed repair and independent monitoring recovery. Recovered means monitoring improved without an attributed repair. Recovered · follow-up keeps unresolved root-cause work visible without counting it as an ongoing blocked outage.</p>
     </>}
   </div>;
 }
@@ -75,7 +75,7 @@ function Issue({ item, now }) {
       </div>
       <div className="text-[11px] text-dim shrink-0 text-right">
         <div title={clock(item.observedAt)}>Observed {ago(item.observedAt, now)} ago</div>
-        <div className="mt-1">Monitoring: {item.monitoring === 'resolved' ? 'recovered' : 'open'}</div>
+        <div className="mt-1">Monitoring: {item.stage === 'classified' ? 'reclassified' : item.monitoring === 'resolved' ? 'recovered' : 'open'}</div>
         <div className="mt-2 group-open:hidden">Details ↓</div><div className="mt-2 hidden group-open:block">Details ↑</div>
       </div>
     </summary>

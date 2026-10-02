@@ -19,7 +19,10 @@ test('remediation separates completed response from verified repair and preserve
   ]);
   const view = remediationView(data, options);
   assert.equal(view.dispatch, 'enabled'); assert.equal(view.stale, false);
-  assert.deepEqual(Object.fromEntries(view.cases.map((c) => [c.id, c.stage])), { a: 'verifying', b: 'blocked', c: 'fixed', d: 'recovered' });
+  assert.deepEqual(Object.fromEntries(view.cases.map((c) => [c.id, c.stage])), { a: 'verifying', b: 'followup', c: 'fixed', d: 'recovered' });
+  assert.equal(view.cases.find((c) => c.id === 'b').blocker, 'root cause remains');
+  data.generatedAt = new Date(now - 200_000).toISOString();
+  assert.equal(remediationView(data, options).cases.find((c) => c.id === 'b').stage, 'blocked', 'stale monitoring cannot establish recovery');
 });
 
 test('active predecessor owns issue despite newer queued revision; repeated updates count once', () => {
@@ -55,4 +58,14 @@ test('waiting reasons and no-cleanup informational findings survive presentation
   const view = remediationView(state([issue('a'), issue('b', { severity: 'info' })], [{ issueId: 'a', workerState: 'queued', waitReason: 'resource_conflict', pendingEvents: 1 }]), options);
   assert.match(view.cases.find((c) => c.id === 'a').reason, /resource owner/);
   assert.equal(view.counts.review, 1);
+});
+
+test('verified monitoring correction is not an outage recovery or stale batch blocker', () => {
+  const data = state([issue('a', { domain: 'aws', status: 'resolved', resolutionEvidence: { reason: 'verified_control_signal' } })],
+    [{ issueId: 'a', workerState: 'completed', lastResponse: { outcome: 'blocked', blocker: 'Classifier requires correction' } }]);
+  const view = remediationView(data, options);
+  assert.equal(view.cases[0].stage, 'classified'); assert.equal(view.cases[0].blocker, null);
+  assert.equal(view.counts.blocked, 0); assert.equal(view.counts.fixed, 0);
+  data.generatedAt = new Date(now - 200_000).toISOString();
+  assert.equal(remediationView(data, options).cases[0].stage, 'blocked');
 });

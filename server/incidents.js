@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { evaluateNetwork, explorerReadiness } from '../shared/evaluate.js';
 import { readJSON, writeAtomic } from '../shared/settings.js';
+import { dynamoScaleInControl } from '../shared/aws-alarm-semantics.js';
 
 export const issueId = (...parts) => createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 24);
 const iso = (now) => new Date(now).toISOString();
@@ -287,8 +288,17 @@ export function deriveIssues({ settings, states, ci, aws, now = Date.now() }) {
       if (Array.isArray(i.events) && i.events.length) add('aws', i.region, i.id, 'aws_scheduled_event', 'warning', 'aws:health', { events: list(i.events).slice(0, 20) }, health.at);
     }
     for (const a of list(health.alarms)) {
-      check('aws', a.region, a.name, 'aws_alarm', 'aws:health', a.state === 'OK');
-      if (a.state === 'ALARM') add('aws', a.region, a.name, 'aws_alarm', 'warning', 'aws:health', { state: a.state }, health.at);
+      const control = healthySource && a.scalingControl?.verifiedAt === health.at
+        ? dynamoScaleInControl(a, a.scalingControl.policy) : null;
+      const resolutionEvidence = control && a.state === 'ALARM' ? { reason: 'verified_control_signal',
+        explanation: 'Monitoring classification corrected; scale-in control, not evidence of table recovery.',
+        alarmArn: a.arn, state: a.state, verifiedAt: health.at, ...control } : null;
+      check('aws', a.region, a.name, 'aws_alarm', 'aws:health', a.state === 'OK' || !!resolutionEvidence,
+        [], resolutionEvidence ? { resolutionEvidence } : {});
+      check('aws', a.region, a.name, 'aws_scaling_control', 'aws:health', a.state === 'OK');
+      if (a.state === 'ALARM' && control) add('aws', a.region, a.name, 'aws_scaling_control', 'info', 'aws:health',
+        { state: a.state, alarmArn: a.arn, ...control, action: 'informational scale-in control; no service recovery asserted' }, health.at);
+      else if (a.state === 'ALARM') add('aws', a.region, a.name, 'aws_alarm', 'warning', 'aws:health', { state: a.state }, health.at);
     }
   }
   return { issues, sources, checks, samples, suppressions, jobSuccesses };
@@ -354,6 +364,7 @@ export function reconcile(previous, derived, now = Date.now()) {
     const awaitingPostMaintenance = old?.suppressed === true && Date.parse(observedAt) <= Date.parse(old.suppressedUntil);
     const issue = { ...old, ...current, observedAt, status: 'open', firstSeen: old?.firstSeen || iso(now), lastSeen: iso(now), resolvedAt: null,
       lastFaultAt: observedAt, suppressed: maintenance || awaitingPostMaintenance };
+    delete issue.resolutionEvidence; // a reopened fault cannot retain an earlier classification correction
     if (old?.status === 'open' && current.code === 'host_health') {
       const proofs = healthyRules(old, check), incoming = knownFaults(current), oldFaults = knownFaults(old);
       const retained = oldFaults.filter((f) => !proofs.has(f) && !incoming.includes(f));
@@ -392,6 +403,7 @@ export function reconcile(previous, derived, now = Date.now()) {
     }
     if (clear) {
       issue.status = 'resolved'; issue.resolvedAt = iso(now); issue.observedAt = clearAt;
+      if (check?.resolutionEvidence) issue.resolutionEvidence = check.resolutionEvidence;
       emit(issue, 'resolved');
     }
   }

@@ -16,6 +16,83 @@ def container(image, cmd=None, env=None):
 
 
 class Probes(unittest.TestCase):
+    def test_fork_and_image_id_deployments_preserve_runtime_checks(self):
+        for prefix in ['ghcr.io/infraclaw-dash/platform-explorer-', 'sha256:']:
+            api = container(prefix + 'api')
+            idx = container(prefix + 'indexer')
+            migration = container(prefix + 'indexer', ['/app/indexer', 'migrate'])
+            for c, service in [(api, 'explorer-api'), (idx, 'explorer-indexer'), (migration, 'explorer-migrate')]:
+                c['Config']['Labels'] = {'com.docker.compose.project': 'devnet-services',
+                                         'com.docker.compose.service': service}
+            migration['State'] = {'Status': 'exited', 'Running': False, 'ExitCode': 0}
+            self.assertTrue(p.explorer_migration(migration))
+            self.assertFalse(p.explorer_migration(idx))
+            for state, running in [('running', True), ('restarting', False), ('exited', False)]:
+                idx.update(Id='real-indexer', RestartCount=7,
+                           State={'Status': state, 'Running': state != 'exited', 'ExitCode': 101})
+                with patch.object(p, 'get_json', return_value=(200, {'api': {'block': {'height': 42}},
+                                                                             'tenderdash': {'block': {'height': 43}}}, 1)):
+                    check = p.explorer({'api': api, 'a-migration': migration, 'idx': idx})
+                self.assertEqual(check['indexerId'], 'real-indexer')
+                self.assertEqual(check['indexerRunning'], running)
+                self.assertEqual(check['indexerRestarts'], 7)
+                self.assertEqual(check['indexedHeight'], 42)
+                self.assertEqual(check['chainHeight'], 43)
+
+    def test_unrelated_compose_service_is_not_explorer(self):
+        c = container('sha256:' + 'a' * 64, ['migrate'])
+        for labels in [{}, {'com.docker.compose.project': 'other', 'com.docker.compose.service': 'explorer-migrate'},
+                       {'com.docker.compose.project': 'devnet-services', 'com.docker.compose.service': 'unrelated'}]:
+            c['Config']['Labels'] = labels
+            self.assertFalse(p.explorer_migration(c))
+            self.assertFalse(p.explorer_component(c, 'api'))
+            self.assertFalse(p.explorer_component(c, 'indexer'))
+
+    def test_legacy_faucet_history_is_not_a_pending_payment_queue(self):
+        # Actual incident aggregates: 10,373 attempts, 2,184 without txid,
+        # but zero rows in faucet_pending_payments. Do not discard history.
+        c = container('dashpay/multifaucet:latest'); c['Id'] = 'faucet'
+        db = dict(total='10373', queued='0', oldestQueuedAt=None,
+                  lastBroadcastAt='1764594772', payoutsWithoutTxidCount='2184',
+                  lastIncompleteAttemptAt='1770628068', recent=[])
+        def run(args, timeout, stdin):
+            self.assertEqual(args, ['docker', 'exec', '-i', 'faucet', 'php'])
+            sql = stdin.decode()
+            self.assertIn('COUNT(*) FROM faucet_pending_payments', sql)
+            self.assertIn('MIN(UNIX_TIMESTAMP(created_date)) FROM faucet_pending_payments', sql)
+            self.assertIn('payoutsWithoutTxidCount', sql)
+            return json.dumps(db).encode()
+        with patch.object(p, 'run', run), patch.object(p, 'http_check', return_value={}), patch.object(p, 'core_cli', return_value=(None, None)):
+            out = p.legacy_faucet({'faucet': c})['queue']
+        self.assertEqual(out, dict(ok=True, total=10373, queued=0, oldestQueuedAt=None,
+                                   lastBroadcastAt=1764594772, payoutsWithoutTxidCount=2184,
+                                   lastIncompleteAttemptAt=1770628068))
+
+    def test_legacy_faucet_real_pending_rows_remain_visible(self):
+        c = container('dashpay/multifaucet:latest'); c['Id'] = 'faucet'
+        db = dict(total='10373', queued='2', oldestQueuedAt='1790940000',
+                  lastBroadcastAt='1764594772', payoutsWithoutTxidCount='2184',
+                  lastIncompleteAttemptAt='1770628068', recent=[])
+        with patch.object(p, 'run', return_value=json.dumps(db).encode()), patch.object(p, 'http_check', return_value={}), patch.object(p, 'core_cli', return_value=(None, None)):
+            out = p.legacy_faucet({'faucet': c})['queue']
+        self.assertTrue(out['ok']); self.assertEqual(out['queued'], 2)
+        self.assertEqual(out['oldestQueuedAt'], 1790940000)
+
+    def test_legacy_faucet_missing_queue_source_is_unknown_not_green(self):
+        c = container('dashpay/multifaucet:latest'); c['Id'] = 'faucet'
+        with patch.object(p, 'run', return_value=b'{"error":"database unavailable"}'), patch.object(p, 'http_check', return_value={}):
+            self.assertEqual(p.legacy_faucet({'faucet': c})['queue'], dict(ok=False))
+
+    def test_legacy_faucet_empty_history_and_malformed_results(self):
+        c = container('dashpay/multifaucet:latest'); c['Id'] = 'faucet'
+        empty = dict(total='0', queued='0', oldestQueuedAt=None, lastBroadcastAt=None,
+                     payoutsWithoutTxidCount='0', lastIncompleteAttemptAt=None, recent=[])
+        with patch.object(p, 'run', return_value=json.dumps(empty).encode()), patch.object(p, 'http_check', return_value={}), patch.object(p, 'core_cli', return_value=(None, None)):
+            self.assertEqual(p.legacy_faucet({'faucet': c})['queue']['queued'], 0)
+        for changed in [dict(queued=None), dict(queued='2'), dict(queued=True), dict(total='-1'), dict(payoutsWithoutTxidCount='1')]:
+            with self.subTest(changed=changed), patch.object(p, 'run', return_value=json.dumps({**empty, **changed}).encode()), patch.object(p, 'http_check', return_value={}):
+                self.assertEqual(p.legacy_faucet({'faucet': c})['queue'], dict(ok=False))
+
     def test_docker_preserves_successful_migration_evidence(self):
         c = container('ghcr.io/pshenmic/platform-explorer-indexer:2.5.3', ['/app/indexer', 'migrate'])
         c.update(Id='migration', Name='/services-explorer-migrate-1', Image='image-id')
