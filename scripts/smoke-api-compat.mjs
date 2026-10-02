@@ -88,9 +88,9 @@ http {
     page.on('pageerror', (error) => pageErrors.push(error.message));
     await page.goto(config.origin);
     await page.getByRole('link', { name: 'Sign in with GitHub' }).waitFor();
-    await page.getByRole('navigation').getByRole('link', { name: /Moutai/ }).click();
-    await page.waitForURL('**/n/devnet-moutai');
-    assert.ok((await page.locator('body').innerText()).includes('Moutai'));
+    await page.getByRole('navigation').getByRole('link', { name: /Mainnet/ }).click();
+    await page.waitForURL('**/n/mainnet');
+    assert.ok((await page.locator('body').innerText()).includes('Mainnet'));
     const health = await page.evaluate(() => fetch('/api/health').then((r) => r.json()));
     assert.equal(health.totalNodes, 1);
     assert.equal(health.service, undefined, 'Original API must not become a console capability endpoint');
