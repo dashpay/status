@@ -205,7 +205,7 @@ def claim(db, cooldown=900):
     with db:
         db.execute('begin immediate')
         # Concurrent processes and restart ambiguity cannot acquire another turn.
-        if db.execute("select 1 from events where status='running' limit 1").fetchone():
+        if db.execute("select 1 from events where status in ('running','uncertain') limit 1").fetchone():
             return []
         # Admission budget: eight serialized batches/hour, 48/day; pending work
         # remains durable. Prevents flapping telemetry from creating a cost storm.
@@ -285,7 +285,13 @@ def terminal_success(reply):
 def receipt_complete(root, run):
     try:
         receipt = json.loads((root / (run + '.completion.json')).read_text())
-        clock_value(receipt.get('finishedAt'))
+        finished = receipt.get('finishedAt')
+        # The task requests a UTC ISO timestamp. Python's timezone-aware
+        # isoformat emits +00:00, which is equivalent to Z. Keep strict external
+        # observation validation unchanged and accept both UTC receipt forms.
+        if isinstance(finished, str) and finished.endswith('+00:00'):
+            finished = finished[:-6] + 'Z'
+        clock_value(finished)
         return receipt.get('runId') == run and receipt.get('terminal') is True and receipt.get('pendingChildren') == 0 and receipt.get('outcome') in {'resolved', 'blocked', 'no_change'}
     except (OSError, ValueError, TypeError):
         return False

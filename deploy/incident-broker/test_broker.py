@@ -102,6 +102,7 @@ class Tests(unittest.TestCase):
         (root / ('PAUSED-'+run)).touch()
         b.reconcile_late_completion(root)
         self.assertFalse((root / 'ENABLED').exists())
+
         (root / (run+'.completion.json')).write_text(json.dumps({'runId':run,'terminal':True,'pendingChildren':0,'outcome':'no_change','finishedAt':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}))
         b.reconcile_late_completion(root)
         self.assertTrue((root / 'ENABLED').exists())
@@ -109,6 +110,29 @@ class Tests(unittest.TestCase):
         (root / 'ENABLED').rename(root / 'PAUSED-operator')
         b.reconcile_late_completion(root)
         self.assertFalse((root / 'ENABLED').exists())
+
+    def test_utc_offset_receipt_unblocks_finished_batch_without_replaying_it(self):
+        root = pathlib.Path(self.temp.name)
+        db = b.connect(root / 'inbox.sqlite'); self.addCleanup(db.close)
+        b.ingest(db, envelope(event())); b.claim(db, cooldown=0)
+        run = '2'*24
+        with db: db.execute("update events set status='uncertain',result=?", (run,))
+        newer = event(2); b.ingest(db, envelope(newer))
+        self.assertEqual(b.claim(db, cooldown=0), [])
+        (root / (run+'.result.json')).write_text(json.dumps({'status':'ok'}))
+        (root / ('PAUSED-'+run)).touch()
+        receipt = {'runId':run,'terminal':True,'pendingChildren':0,'outcome':'blocked',
+                   'finishedAt':'2026-10-02T12:34:32.581381+00:00'}
+        target = root / (run+'.completion.json')
+        for invalid in ['not-a-clock', '2026-10-02T12:34:32', '2099-10-02T12:34:32+00:00']:
+            target.write_text(json.dumps({**receipt, 'finishedAt':invalid}))
+            b.reconcile_late_completion(root)
+            self.assertFalse((root / 'ENABLED').exists())
+        target.write_text(json.dumps(receipt))
+        b.reconcile_late_completion(root)
+        self.assertTrue((root / 'ENABLED').exists())
+        self.assertEqual(db.execute("select status from events where id=?", ('a'*24+':1',)).fetchone()[0], 'completed')
+        self.assertEqual(db.execute("select status from events where id=?", ('a'*24+':2',)).fetchone()[0], 'queued')
 
     def test_hmac_replay_window_and_ack(self):
         secret = 'test-secret-123'
