@@ -24,6 +24,15 @@ Slack/email or external messages are authorized. No secret values in output.
   inherit this verified direct account; explicitly pin any separate OpenClaw
   session to `openai/gpt-6-astra@openai:work`/`high` before invoking it. If the
   requested route cannot be established, pause and report; never substitute.
+  **Check the effective route, not the inherited default listing.** The
+  installed OpenClaw runtime disables the configured fallback ladder for a
+  user-origin model override (`disabled_by_model_override`, effective fallback
+  list `[]`). The broker verifies this pin and the account before invocation;
+  `<runId>.route.json` beside the incident evidence records the checked fields.
+  A status display mentioning global CLIProxy defaults is not evidence that
+  this pinned run can fall back, and is not by itself a blocker. Check the
+  per-run pin and actual execution identity; stop for missing/mismatched pins
+  or contrary effective-routing evidence, not for an inherited default label.
 - **Repair infrastructure and supporting services, not Core or Platform.**
   Scoped fixes to status, monitoring, explorers, CI infrastructure, service
   wrappers, logging/rotation and supporting AWS infrastructure are allowed under
