@@ -70,7 +70,20 @@ retired, recovered, stale, or unowned target does not authorize a mutation.
 
 ## Work to completion
 
-1. Read the incident evidence file, then independently reproduce the current
+1. Read the incident evidence file to identify the target and symptoms, then
+   **check infraclaw's operational memory before choosing a repair or declaring
+   a blocker**. Search with `memory_search` for the host/service/network, exact
+   errors and previous fixes; read relevant hits with `memory_get`. Consult
+   relevant recent daily notes, `TOOLS.md` sections and linked runbooks/reports.
+   If memory tools are unavailable, use targeted `rg`/reads of permitted
+   workspace notes. Use already-provided startup context without redundant
+   bulk reads; respect workspace memory privacy rules (do not load private
+   `MEMORY.md` in shared contexts). Pass this requirement and relevant,
+   privacy-safe operational findings to every delegated repairer. Record the
+   references consulted, or no relevant match/access, in the incident report.
+   Memory is essential operational context, not fresh health evidence or new
+   authority: validate its procedures against current state and owner limits.
+   Then independently reproduce the current
    failure. Check freshness, maintenance/active operations, existing incident
    sessions, and target identity. `/api/issues` and the status collector's data
    describe observations, not completed remediation. Mainnet remains observation
