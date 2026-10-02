@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 import urllib.request
 import urllib.error
 import http.server
@@ -29,6 +30,24 @@ class Tests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.db = b.connect(pathlib.Path(self.temp.name)/'inbox.sqlite'); self.addCleanup(self.db.close)
+
+    def test_route_pin_rejects_wrong_provider_account_effort_and_auto_fallback(self):
+        expected = {'providerOverride': 'openai', 'modelOverride': 'gpt-6-astra',
+                    'modelOverrideSource': 'user', 'authProfileOverride': 'openai:work',
+                    'authProfileOverrideSource': 'user', 'thinkingLevel': 'high'}
+        for key, wrong in [('providerOverride', 'cliproxy'), ('modelOverride', 'gpt-6.1-sol'),
+                           ('authProfileOverride', 'openai:daniel.case@dash.org'),
+                           ('authProfileOverrideSource', 'auto'), ('modelOverrideSource', 'auto'),
+                           ('thinkingLevel', 'xhigh')]:
+            with self.subTest(key=key), patch.object(b.subprocess, 'run') as run:
+                run.return_value.stdout = json.dumps({'ok': True, 'entry': {**expected, key: wrong}})
+                with self.assertRaises(ValueError): b.pin_session_route('agent:main:incident-test')
+        with patch.object(b.subprocess, 'run') as run:
+            run.return_value.stdout = json.dumps({'ok': True, 'entry': expected})
+            self.assertEqual(b.pin_session_route('agent:main:incident-test'), expected)
+            argv = run.call_args.args[0]
+            request = json.loads(argv[argv.index('--params') + 1])
+            self.assertEqual(request, {'key': 'agent:main:incident-test', 'model': 'openai/gpt-6-astra@openai:work', 'thinkingLevel': 'high'})
 
     def test_durable_dedup_and_conflict(self):
         p = envelope(event()); self.assertEqual(b.ingest(self.db, p), ['a'*24+':1'])

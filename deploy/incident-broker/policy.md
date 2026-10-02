@@ -15,6 +15,15 @@ Slack/email or external messages are authorized. No secret values in output.
 
 ## Mandatory scope in every service request
 
+- **Required execution route (owner correction, 2026-10-02): direct OpenAI
+  GPT-6 Astra, High reasoning, account `daniel@ktechmidas.net` (`openai:work`).**
+  The broker pins `openai/gpt-6-astra@openai:work` with user-origin model/account
+  overrides before every run; no CLIProxy, different account, or model fallback.
+  This supersedes the earlier GPT-6.1/xhigh instruction. Carry it into every
+  child/session request. Native Codex children must use `gpt-6-astra`/`high` and
+  inherit this verified direct account; explicitly pin any separate OpenClaw
+  session to `openai/gpt-6-astra@openai:work`/`high` before invoking it. If the
+  requested route cannot be established, pause and report; never substitute.
 - **Repair infrastructure and supporting services, not Core or Platform.**
   Scoped fixes to status, monitoring, explorers, CI infrastructure, service
   wrappers, logging/rotation and supporting AWS infrastructure are allowed under
@@ -47,7 +56,7 @@ Slack/email or external messages are authorized. No secret values in output.
   root cause open**, with a concrete follow-up and recurrence check. Never claim
   durable resolution while the root cause is unknown or recurrence unverified.
 - Copy these boundaries and Slack routing into every delegated task/service
-  request. GPT-6.1 review does not grant authority to modify Core/Platform.
+  request. Model review does not grant authority to modify Core/Platform.
 
 ## Trigger boundary
 
@@ -71,9 +80,10 @@ retired, recovered, stale, or unowned target does not authorize a mutation.
    recovery. Use worktrees for code. Do not treat a process restart/HTTP200 as
    functional health. Require independent samples and progress where relevant.
 3. For difficult, cross-repository, auxiliary-service protocol/decoder, repeated, or uncertain
-   problems, spawn a **GPT-6.1** session at **xhigh**, discuss the root cause and
+   problems, spawn a **GPT-6 Astra** session at **high** on the pinned direct
+   `openai:work` account, discuss the root cause and
    patch, and continue until a tested solution is deployed or a concrete blocker
-   is recorded. Use native Codex spawn_agent with model `gpt-6.1-sol` where
+   is recorded. Use native Codex spawn_agent with model `gpt-6-astra` and high reasoning where
    available; do not silently substitute another model. Give a concrete bounded
    task and non-overlapping write scope, including the mandatory boundaries above.
    Core/Platform product defects remain read-only investigation plus Slack

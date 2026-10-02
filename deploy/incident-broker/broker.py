@@ -23,6 +23,28 @@ MAX_BODY = 512 * 1024
 ID = re.compile(r'^[a-f0-9]{24}:[1-9][0-9]{0,8}$')
 DOMAIN = {'network', 'ci', 'aws'}
 TRANSITIONS = {'opened', 'reopened', 'changed', 'resolved', 'reminder'}
+MODEL = 'openai/gpt-6-astra'
+AUTH_PROFILE = 'openai:work'
+THINKING = 'high'
+
+
+def pin_session_route(session):
+    """Explicit user pins disable the Gateway fallback ladder and account rotation.
+    Fail before model execution if the Gateway cannot persist the exact route.
+    The profile reference is not a credential; its OAuth material stays in OpenClaw.
+    """
+    patch = {'key': session, 'model': MODEL + '@' + AUTH_PROFILE, 'thinkingLevel': THINKING}
+    proc = subprocess.run(['docker', 'exec', 'infraclaw', 'openclaw', 'gateway', 'call',
+                           'sessions.patch', '--params', json.dumps(patch), '--json'],
+                          capture_output=True, text=True, timeout=45, check=True)
+    reply = json.loads(proc.stdout)
+    entry = reply.get('entry') or {}
+    expected = {'providerOverride': 'openai', 'modelOverride': 'gpt-6-astra',
+                'modelOverrideSource': 'user', 'authProfileOverride': AUTH_PROFILE,
+                'authProfileOverrideSource': 'user', 'thinkingLevel': THINKING}
+    if reply.get('ok') is not True or any(entry.get(k) != value for k, value in expected.items()):
+        raise ValueError('required direct Astra/High work-account route was not pinned')
+    return expected
 
 
 def connect(path):
@@ -336,8 +358,22 @@ def worker(args, stop):
             + 'After all work and child sessions have actually finished (or a concrete blocker is recorded), write ' + args.container_state_dir + '/' + run + '.completion.json'
             + ' with JSON fields runId (this exact run ID), terminal:true, pendingChildren:0, outcome (resolved, blocked, or no_change), finishedAt (current UTC ISO timestamp), and report (local report path or short summary). Never write terminal:true while any child or mutation is still running. Then give your concise final result. This receipt ends the response turn; fresh monitoring independently decides service recovery.\n')
         message.chmod(0o600)
+        try:
+            route = pin_session_route(session)
+            (root / (run + '.route.json')).write_text(json.dumps(route, indent=2))
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+            # No model was invoked. Retain the evidence and queue; require repair
+            # of the route instead of silently using another provider/account.
+            with connect(root / 'inbox.sqlite') as db:
+                with db:
+                    for r, _ in batch:
+                        db.execute("update events set status='queued',started=null where id=?", (r['id'],))
+                    db.execute('insert or replace into meta values(?,?)', ('worker_error', 'required Astra/High work-account route unavailable'))
+            if (root / 'ENABLED').exists():
+                (root / 'ENABLED').rename(root / 'PAUSED-route-unavailable')
+            continue
         command = ['docker', 'exec', 'infraclaw', 'openclaw', 'agent', '--agent', 'main', '--session-key', session,
-                   '--thinking', 'xhigh', '--message-file', args.container_state_dir + '/' + message.name, '--json', '--timeout', '3600']
+                   '--model', MODEL, '--thinking', THINKING, '--message-file', args.container_state_dir + '/' + message.name, '--json', '--timeout', '3600']
         # No shell and no remote fields in argv. No --deliver: private sessions.
         result = 'uncertain'
         with connect(root / 'inbox.sqlite') as db:

@@ -70,8 +70,15 @@ supersedes stale/recovered backlog before triage. The fixed local policy require
 independent live reproduction before every mutation. Payload strings never choose
 commands, models, tools, session paths or credentials.
 
-Invocation is through `docker exec infraclaw openclaw agent`, without a shell or
-external delivery. The worker requires an explicit terminal success **and** a
+Before each invocation the worker uses `sessions.patch` to persist and verify
+`openai/gpt-6-astra@openai:work` at `high` (the owner's
+`daniel@ktechmidas.net` OAuth account). User-origin model/account pins disable
+the Gateway fallback ladder and account rotation. Invocation is through
+`docker exec infraclaw openclaw agent --model openai/gpt-6-astra --thinking high`,
+without a shell or external delivery. A failed/mismatched pin pauses dispatch
+before invoking a model; never inherit the global CLIProxy default. A per-run
+`.route.json` records the verified selection without credentials.
+The worker requires an explicit terminal success **and** a
 run-specific completion receipt declaring no outstanding child sessions. It never
 claims service recovery from agent completion. On uncertain execution or a
 restart during a run, it pauses; inspect the actual session/operation before
@@ -81,7 +88,8 @@ Easy, reversible **infrastructure/supporting-service** repairs are autonomous
 within the owner's scope. Core/Platform product code, releases, protocol settings
 and state are not autonomous repair targets: collect evidence and report defects
 to the configured Slack alerts channel (`C0C5QSM5FFG`). Difficult auxiliary-service
-or cross-repository issues are discussed with a GPT-6.1/xhigh session carrying the
+or cross-repository issues are discussed with a direct Astra/High session on the
+same pinned work account carrying the
 same limits. Every incident request includes this boundary through the fixed
 `incident-broker/policy.md`; keep the live local authorization record aligned.
 Require durable root-cause correction and recurrence verification, not merely
