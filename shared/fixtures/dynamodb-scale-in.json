@@ -1,0 +1,122 @@
+{
+  "source": "Read-only incident cf3efd7278bb8305ff3b1fc3, 2026-10-02; exact alarm and attached policy semantics, not live health evidence.",
+  "region": "eu-west-1",
+  "alarms": [
+    {
+      "AlarmName": "TargetTracking-table/terraform_locks-AlarmLow-2124bf38-88db-423c-be36-4494aa424ba0",
+      "AlarmArn": "arn:aws:cloudwatch:eu-west-1:854439639386:alarm:TargetTracking-table/terraform_locks-AlarmLow-2124bf38-88db-423c-be36-4494aa424ba0",
+      "Namespace": "AWS/DynamoDB",
+      "MetricName": "ConsumedWriteCapacityUnits",
+      "ComparisonOperator": "LessThanThreshold",
+      "Statistic": "Sum",
+      "StateValue": "ALARM",
+      "StateUpdatedTimestamp": "2023-04-27T08:53:22.466Z",
+      "AlarmConfigurationUpdatedTimestamp": "2023-04-27T08:52:21.563Z",
+      "Threshold": 30.0,
+      "Period": 60,
+      "EvaluationPeriods": 15,
+      "Dimensions": [
+        {
+          "Name": "TableName",
+          "Value": "terraform_locks"
+        }
+      ],
+      "AlarmActions": [
+        "arn:aws:autoscaling:eu-west-1:854439639386:scalingPolicy:b623c936-52a1-490c-849a-02cce07b0e07:resource/dynamodb/table/terraform_locks:policyName/$terraform_locks-scaling-policy:createdBy/89608275-849b-4941-9676-891601b27651"
+      ],
+      "ActionsEnabled": true
+    },
+    {
+      "AlarmName": "TargetTracking-table/terraform_locks-AlarmLow-7db23782-e980-4761-aabf-8c962ae960b8",
+      "AlarmArn": "arn:aws:cloudwatch:eu-west-1:854439639386:alarm:TargetTracking-table/terraform_locks-AlarmLow-7db23782-e980-4761-aabf-8c962ae960b8",
+      "Namespace": "AWS/DynamoDB",
+      "MetricName": "ConsumedReadCapacityUnits",
+      "ComparisonOperator": "LessThanThreshold",
+      "Statistic": "Sum",
+      "StateValue": "ALARM",
+      "StateUpdatedTimestamp": "2023-04-27T08:52:44.172Z",
+      "AlarmConfigurationUpdatedTimestamp": "2023-04-27T08:52:03.623Z",
+      "Threshold": 30.0,
+      "Period": 60,
+      "EvaluationPeriods": 15,
+      "Dimensions": [
+        {
+          "Name": "TableName",
+          "Value": "terraform_locks"
+        }
+      ],
+      "AlarmActions": [
+        "arn:aws:autoscaling:eu-west-1:854439639386:scalingPolicy:5370031a-3106-4c0a-853b-4ef774f09a3e:resource/dynamodb/table/terraform_locks:policyName/$terraform_locks-scaling-policy:createdBy/5988f992-e7a3-4b5a-b328-b76422c4b0cb"
+      ],
+      "ActionsEnabled": true
+    }
+  ],
+  "policies": [
+    {
+      "Alarms": [
+        {
+          "AlarmARN": "arn:aws:cloudwatch:eu-west-1:854439639386:alarm:TargetTracking-table/terraform_locks-AlarmHigh-24f4ea05-81f2-4bbf-b172-e3767f0d8e3b",
+          "AlarmName": "TargetTracking-table/terraform_locks-AlarmHigh-24f4ea05-81f2-4bbf-b172-e3767f0d8e3b"
+        },
+        {
+          "AlarmARN": "arn:aws:cloudwatch:eu-west-1:854439639386:alarm:TargetTracking-table/terraform_locks-AlarmLow-7db23782-e980-4761-aabf-8c962ae960b8",
+          "AlarmName": "TargetTracking-table/terraform_locks-AlarmLow-7db23782-e980-4761-aabf-8c962ae960b8"
+        },
+        {
+          "AlarmARN": "arn:aws:cloudwatch:eu-west-1:854439639386:alarm:TargetTracking-table/terraform_locks-ProvisionedCapacityHigh-c196ee8f-6857-4627-b36b-5b0061172e4b",
+          "AlarmName": "TargetTracking-table/terraform_locks-ProvisionedCapacityHigh-c196ee8f-6857-4627-b36b-5b0061172e4b"
+        },
+        {
+          "AlarmARN": "arn:aws:cloudwatch:eu-west-1:854439639386:alarm:TargetTracking-table/terraform_locks-ProvisionedCapacityLow-c4605bdd-cb65-486d-9e36-05bf54e61d2e",
+          "AlarmName": "TargetTracking-table/terraform_locks-ProvisionedCapacityLow-c4605bdd-cb65-486d-9e36-05bf54e61d2e"
+        }
+      ],
+      "CreationTime": 1682584940.134,
+      "PolicyARN": "arn:aws:autoscaling:eu-west-1:854439639386:scalingPolicy:5370031a-3106-4c0a-853b-4ef774f09a3e:resource/dynamodb/table/terraform_locks:policyName/$terraform_locks-scaling-policy",
+      "PolicyName": "$terraform_locks-scaling-policy",
+      "PolicyType": "TargetTrackingScaling",
+      "ResourceId": "table/terraform_locks",
+      "ScalableDimension": "dynamodb:table:ReadCapacityUnits",
+      "ServiceNamespace": "dynamodb",
+      "TargetTrackingScalingPolicyConfiguration": {
+        "PredefinedMetricSpecification": {
+          "PredefinedMetricType": "DynamoDBReadCapacityUtilization"
+        },
+        "TargetValue": 70.0
+      }
+    },
+    {
+      "Alarms": [
+        {
+          "AlarmARN": "arn:aws:cloudwatch:eu-west-1:854439639386:alarm:TargetTracking-table/terraform_locks-AlarmHigh-ade1e5dc-ceea-4e4b-b24d-bef3067975dd",
+          "AlarmName": "TargetTracking-table/terraform_locks-AlarmHigh-ade1e5dc-ceea-4e4b-b24d-bef3067975dd"
+        },
+        {
+          "AlarmARN": "arn:aws:cloudwatch:eu-west-1:854439639386:alarm:TargetTracking-table/terraform_locks-AlarmLow-2124bf38-88db-423c-be36-4494aa424ba0",
+          "AlarmName": "TargetTracking-table/terraform_locks-AlarmLow-2124bf38-88db-423c-be36-4494aa424ba0"
+        },
+        {
+          "AlarmARN": "arn:aws:cloudwatch:eu-west-1:854439639386:alarm:TargetTracking-table/terraform_locks-ProvisionedCapacityHigh-291af77e-d55a-4610-a2c6-335e1abdc2c9",
+          "AlarmName": "TargetTracking-table/terraform_locks-ProvisionedCapacityHigh-291af77e-d55a-4610-a2c6-335e1abdc2c9"
+        },
+        {
+          "AlarmARN": "arn:aws:cloudwatch:eu-west-1:854439639386:alarm:TargetTracking-table/terraform_locks-ProvisionedCapacityLow-caf63f8f-e5b6-4067-9c26-36fdb4fbea11",
+          "AlarmName": "TargetTracking-table/terraform_locks-ProvisionedCapacityLow-caf63f8f-e5b6-4067-9c26-36fdb4fbea11"
+        }
+      ],
+      "CreationTime": 1682584941.395,
+      "PolicyARN": "arn:aws:autoscaling:eu-west-1:854439639386:scalingPolicy:b623c936-52a1-490c-849a-02cce07b0e07:resource/dynamodb/table/terraform_locks:policyName/$terraform_locks-scaling-policy",
+      "PolicyName": "$terraform_locks-scaling-policy",
+      "PolicyType": "TargetTrackingScaling",
+      "ResourceId": "table/terraform_locks",
+      "ScalableDimension": "dynamodb:table:WriteCapacityUnits",
+      "ServiceNamespace": "dynamodb",
+      "TargetTrackingScalingPolicyConfiguration": {
+        "PredefinedMetricSpecification": {
+          "PredefinedMetricType": "DynamoDBWriteCapacityUtilization"
+        },
+        "TargetValue": 70.0
+      }
+    }
+  ]
+}

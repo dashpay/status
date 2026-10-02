@@ -67,6 +67,38 @@ class Tests(unittest.TestCase):
         self.assertEqual(len(b.claim(self.db, cooldown=0)), 1)
         self.assertEqual(b.claim(self.db, cooldown=0), [])
 
+    def test_readmission_does_not_reuse_previous_attempt_artifacts(self):
+        b.ingest(self.db, envelope(event()))
+        rows = [row for row, _ in b.claim(self.db, cooldown=0)]
+        self.assertEqual(rows[0]['started'], self.db.execute('select started from events').fetchone()['started'])
+        first = b.attempt_id(rows)
+        self.assertEqual(first, b.attempt_id(copy.deepcopy(rows)))
+        with self.db:
+            self.db.execute("update events set status='queued', started=null")
+        rows = [row for row, _ in b.claim(self.db, cooldown=0)]
+        self.assertNotEqual(first, b.attempt_id(rows))
+
+    def test_issue_specific_outcomes_do_not_inherit_other_issue_blocker(self):
+        root = pathlib.Path(self.temp.name)
+        first = event(); second = event(); second['eventId'] = 'b'*24 + ':1'; second['issue']['id'] = 'b'*24
+        b.ingest(self.db, envelope(first, second))
+        run = '1'*24
+        with self.db:
+            self.db.execute("update events set status='completed', result=?, finished=?", (run, time.time()))
+        (root / (run + '.completion.json')).write_text(json.dumps({
+            'runId': run, 'terminal': True, 'pendingChildren': 0, 'outcome': 'blocked',
+            'finishedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            'blocker': 'Wallet disk still open',
+            'issues': {'a'*24: {'outcome': 'resolved', 'blocker': None, 'summary': 'Node revived'}}
+        }))
+        cases = {c['issueId']: c['lastResponse'] for c in b.remediation_snapshot(self.db, root)['cases']}
+        self.assertEqual(cases['a'*24]['outcome'], 'resolved')
+        self.assertIsNone(cases['a'*24]['blocker'])
+        self.assertEqual(cases['b'*24]['outcome'], 'blocked')
+        (root / 'presentations.json').write_text(json.dumps({run: {'issues': {'b'*24: {'outcome': 'INVALID'}}}}))
+        cases = {c['issueId']: c['lastResponse'] for c in b.remediation_snapshot(self.db, root)['cases']}
+        self.assertEqual(cases['b'*24]['outcome'], 'blocked')
+
     def test_board_snapshot_keeps_owner_and_does_not_infer_recovery(self):
         root = pathlib.Path(self.temp.name)
         b.ingest(self.db, envelope(event()))
