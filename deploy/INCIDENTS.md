@@ -142,10 +142,12 @@ cooldown, eligible), plus lifecycle/check status. They contain no credentials.
 Read these before assuming an idle slot means the queue is empty. Receiver-wide
 outage still needs the independent external observer described below.
 
-Easy, reversible **infrastructure/supporting-service** repairs are autonomous
-within the owner's scope. Core/Platform product code, releases, protocol settings
-and state are not autonomous repair targets: collect evidence and report defects
-to the configured Slack alerts channel (`C0C5QSM5FFG`). Difficult auxiliary-service
+Scoped **infrastructure, service and network/wallet operations** are autonomous.
+The owner's latest clarification explicitly allows ProTx/PoSe recovery, mixing
+controls, incident-related wallet/network-state repairs and Core/Platform runtime
+configuration changes. Do not fork/patch Core or Platform product code, libraries
+or custom builds; report product defects to the configured Slack alerts channel
+(`C0C5QSM5FFG`). Operating those products is not modifying their source. Difficult auxiliary-service
 or cross-repository issues are discussed with a direct Astra/High session on the
 same pinned work account carrying the
 same limits. Every incident request includes this boundary through the fixed
@@ -154,9 +156,11 @@ Require durable root-cause correction and recurrence verification, not merely
 file deletion, a restart or additional disk space. For example, diagnose and fix
 broken log rotation/retention rather than repeatedly clear logs. A temporarily
 recovered service with an unresolved cause remains an explicit follow-up/blocker.
-Human CI jobs/workspaces/caches are preserved. No broad prune, data deletion,
-wallet operation, mainnet mutation, destructive reset, or idle-resource deletion
-is authorized by a generic alert. See `incident-broker/policy.md`.
+Human CI jobs/workspaces/caches, wallet backups and unrelated balances/data are
+preserved. No broad prune, destructive reset or idle-resource deletion is
+authorized merely by telemetry. Reverify target/network/wallet identity and live
+ownership before operational repairs; no duplicate active repair. See
+`incident-broker/policy.md` and the deployment-local authorization record.
 
 ## Remediation board
 
