@@ -92,6 +92,15 @@ The same scope cannot run twice. Agents must stay within their assigned scope;
 shared control-plane changes require coordinated exclusive admission. These are
 scheduler reservations and agent constraints, not an OS-level mutation sandbox.
 
+An optional `bindings` array narrows admission for **exact** verified targets,
+not every alert in the same region. Each entry has `scope`, `code`, `target`,
+nonempty `resources`, and `identity` (the expected live identity to reverify).
+For example, a known CloudWatch disk alarm bound to an exact Testnet EC2 ID
+can carry `fleet:testnet` and `ec2:<instance-id>` instead of a broad AWS-region
+lock. Unknown targets keep the conservative scope locks. A missing/mismatched
+live identity is a hold, not permission to follow the new target. Event resource
+locks persist in SQLite at claim time and survive config changes and restart.
+
 Fresh private API readback
 supersedes stale/recovered backlog before triage. The fixed local policy requires
 independent live reproduction before every mutation. Payload strings never choose
@@ -105,15 +114,33 @@ the Gateway model fallback ladder. Invocation is through
 without a shell or external delivery. A failed/mismatched pin pauses dispatch
 before invoking a model; never inherit the global CLIProxy default. A per-run
 `.route.json` records the verified selection without credentials.
-The worker requires an explicit terminal success **and** a
-run-specific completion receipt declaring no outstanding child sessions. It never
+Normal completion requires explicit CLI success and a fresh run-specific
+completion receipt declaring no outstanding child sessions. Uncertain completion
+is independently reconciled from the Gateway, not inferred from elapsed time. It never
 claims service recovery from agent completion. Known-scope uncertainty retains
 its slot/locks and a `HELD-<run>` marker while a disjoint lane may continue.
-Unknown uncertainty, route failure, or restart during an active invocation still
-pauses admission globally. Inspect actual session/operation state before
-resuming. Do not blindly retry a possibly active repair or overwrite timeout
-results to make them look successful. A genuine CLI timeout requires explicit
-operator reconciliation; a later receipt alone is insufficient.
+Unknown uncertainty and route failure pause admission globally. Restart converts
+abandoned `running` rows to `uncertain` with the same run and saved locks; known
+disjoint work may continue. A supervisor exits if an essential thread dies so
+systemd's restart policy can recover instead of silently losing the worker.
+
+Every 30 seconds, read-only lifecycle reconciliation verifies the actual session.
+Two identical terminal observations at least 30 seconds apart, a non-aborted
+terminal run, and a fresh no-children receipt after admission can release a held
+response. Original CLI output (including timeout) remains untouched; a separate
+`.reconciled.json` records the basis. This does not resolve the service incident.
+No release while the session is active or identity/completion evidence is missing.
+If an idle session lacks a valid receipt, one durable, bounded bookkeeping-only
+request is allowed on the required route. It cannot redo the repair, spawn
+children, mutate infrastructure or send messages. The once-per-run marker is
+written before invocation; ambiguous delivery is not retried. A remaining
+ambiguity is visible as attention required, not falsely completed.
+
+`queue-state.json` and authenticated delivery health expose active scopes, queued
+events and admission reasons (paused, capacity, resource conflict, budget,
+cooldown, eligible), plus lifecycle/check status. They contain no credentials.
+Read these before assuming an idle slot means the queue is empty. Receiver-wide
+outage still needs the independent external observer described below.
 
 Easy, reversible **infrastructure/supporting-service** repairs are autonomous
 within the owner's scope. Core/Platform product code, releases, protocol settings

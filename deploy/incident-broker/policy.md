@@ -175,7 +175,19 @@ Do not mutate shared broker/status/gateway, host-wide Docker/runner settings or
 cross-network AWS/IAM/DNS from a concurrent repair. If required, record the
 conflict and defer for coordinated exclusive admission; do not expand scope or
 clear holds yourself. Timeout never establishes completion. Inspect actual
-session/operation state before releasing an uncertain reservation. The producer resolves incidents
+session/operation state before releasing an uncertain reservation. Exact target
+bindings carry independently reviewed identities; reverify the instance/region,
+alarm dimensions and network membership before mutation. A changed/missing
+identity means defer, not inherit the old binding's permission. Locks are saved
+at admission and cannot be shrunk by subsequent configuration edits.
+
+The broker checks uncertain sessions without invoking a model. Two stable
+terminal observations plus a fresh run-specific no-children receipt allow
+automatic response reconciliation, preserving the original timeout output.
+For an idle session missing that receipt, it may send one bookkeeping-only
+request on the pinned route. Do not repeat repairs or investigations during that
+check; if owner work or children remain pending, retain the hold. Never fabricate
+terminal completion to free capacity. The producer resolves incidents
 only from fresh successful observations; never mark one fixed by rewriting status
 files. No new speculative cleanups or unrelated changes.
 
