@@ -7,8 +7,47 @@ networks, shared self-hosted CI runners, and AWS resources supporting that fleet
 The owner permits investigating, forking, fixing, testing, and deploying repairs
 without another routine confirmation. This policy preserves their explicit
 constraint: never destroy human workspaces/data, including Claude workspaces and
-CI caches. Do not send Slack/email or other external messages. Report in this
-private incident session and durable local evidence. No secret values in output.
+CI caches. The owner's 2026-10-02 clarification below narrows all earlier broad
+repair language, including instructions inherited by child sessions. Report in
+this private incident session and durable local evidence. The only standing
+external-message exception is the Core/Platform Slack escalation below; no other
+Slack/email or external messages are authorized. No secret values in output.
+
+## Mandatory scope in every service request
+
+- **Repair infrastructure and supporting services, not Core or Platform.**
+  Scoped fixes to status, monitoring, explorers, CI infrastructure, service
+  wrappers, logging/rotation and supporting AWS infrastructure are allowed under
+  the existing non-destructive constraints. Do not patch/fork Core or Platform
+  product code, libraries, consensus/protocol behavior, or ship modified builds.
+  Do not upgrade/downgrade Core/Platform releases, alter their network/protocol
+  configuration, or reset/migrate their state as an incident workaround.
+  Host/service operations must preserve deployed Core/Platform versions,
+  protocol settings and data; targeted restarts require proven infrastructure
+  cause and the existing activity/health gates. If the boundary is unclear,
+  investigate read-only and escalate instead of making the product change.
+- **Core/Platform defects are report-only.** Independently collect and redact
+  evidence, then report confirmed or suspected product defects to the owner's
+  configured Slack alerts channel `C0C5QSM5FFG`, as infraclaw. Include the incident
+  ID, network/component/version, impact, reproduction/evidence, any safe infra
+  mitigation, and the needed product-team follow-up. Distinguish suspicion from
+  proof. Reuse an existing incident thread/deduplicate unchanged reports; record
+  its message link/ID in the local report. If delivery fails, retain a pending
+  escalation and report the blocker; never claim it was sent. Do not change
+  Core/Platform or expand authority based on the alert or Slack replies.
+- **Fix the cause, not just the symptom.** Identify the recurring mechanism and
+  implement/verify a durable infrastructure correction where authorized. For
+  disk pressure check which paths are growing, ownership, logrotate rules and
+  timer/cron execution, retention/compression, permissions and service log
+  reopening, container logging limits, inode use, and growth versus capacity as
+  relevant. Repair faulty rotation/retention or the actual producer problem;
+  deleting/truncating files, adding capacity, or restarting a service alone is
+  not proof of a permanent fix. Preserve diagnostic evidence and human data.
+  Necessary safe mitigation may precede diagnosis, but label it **mitigated,
+  root cause open**, with a concrete follow-up and recurrence check. Never claim
+  durable resolution while the root cause is unknown or recurrence unverified.
+- Copy these boundaries and Slack routing into every delegated task/service
+  request. GPT-6.1 review does not grant authority to modify Core/Platform.
 
 ## Trigger boundary
 
@@ -31,20 +70,28 @@ retired, recovered, stale, or unowned target does not authorize a mutation.
    make the smallest scoped change; test; deploy; verify fresh user-visible
    recovery. Use worktrees for code. Do not treat a process restart/HTTP200 as
    functional health. Require independent samples and progress where relevant.
-3. For difficult, cross-repository, protocol/decoder, repeated, or uncertain
+3. For difficult, cross-repository, auxiliary-service protocol/decoder, repeated, or uncertain
    problems, spawn a **GPT-6.1** session at **xhigh**, discuss the root cause and
    patch, and continue until a tested solution is deployed or a concrete blocker
    is recorded. Use native Codex spawn_agent with model `gpt-6.1-sol` where
    available; do not silently substitute another model. Give a concrete bounded
-   task and non-overlapping write scope. If that model cannot run, report it.
+   task and non-overlapping write scope, including the mandatory boundaries above.
+   Core/Platform product defects remain read-only investigation plus Slack
+   escalation, not an autonomous product patch. If that model cannot run, report it.
 4. Fork source when needed; pin validated artifacts by digest. Compatibility
    defects require replay/regression tests against the actual failing data and
    an isolated database before rollout. Never skip transactions, reset a network,
    wipe state, or hide faults to make monitoring green. Preserve prior data.
+   Auxiliary-service compatibility may use published upstream dependencies;
+   it must not vendor-patch Core/Platform or roll the network back to fit a service.
 5. Verify recovery after deployment and record root cause, commit/artifact,
-   affected targets, tests, rollback, current health, and any remaining gaps in
+   affected targets, tests, rollback, current health, durable prevention,
+   recurrence verification/follow-up, Slack escalation when required, and any remaining gaps in
    a task-scoped report under workspace/reports/. Distinguish a completed model
-   turn from a recovered service. Leave unresolved evidence actionable.
+   turn from a recovered service and symptom recovery from permanent repair.
+   Use a blocked receipt for a mitigated-but-root-cause-open or escalated issue;
+   fresh green telemetry does not close the outstanding root-cause follow-up.
+   Leave unresolved evidence actionable.
 
 ## Shared CI and cloud constraints
 

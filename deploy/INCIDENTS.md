@@ -77,8 +77,17 @@ claims service recovery from agent completion. On uncertain execution or a
 restart during a run, it pauses; inspect the actual session/operation before
 resuming. Do not blindly retry a possibly active repair.
 
-Easy, reversible repairs are autonomous within the owner's scope. Difficult
-protocol or cross-repository issues are discussed with a GPT-6.1/xhigh session.
+Easy, reversible **infrastructure/supporting-service** repairs are autonomous
+within the owner's scope. Core/Platform product code, releases, protocol settings
+and state are not autonomous repair targets: collect evidence and report defects
+to the configured Slack alerts channel (`C0C5QSM5FFG`). Difficult auxiliary-service
+or cross-repository issues are discussed with a GPT-6.1/xhigh session carrying the
+same limits. Every incident request includes this boundary through the fixed
+`incident-broker/policy.md`; keep the live local authorization record aligned.
+Require durable root-cause correction and recurrence verification, not merely
+file deletion, a restart or additional disk space. For example, diagnose and fix
+broken log rotation/retention rather than repeatedly clear logs. A temporarily
+recovered service with an unresolved cause remains an explicit follow-up/blocker.
 Human CI jobs/workspaces/caches are preserved. No broad prune, data deletion,
 wallet operation, mainnet mutation, destructive reset, or idle-resource deletion
 is authorized by a generic alert. See `incident-broker/policy.md`.
