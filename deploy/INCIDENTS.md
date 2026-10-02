@@ -176,18 +176,37 @@ ACK, which the producer already persists. No separate public receiver, inbound
 control endpoint, session enumeration or executable report parsing is added.
 Missing/stale data is explicit, never an apparently healthy empty queue.
 
-Terminal receipts may include `summary`, `changes` (verified changes only),
-`blocker` and `nextAction`. Historical receipts can be supplemented by a private
+Terminal receipts include `summary`, `changes` (verified changes only),
+`blocker` and `nextAction`, plus `issues` keyed by issue ID with each issue's
+own `outcome` (`resolved`, `blocked`, or `no_change`) and notes. One blocked
+dependency must not contaminate unrelated verified repairs in the same batch.
+Historical receipts can be supplemented by a private
 `presentations.json` in the receiver state directory, keyed by run ID; optional
-`issues` maps override notes by issue ID. This read-only presentation file cannot
-change outcomes, release reservations or resolve monitoring incidents. Never
+`issues` maps override notes and response outcome by issue ID only after explicit
+report/evidence review. It cannot change the stored receipt, release reservations,
+or resolve monitoring incidents. Never
 copy secrets or raw report bodies into it. It is not committed to the repository.
 
-A blocked response remains blocked even after symptom recovery. A resolved
+A blocked response with independently recovered symptoms is shown as
+**Recovered · follow-up**, preserving its root-cause work without counting an
+ongoing blocked outage. A resolved
 response is only shown as verified fixed when independent monitoring also records
 recovery; otherwise it awaits verification. Monitoring-only recovery is labelled
 recovered, without attributing an autonomous fix. Completed investigations are
 not automatically successful repairs, and no dashboard action mutates the queue.
+
+DynamoDB scale-in controls are informational only when fresh complete collection
+proves the exact alarm, action and target-tracking policy/resource association.
+The collector requires read-only `application-autoscaling:DescribeScalingPolicies`
+in the checked-in status IAM policy. Names alone never suppress alarms; denied,
+partial, stale or mismatched evidence keeps the warning actionable. Correction
+of an old generic warning records explicit classification evidence and is shown
+as **Monitoring corrected**, not table recovery. No scaling policy is modified.
+
+Each readmission has a distinct attempt ID derived from its persisted admission
+time. Earlier receipts/results are retained, not overwritten by retrying the
+same event IDs. Receiver updates must wait for active invocations to finish;
+an idle-boundary rollout must preserve current owner authorization and locks.
 
 ## Coverage and remaining limits
 

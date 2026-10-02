@@ -22,7 +22,8 @@
         "ce:GetCostAndUsage",
         "ce:GetCostForecast",
         "ec2:DescribeInstanceStatus",
-        "cloudwatch:DescribeAlarms"
+        "cloudwatch:DescribeAlarms",
+        "application-autoscaling:DescribeScalingPolicies"
       ],
       "Resource": "*"
     }
