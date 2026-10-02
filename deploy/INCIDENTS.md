@@ -64,8 +64,35 @@ instruction, source session and allowed scope. The repository policy alone does
 not authorize infrastructure changes. An `ENABLED` file admits worker execution;
 removing it pauses new work without discarding the inbox.
 
-The worker starts at most one batch, with per-scope sessions and a 15-minute
-cooldown, capped at eight batches/hour and 48/day. Fresh private API readback
+The worker defaults to one batch, with per-scope sessions and a 15-minute
+cooldown, capped globally at eight batches/hour and 48/day. An operator-reviewed
+`concurrency.json` beside the inbox may allow two disjoint batches:
+
+```json
+{
+  "schemaVersion": 1,
+  "maxActive": 2,
+  "scopes": {
+    "network:example-a": ["fleet:example-a", "host:shared-builder"],
+    "network:example-b": ["fleet:example-b"],
+    "ci:shared-builder": ["host:shared-builder"],
+    "aws:example-region": ["fleet:example-a", "fleet:example-b"]
+  }
+}
+```
+
+The map is trusted local deployment configuration, never telemetry. Review
+physical host aliases, network ownership, AWS overlap and shared infrastructure
+before granting concurrency. Pause admission and check existing ownership before
+changing it; never shrink the resource set of an active/uncertain scope. Missing
+configuration preserves serial behavior; malformed configuration admits nothing.
+Unknown scopes run only alone. SQLite atomically reserves capacity and intersecting
+resource locks; running **and uncertain** scopes count toward the two-slot cap.
+The same scope cannot run twice. Agents must stay within their assigned scope;
+shared control-plane changes require coordinated exclusive admission. These are
+scheduler reservations and agent constraints, not an OS-level mutation sandbox.
+
+Fresh private API readback
 supersedes stale/recovered backlog before triage. The fixed local policy requires
 independent live reproduction before every mutation. Payload strings never choose
 commands, models, tools, session paths or credentials.
@@ -73,16 +100,20 @@ commands, models, tools, session paths or credentials.
 Before each invocation the worker uses `sessions.patch` to persist and verify
 `openai/gpt-6-astra@openai:work` at `high` (the owner's
 `daniel@ktechmidas.net` OAuth account). User-origin model/account pins disable
-the Gateway fallback ladder and account rotation. Invocation is through
+the Gateway model fallback ladder. Invocation is through
 `docker exec infraclaw openclaw agent --model openai/gpt-6-astra --thinking high`,
 without a shell or external delivery. A failed/mismatched pin pauses dispatch
 before invoking a model; never inherit the global CLIProxy default. A per-run
 `.route.json` records the verified selection without credentials.
 The worker requires an explicit terminal success **and** a
 run-specific completion receipt declaring no outstanding child sessions. It never
-claims service recovery from agent completion. On uncertain execution or a
-restart during a run, it pauses; inspect the actual session/operation before
-resuming. Do not blindly retry a possibly active repair.
+claims service recovery from agent completion. Known-scope uncertainty retains
+its slot/locks and a `HELD-<run>` marker while a disjoint lane may continue.
+Unknown uncertainty, route failure, or restart during an active invocation still
+pauses admission globally. Inspect actual session/operation state before
+resuming. Do not blindly retry a possibly active repair or overwrite timeout
+results to make them look successful. A genuine CLI timeout requires explicit
+operator reconciliation; a later receipt alone is insufficient.
 
 Easy, reversible **infrastructure/supporting-service** repairs are autonomous
 within the owner's scope. Core/Platform product code, releases, protocol settings

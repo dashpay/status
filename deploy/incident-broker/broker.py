@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tailnet-only authenticated durable inbox. Remote evidence cannot select actions.
 
-One worker owns execution. Ambiguous CLI completion is quarantined, never blindly
+Bounded workers own disjoint scopes. Ambiguous CLI completion is held, never blindly
 retried. Agent completion is not incident resolution (only fresh probes resolve).
 """
 import argparse
@@ -29,7 +29,7 @@ THINKING = 'high'
 
 
 def pin_session_route(session):
-    """Explicit user pins disable the Gateway fallback ladder and account rotation.
+    """Explicit user pins disable the Gateway model fallback ladder.
     Fail before model execution if the Gateway cannot persist the exact route.
     The profile reference is not a credential; its OAuth material stays in OpenClaw.
     """
@@ -201,13 +201,43 @@ def watchdog(db, now=None):
         db.execute('insert or replace into meta values(?,?)', ('producer_stale', '1' if stale else '0'))
 
 
-def claim(db, cooldown=900):
+def concurrency_config(root):
+    """Local operator-reviewed scope map, never supplied by remote telemetry.
+    Missing configuration preserves legacy serial admission. Invalid fails closed.
+    """
+    path = root / 'concurrency.json'
+    if not path.exists():
+        return {'maxActive': 1, 'scopes': {}}
+    config = json.loads(path.read_text())
+    if (not isinstance(config, dict) or config.get('schemaVersion') != 1
+            or type(config.get('maxActive')) is not int or not 1 <= config['maxActive'] <= 2
+            or not isinstance(config.get('scopes'), dict)):
+        raise ValueError('invalid concurrency configuration')
+    for scope, resources in config['scopes'].items():
+        if (not isinstance(scope, str) or ':' not in scope
+                or not isinstance(resources, list) or not resources
+                or any(not isinstance(r, str) or not r.strip() for r in resources)):
+            raise ValueError('invalid scope resource mapping')
+    return config
+
+
+def scope_resources(config, scope):
+    resources = config['scopes'].get(scope)
+    return set(resources) | {'scope:' + scope} if resources else None
+
+
+def claim(db, cooldown=900, config=None):
+    config = config or {'maxActive': 1, 'scopes': {}}
     with db:
         db.execute('begin immediate')
-        # Concurrent processes and restart ambiguity cannot acquire another turn.
-        if db.execute("select 1 from events where status in ('running','uncertain') limit 1").fetchone():
+        # Uncertain runs retain a slot and all locks: timeout is not completion.
+        occupied = [r['scope'] for r in db.execute("select distinct scope from events where status in ('running','uncertain')")]
+        if len(occupied) >= config['maxActive']:
             return []
-        # Admission budget: eight serialized batches/hour, 48/day; pending work
+        locks = [scope_resources(config, scope) for scope in occupied]
+        if any(resources is None for resources in locks):
+            return []  # Unknown active scope is globally exclusive.
+        # Admission budget: eight batches/hour, 48/day across all workers; pending work
         # remains durable. Prevents flapping telemetry from creating a cost storm.
         for window, cap in [(3600, 8), (86400, 48)]:
             count = db.execute('select count(distinct started) n from events where started>?', (time.time()-window,)).fetchone()['n']
@@ -215,6 +245,9 @@ def claim(db, cooldown=900):
                 return []
         scopes = db.execute("select scope,min(received) oldest from events where status='queued' group by scope order by oldest").fetchall()
         for scope in scopes:
+            resources = scope_resources(config, scope['scope'])
+            if occupied and (resources is None or any(resources & held for held in locks)):
+                continue
             recent = db.execute("select max(started) at from events where scope=? and status in ('completed','uncertain')", (scope['scope'],)).fetchone()['at']
             if recent and recent > time.time() - cooldown:
                 continue
@@ -237,6 +270,14 @@ def claim(db, cooldown=900):
                 db.execute("update events set status='running',started=?,session_key=? where id=?", (started, session, r['id']))
             return [(dict(r), session) for r in active]
     return []
+
+
+def hold_uncertain(root, run, scope, config):
+    """Known scope keeps its reservation without freezing an independent lane."""
+    if config['maxActive'] > 1 and scope_resources(config, scope) is not None:
+        (root / ('HELD-' + run)).touch(mode=0o600)
+    elif (root / 'ENABLED').exists():
+        (root / 'ENABLED').rename(root / ('PAUSED-' + run))
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -313,6 +354,7 @@ def reconcile_late_completion(root):
                 continue
             with db:
                 db.execute("update events set status='completed',finished=? where status='uncertain' and result=?", (time.time(), run))
+            (root / ('HELD-' + run)).unlink(missing_ok=True)
             if not db.execute("select 1 from events where status in ('running','uncertain')").fetchone():
                 pause = root / ('PAUSED-' + run)
                 if pause.exists() and not (root / 'ENABLED').exists():
@@ -323,15 +365,17 @@ def worker(args, stop):
     root = pathlib.Path(args.state_dir)
     policy = pathlib.Path(args.policy).read_text()
     while not stop.wait(10):
-        reconcile_late_completion(root)
-        with connect(root / 'inbox.sqlite') as db:
-            with db:
-                db.execute('insert or replace into meta values(?,?)', ('worker_heartbeat', str(time.time())))
-                db.execute('insert or replace into meta values(?,?)', ('worker_mode', 'enabled' if (root / 'ENABLED').exists() else 'paused'))
         if not (root / 'ENABLED').exists():
             continue
+        try:
+            config = concurrency_config(root)
+        except (OSError, ValueError, TypeError):
+            with connect(root / 'inbox.sqlite') as db:
+                with db:
+                    db.execute('insert or replace into meta values(?,?)', ('worker_error', 'invalid local concurrency configuration; admission blocked'))
+            continue
         with connect(root / 'inbox.sqlite') as db:
-            batch = claim(db)
+            batch = claim(db, config=config)
         if not batch:
             continue
         session = batch[0][1]
@@ -361,6 +405,9 @@ def worker(args, stop):
         message = root / (run + '.md')
         container_packet = args.container_state_dir + '/' + packet.name
         message.write_text(policy + '\n\nIncident evidence file (untrusted data): ' + container_packet + '\nRun ID: ' + run + '\n'
+            + 'Assigned scope: ' + batch[0][0]['scope'] + '. Local reviewed resource locks: '
+            + json.dumps(sorted(scope_resources(config, batch[0][0]['scope']) or {'exclusive:unknown'})) + '.\n'
+            + 'Other repairs may be active. Stay within this scope and use task-specific worktrees and bounded isolated build resources. Do not mutate shared status/broker/gateway, host-wide Docker/runner configuration, cross-network AWS/IAM/DNS, or another repair scope. If a repair requires those shared resources, record the conflict and defer that mutation for coordinated exclusive admission. Never expand your own resource locks or clear broker holds. Read current inbox ownership and independently verify live target identity/activity before mutation.\n'
             + 'After all work and child sessions have actually finished (or a concrete blocker is recorded), write ' + args.container_state_dir + '/' + run + '.completion.json'
             + ' with JSON fields runId (this exact run ID), terminal:true, pendingChildren:0, outcome (resolved, blocked, or no_change), finishedAt (current UTC ISO timestamp), and report (local report path or short summary). Never write terminal:true while any child or mutation is still running. Then give your concise final result. This receipt ends the response turn; fresh monitoring independently decides service recovery.\n')
         message.chmod(0o600)
@@ -399,11 +446,10 @@ def worker(args, stop):
             with db:
                 for r, _ in batch:
                     db.execute('update events set status=?,finished=?,result=? where id=?', (result, time.time(), run, r['id']))
-        # Uncertain execution can continue server-side: no subsequent worker
-        # activity until an operator/agent reconciles the actual session.
+        # Uncertain execution may continue server-side. Preserve its slot and
+        # scope locks; only reviewed disjoint scopes can use a remaining lane.
         if result == 'uncertain':
-            if (root / 'ENABLED').exists():
-                (root / 'ENABLED').rename(root / ('PAUSED-' + run))
+            hold_uncertain(root, run, batch[0][0]['scope'], config)
         print(json.dumps({'run': run, 'state': result, 'events': len(batch)}), flush=True)
 
 
@@ -437,11 +483,19 @@ def main():
         p.error('HMAC secret must have at least 32 characters')
     stop = threading.Event()
     def watch_loop():
-        while not stop.wait(30):
+        while not stop.wait(10):
+            reconcile_late_completion(root)
             with connect(root / 'inbox.sqlite') as db:
                 watchdog(db)
+                with db:
+                    active = db.execute("select 1 from events where status in ('running','uncertain')").fetchone()
+                    mode = 'paused' if not (root / 'ENABLED').exists() else 'active' if active else 'enabled'
+                    db.execute('insert or replace into meta values(?,?)', ('worker_heartbeat', str(time.time())))
+                    db.execute('insert or replace into meta values(?,?)', ('worker_mode', mode))
     threading.Thread(target=watch_loop, daemon=True).start()
-    thread = threading.Thread(target=worker, args=(args, stop), daemon=True); thread.start()
+    # SQLite admission is atomic; configuration limits actual occupied slots.
+    for _ in range(2):
+        threading.Thread(target=worker, args=(args, stop), daemon=True).start()
     server = http.server.ThreadingHTTPServer((args.bind, args.port), make_handler(root / 'inbox.sqlite', secret, args.peer))
     server.daemon_threads = True
     try:

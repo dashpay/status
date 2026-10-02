@@ -163,9 +163,19 @@ Do not suppress all Rust failures or treat missing/unreadable logs as a match.
 This is an agent triage rule: the present receiver deduplicates event IDs, not
 cross-run failure signatures, so this rule does not claim zero model calls.
 
-The receiver deduplicates events and runs one batch at a time. It pauses on an
-ambiguous execution/restart instead of retrying a possibly active mutation. Check
-actual session/operation state before resuming. The producer resolves incidents
+The receiver deduplicates events and defaults to one batch at a time. An
+operator-reviewed local scope/resource map can allow at most two disjoint
+repairs. Running and uncertain repairs both retain their slot and resource
+locks; unknown scopes are globally exclusive. A known held scope does not
+block a reviewed independent scope. These are cooperative scheduling locks,
+not a tool sandbox: verify live target ownership and activity before mutations.
+Stay within the assigned scope. Use separate worktrees and bounded task-owned
+build/replay resources; never change another task's containers, data or caches.
+Do not mutate shared broker/status/gateway, host-wide Docker/runner settings or
+cross-network AWS/IAM/DNS from a concurrent repair. If required, record the
+conflict and defer for coordinated exclusive admission; do not expand scope or
+clear holds yourself. Timeout never establishes completion. Inspect actual
+session/operation state before releasing an uncertain reservation. The producer resolves incidents
 only from fresh successful observations; never mark one fixed by rewriting status
 files. No new speculative cleanups or unrelated changes.
 

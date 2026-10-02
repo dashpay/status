@@ -57,6 +57,96 @@ class Tests(unittest.TestCase):
         self.assertEqual(len(b.claim(self.db, cooldown=0)), 1)
         self.assertEqual(b.claim(self.db, cooldown=0), [])
 
+    def concurrent_event(self, letter, scope, domain='network'):
+        e = event(); e['eventId'] = letter * 24 + ':1'
+        e['issue'].update(id=letter * 24, scope=scope, domain=domain)
+        b.ingest(self.db, envelope(e))
+
+    def concurrency(self):
+        return {'schemaVersion': 1, 'maxActive': 2, 'scopes': {
+            'network:sakura': ['sakura', 'build-host'],
+            'network:testnet': ['testnet'],
+            'aws:west': ['testnet', 'sakura'],
+            'ci:builder': ['build-host'],
+            'ci:brian': ['brian-host']}}
+
+    def test_uncertain_scope_holds_slot_but_disjoint_work_runs(self):
+        config = self.concurrency()
+        self.concurrent_event('a', 'sakura')
+        self.assertEqual(len(b.claim(self.db, config=config)), 1)
+        with self.db: self.db.execute("update events set status='uncertain' where scope='network:sakura'")
+        self.concurrent_event('b', 'west', 'aws')
+        self.concurrent_event('c', 'sakura')
+        self.concurrent_event('d', 'builder', 'ci')
+        self.concurrent_event('e', 'testnet')
+        batch = b.claim(self.db, config=config)
+        self.assertEqual([r['scope'] for r, _ in batch], ['network:testnet'])
+        self.concurrent_event('f', 'brian', 'ci')
+        self.assertEqual(b.claim(self.db, config=config), [])  # two occupied slots
+        self.assertEqual(self.db.execute("select status from events where id=?", ('a'*24+':1',)).fetchone()[0], 'uncertain')
+
+    def test_unknown_scope_is_exclusive_even_with_free_slot(self):
+        config = self.concurrency()
+        self.concurrent_event('a', 'unknown')
+        self.assertEqual(len(b.claim(self.db, config=config)), 1)
+        self.concurrent_event('b', 'testnet')
+        self.assertEqual(b.claim(self.db, config=config), [])
+        with self.db: self.db.execute("update events set status='completed' where scope='network:unknown'")
+        self.assertEqual(len(b.claim(self.db, config=config)), 1)
+        self.concurrent_event('c', 'unknown')
+        self.assertEqual(b.claim(self.db, config=config), [])
+
+    def test_configuration_missing_serial_and_invalid_fail_closed(self):
+        root = pathlib.Path(self.temp.name)
+        self.assertEqual(b.concurrency_config(root)['maxActive'], 1)
+        path = root / 'concurrency.json'
+        for invalid in [{}, {'schemaVersion': 1, 'maxActive': 3, 'scopes': {}},
+                        {**self.concurrency(), 'scopes': {'network:sakura': []}},
+                        {**self.concurrency(), 'maxActive': True}]:
+            path.write_text(json.dumps(invalid))
+            with self.assertRaises(ValueError): b.concurrency_config(root)
+        path.write_text(json.dumps(self.concurrency()))
+        self.assertEqual(b.concurrency_config(root), self.concurrency())
+
+    def test_known_uncertainty_never_enables_operator_pause(self):
+        root = pathlib.Path(self.temp.name); config = self.concurrency()
+        b.hold_uncertain(root, 'known', 'network:sakura', config)
+        self.assertTrue((root/'HELD-known').exists())
+        self.assertFalse((root/'ENABLED').exists())
+        (root/'ENABLED').touch()
+        b.hold_uncertain(root, 'known', 'network:sakura', config)
+        self.assertTrue((root/'ENABLED').exists())
+        b.hold_uncertain(root, 'unknown', 'network:other', config)
+        self.assertFalse((root/'ENABLED').exists())
+        self.assertTrue((root/'PAUSED-unknown').exists())
+
+    def test_parallel_claims_respect_two_slots_atomically(self):
+        config = self.concurrency()
+        for letter, scope, domain in [('a', 'sakura', 'network'), ('b', 'testnet', 'network'), ('c', 'brian', 'ci')]:
+            self.concurrent_event(letter, scope, domain)
+        barrier = threading.Barrier(3); results = []; errors = []
+        def attempt():
+            try:
+                with b.connect(pathlib.Path(self.temp.name)/'inbox.sqlite') as db:
+                    barrier.wait(timeout=5)
+                    results.append(b.claim(db, config=config))
+            except Exception as error: errors.append(str(error))
+        threads = [threading.Thread(target=attempt) for _ in range(3)]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join(timeout=10)
+        self.assertEqual(errors, [])
+        self.assertEqual(sum(bool(result) for result in results), 2)
+        self.assertEqual(self.db.execute("select count(*) from events where status='running'").fetchone()[0], 2)
+
+    def test_concurrent_budget_remains_global(self):
+        config = self.concurrency()
+        for i in range(8):
+            with self.db:
+                self.db.execute('insert into events(id,body,received,scope,status,started) values(?,?,?,?,?,?)',
+                                (str(i), '{}', time.time(), 'ci:old', 'completed', time.time()-i))
+        self.concurrent_event('a', 'testnet')
+        self.assertEqual(b.claim(self.db, config=config), [])
+
     def test_resolved_backlog_never_runs_and_info_is_review_only(self):
         b.ingest(self.db, envelope(event(), event(2, transition='resolved')))
         self.assertEqual(b.claim(self.db, cooldown=0), [])
