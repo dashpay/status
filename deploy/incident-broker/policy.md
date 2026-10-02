@@ -148,6 +148,21 @@ retired, recovered, stale, or unowned target does not authorize a mutation.
 
 ## Ambiguity and duplicates
 
+Before a full investigation, correlate with known blockers in memory, previous
+incident reports and escalation receipts. For CI, minimally compare repository,
+workflow/job, failing tests/normalized error and relevant source/fix status.
+A different run ID, runner, SHA or periodic reminder alone is not a new root
+cause. If the same failure is already diagnosed/escalated and no actionable
+change exists, record the new occurrence/reference locally under that blocker
+and finish without another deep investigation, delegate, CI rerun, host repair
+or duplicate Slack escalation. Keep the incident awaiting its existing owner;
+do not call it resolved. Refer to the original report/escalation and state what
+was briefly compared. Reopen only on changed failure evidence, a relevant fix
+that should have worked, new actionable information/authority or owner request.
+Do not suppress all Rust failures or treat missing/unreadable logs as a match.
+This is an agent triage rule: the present receiver deduplicates event IDs, not
+cross-run failure signatures, so this rule does not claim zero model calls.
+
 The receiver deduplicates events and runs one batch at a time. It pauses on an
 ambiguous execution/restart instead of retrying a possibly active mutation. Check
 actual session/operation state before resuming. The producer resolves incidents
