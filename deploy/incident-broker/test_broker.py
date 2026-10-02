@@ -67,6 +67,39 @@ class Tests(unittest.TestCase):
         self.assertEqual(len(b.claim(self.db, cooldown=0)), 1)
         self.assertEqual(b.claim(self.db, cooldown=0), [])
 
+    def test_board_snapshot_keeps_owner_and_does_not_infer_recovery(self):
+        root = pathlib.Path(self.temp.name)
+        b.ingest(self.db, envelope(event()))
+        run = '1' * 24
+        with self.db:
+            self.db.execute("update events set status='completed', result=?, finished=?", (run, time.time()))
+        (root / (run + '.completion.json')).write_text(json.dumps({
+            'runId': run, 'terminal': True, 'pendingChildren': 0, 'outcome': 'blocked',
+            'finishedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            'report': '/private/report.md', 'summary': 'Partial mitigation', 'changes': ['Rotation repaired'],
+        }))
+        (root / 'presentations.json').write_text(json.dumps({run: {'blocker': 'Owner action needed'}}))
+        b.ingest(self.db, envelope(event(2)))
+        with self.db:
+            self.db.execute("update events set status='uncertain', result=?, started=? where id=?",
+                            ('2' * 24, time.time(), 'a' * 24 + ':2'))
+        b.ingest(self.db, envelope(event(3)))
+        before = [dict(r) for r in self.db.execute('select * from events')]
+        result = b.remediation_snapshot(self.db, root)
+        self.assertEqual(len(result['cases']), 1)
+        case = result['cases'][0]
+        self.assertTrue(case['active'])
+        self.assertEqual(case['runId'], '2' * 24)
+        self.assertEqual(case['pendingEvents'], 1)
+        self.assertEqual(case['lastResponse']['outcome'], 'blocked')
+        self.assertEqual(case['lastResponse']['blocker'], 'Owner action needed')
+        self.assertEqual(case['lastResponse']['changes'], ['Rotation repaired'])
+        self.assertNotIn('/private/', json.dumps(result))
+        self.assertEqual(before, [dict(r) for r in self.db.execute('select * from events')])
+        # Legacy/malformed presentation files must not interrupt ACK delivery.
+        (root / 'presentations.json').write_text('[]')
+        self.assertEqual(b.health(self.db, root)['remediation']['cases'][0]['lastResponse']['summary'], 'Partial mitigation')
+
     def concurrent_event(self, letter, scope, domain='network'):
         e = event(); e['eventId'] = letter * 24 + ':1'
         e['issue'].update(id=letter * 24, scope=scope, domain=domain)

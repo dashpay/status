@@ -39,7 +39,7 @@ let backoff = 1000;
 function ensureStream() {
   if (source) return;
   source = new EventSource('/api/stream');
-  for (const type of ['network', 'op', 'settings', 'ci', 'aws']) source.addEventListener(type, (e) => {
+  for (const type of ['network', 'op', 'settings', 'ci', 'aws', 'remediation']) source.addEventListener(type, (e) => {
     const data = JSON.parse(e.data);
     listeners.forEach((l) => l(type, data));
   });

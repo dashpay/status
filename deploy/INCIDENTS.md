@@ -158,6 +158,33 @@ Human CI jobs/workspaces/caches are preserved. No broad prune, data deletion,
 wallet operation, mainnet mutation, destructive reset, or idle-resource deletion
 is authorized by a generic alert. See `incident-broker/policy.md`.
 
+## Remediation board
+
+`/remediation` shows unique issues, queued event revisions, active work, waiting
+reasons, blockers and recovery. `/api/remediation` is read-only; the existing
+incident API bearer token or administrator session enables curated repair notes.
+Public responses omit target identities, session keys, resource locks and notes,
+and exclude non-visible networks from both cases and counts. SSE invalidation
+contains only a timestamp; 15-second polling provides a reconnect fallback.
+
+The receiver adds a bounded remediation snapshot to its authenticated delivery
+ACK, which the producer already persists. No separate public receiver, inbound
+control endpoint, session enumeration or executable report parsing is added.
+Missing/stale data is explicit, never an apparently healthy empty queue.
+
+Terminal receipts may include `summary`, `changes` (verified changes only),
+`blocker` and `nextAction`. Historical receipts can be supplemented by a private
+`presentations.json` in the receiver state directory, keyed by run ID; optional
+`issues` maps override notes by issue ID. This read-only presentation file cannot
+change outcomes, release reservations or resolve monitoring incidents. Never
+copy secrets or raw report bodies into it. It is not committed to the repository.
+
+A blocked response remains blocked even after symptom recovery. A resolved
+response is only shown as verified fixed when independent monitoring also records
+recovery; otherwise it awaits verification. Monitoring-only recovery is labelled
+recovered, without attributing an autonomous fix. Completed investigations are
+not automatically successful repairs, and no dashboard action mutates the queue.
+
 ## Coverage and remaining limits
 
 | Domain | Current evidence | Explicit limits |

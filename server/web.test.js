@@ -288,3 +288,22 @@ test('issue API is additive, fails visibly when stale, and limits private detail
     assert.equal(full.issues[0].evidence.key, 'PRIVATE-EVIDENCE'); assert.equal(full.delivery.pending, 0);
   } finally { w.close(); }
 });
+
+test('remediation board is read-only and its notes require administrator access', async () => {
+  const w = await start();
+  try {
+    const at = new Date().toISOString();
+    writeFileSync(join(w.dataDir, 'incidents', 'state.json'), JSON.stringify({ generatedAt: at, outbox: [],
+      issues: [{ id: 'a'.repeat(24), domain: 'network', scope: 'testnet', target: 'PRIVATE-HOST', code: 'host_health', severity: 'critical', status: 'open' }],
+      delivery: { receiver: { remediation: { schemaVersion: 1, generatedAt: at, enabled: true, cases: [
+        { issueId: 'a'.repeat(24), workerState: 'completed', lastResponse: { outcome: 'blocked', summary: 'PRIVATE-NOTE' } },
+      ] } } } }));
+    const anonymous = await w.req('/api/remediation'); assert.equal(anonymous.status, 200);
+    assert.doesNotMatch(await anonymous.text(), /PRIVATE/);
+    const invalid = await w.req('/api/remediation', { headers: { authorization: 'Bearer invented' } });
+    assert.doesNotMatch(await invalid.text(), /PRIVATE/);
+    await w.login(); const full = await (await w.req('/api/remediation')).json();
+    assert.equal(full.public, false); assert.equal(full.cases[0].summary, 'PRIVATE-NOTE');
+    assert.equal(full.cases[0].stage, 'blocked');
+  } finally { w.close(); }
+});

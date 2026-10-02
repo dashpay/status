@@ -126,7 +126,61 @@ def ingest(db, payload):
     return [e['eventId'] for e in events]
 
 
-def health(db):
+def remediation_snapshot(db, root):
+    """Read-only board feed. No report bodies, credentials or executable input.
+    Receipts describe response outcomes, never independent service recovery.
+    """
+    groups = {}
+    for row in db.execute('select * from events order by received'):
+        issue = json.loads(row['body'])['issue']
+        if issue['code'] == 'pipeline_self_test':
+            continue
+        groups.setdefault(issue['id'], []).append(dict(row))
+    try:
+        presentations = json.loads((root / 'presentations.json').read_text())
+    except (OSError, ValueError):
+        presentations = {}
+    if not isinstance(presentations, dict): presentations = {}
+    cases = []
+    scheduler_row = db.execute("select value from meta where key='scheduler'").fetchone()
+    scheduler = json.loads(scheduler_row['value']) if scheduler_row else {}
+    waits = {r['eventId']: r for r in scheduler.get('queued', [])}
+    def stamp(value):
+        return datetime.datetime.fromtimestamp(value, datetime.timezone.utc).isoformat() if value else None
+    def bounded(value, limit=800):
+        return value[:limit] if isinstance(value, str) else None
+    for ident, rows in groups.items():
+        latest = max(rows, key=lambda r: int(r['id'].split(':')[1]))
+        active = [r for r in rows if r['status'] in {'running', 'uncertain'}]
+        current = max(active, key=lambda r: r['started'] or 0) if active else latest
+        finished = [r for r in rows if r['status'] == 'completed' and r['result']]
+        previous = max(finished, key=lambda r: r['finished'] or 0) if finished else None
+        run = previous['result'] if previous else None
+        receipt = receipt_data(root, run) if run and re.fullmatch(r'[a-f0-9]{24}', run) else None
+        detail = presentations.get(run, {}) if run else {}
+        if not isinstance(detail, dict): detail = {}
+        detail = {**(receipt or {}), **detail}
+        if isinstance(detail.get('issues'), dict) and isinstance(detail['issues'].get(ident), dict):
+            detail = {**detail, **detail['issues'][ident]}
+        wait = waits.get(latest['id'], {})
+        life = db.execute('select note from lifecycle where run=?', (current['result'],)).fetchone() if current['result'] else None
+        cases.append({'issueId': ident, 'eventId': latest['id'], 'workerState': current['status'],
+                      'active': bool(active), 'runId': current['result'], 'sessionKey': current['session_key'],
+                      'receivedAt': stamp(latest['received']), 'startedAt': stamp(current['started']),
+                      'finishedAt': stamp(previous['finished']) if previous else None,
+                      'pendingEvents': sum(r['status'] == 'queued' for r in rows),
+                      'waitReason': wait.get('reason'), 'heldBy': wait.get('heldBy', []),
+                      'retryAt': stamp(wait.get('retryAt')), 'lifecycle': bounded(life['note']) if life else None,
+                      'lastResponse': {'runId': run, 'outcome': receipt['outcome'],
+                                       'summary': bounded(detail.get('summary')), 'blocker': bounded(detail.get('blocker')),
+                                       'nextAction': bounded(detail.get('nextAction')),
+                                       'changes': [bounded(x, 300) for x in detail.get('changes', [])[:8] if isinstance(x, str)] if isinstance(detail.get('changes'), list) else []}
+                                      if receipt else None})
+    return {'schemaVersion': 1, 'generatedAt': stamp(time.time()), 'enabled': (root / 'ENABLED').exists(),
+            'maxActive': scheduler.get('maxActive'), 'cases': cases[-1000:], 'truncated': len(cases) > 1000}
+
+
+def health(db, root=None):
     rows = db.execute('select status,count(*) n from events group by status').fetchall()
     heartbeat = db.execute("select value from meta where key='last_heartbeat'").fetchone()
     worker = db.execute("select value from meta where key='worker_heartbeat'").fetchone()
@@ -134,7 +188,8 @@ def health(db):
     oldest = db.execute("select min(received) at from events where status='queued'").fetchone()['at']
     scheduler = db.execute("select value from meta where key='scheduler'").fetchone()
     return {'status': 'ok', 'workerAt': float(worker['value']) if worker else None, 'workerMode': mode['value'] if mode else 'unknown', 'oldestQueuedAt': oldest, 'counts': {r['status']: r['n'] for r in rows}, 'lastHeartbeat': float(heartbeat['value']) if heartbeat else None,
-            'scheduler': json.loads(scheduler['value']) if scheduler else None}
+            'scheduler': json.loads(scheduler['value']) if scheduler else None,
+            **({'remediation': remediation_snapshot(db, root)} if root else {})}
 
 
 def make_handler(db_path, secret, allowed_peer):
@@ -178,7 +233,7 @@ def make_handler(db_path, secret, allowed_peer):
             try:
                 with connect(db_path) as db:
                     accepted = ingest(db, json.loads(raw))
-                    result = health(db)
+                    result = health(db, pathlib.Path(db_path).parent)
             except (ValueError, UnicodeError, TypeError):
                 return self.reply(400, {'error': 'invalid or conflicting event'})
             return self.reply(202, {'accepted': accepted, 'health': result})
@@ -591,6 +646,8 @@ def worker(args, stop):
             + 'Other repairs may be active. Stay within this scope and use task-specific worktrees and bounded isolated build resources. Do not mutate shared status/broker/gateway, host-wide Docker/runner configuration, cross-network AWS/IAM/DNS, or another repair scope. If a repair requires those shared resources, record the conflict and defer that mutation for coordinated exclusive admission. Never expand your own resource locks or clear broker holds. Read current inbox ownership and independently verify live target identity/activity before mutation.\n'
             + 'After all work and child sessions have actually finished (or a concrete blocker is recorded), write ' + args.container_state_dir + '/' + run + '.completion.json'
             + ' with JSON fields runId (this exact run ID), terminal:true, pendingChildren:0, outcome (resolved, blocked, or no_change), finishedAt (current UTC ISO timestamp), and report (local report path or short summary). Never write terminal:true while any child or mutation is still running. Then give your concise final result. This receipt ends the response turn; fresh monitoring independently decides service recovery.\n')
+        with message.open('a') as stream:
+            stream.write('For the administrator remediation board, also include a concise redacted summary, changes (array of verified changes only), blocker (if any), and nextAction in the receipt. Do not include secrets, raw logs, private personal data or speculative fixes. A blocked response can list partial changes without calling the whole incident fixed.\n')
         message.chmod(0o600)
         try:
             route = pin_session_route(session)

@@ -176,6 +176,61 @@ try {
   const awsText = await anon.locator('body').innerText();
   assert.ok(!awsText.includes('192.0.2.9') && !awsText.includes('dn-testnet-masternode-1') && !awsText.includes('Worth a look'), 'public AWS has totals only');
   await anon.screenshot({ path: 'artifacts/aws-public.png', fullPage: true });
+
+  // Remediation joins monitoring recovery with durable response outcomes.
+  // A completed blocked response is never displayed as a successful fix.
+  const board = { generatedAt: at, outbox: [], issues: [], delivery: { lastAckAt: at, receiver: { workerAt: Date.parse(at) / 1000, remediation: {
+    schemaVersion: 1, generatedAt: at, enabled: true, maxActive: 2, cases: [],
+  } } } };
+  for (const [id, workerState, outcome, status] of [
+    ['working', 'running', null, 'open'], ['queued', 'queued', null, 'open'],
+    ['blocked', 'completed', 'blocked', 'resolved'], ['fixed', 'completed', 'resolved', 'resolved'],
+    ['verifying', 'completed', 'resolved', 'open'],
+  ]) {
+    board.issues.push({ id, domain: 'network', scope: 'testnet', target: `private-${id}-host`,
+      code: 'host_health', severity: 'warning', status, firstSeen: at, lastSeen: at, resolvedAt: status === 'resolved' ? at : null });
+    board.delivery.receiver.remediation.cases.push({ issueId: id, workerState, active: id === 'working',
+      pendingEvents: id === 'queued' ? 2 : 0, waitReason: 'resource_conflict',
+      lastResponse: outcome ? { outcome, summary: `Private ${id} response`, blocker: id === 'blocked' ? 'Root cause still open' : null,
+        nextAction: 'Existing owner retains follow-up', changes: ['Verified supporting-service correction'] } : null });
+  }
+  const boardFile = join(dataDir, 'incidents', 'state.json');
+  writeFileSync(boardFile, JSON.stringify(board));
+  const boardErrors = [];
+  page.on('pageerror', (error) => boardErrors.push(error.message));
+  for (const [label, viewport] of [['desktop', { width: 1600, height: 1000 }], ['mobile', { width: 390, height: 844 }]]) {
+    await page.setViewportSize(viewport);
+    await page.getByRole('link', { name: 'Remediation', exact: true }).click();
+    await page.getByText('Autonomous dispatch enabled').waitFor();
+    await page.locator('[data-issue-id="blocked"] summary').click();
+    await page.getByText('Root cause still open').waitFor();
+    assert.ok((await page.locator('[data-issue-id="blocked"]').innerText()).includes('Blocked'));
+    await page.evaluate(() => scrollTo(0, 0));
+    await page.screenshot({ path: `artifacts/remediation-${label}.png`, fullPage: true });
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `${label}: remediation fits viewport`);
+    await page.getByLabel('Remediation state').selectOption('fixed');
+    assert.equal(await page.locator('[data-issue-id]').count(), 1);
+    assert.ok(await page.locator('[data-issue-id="fixed"]').count());
+    await page.getByLabel('Remediation state').selectOption('all');
+    await page.getByLabel('Filter remediation issues').fill('private-queued-host');
+    assert.equal(await page.locator('[data-issue-id]').count(), 1);
+    await page.getByLabel('Filter remediation issues').fill('');
+    // Reset details for the next viewport without reloading identity.
+    await page.goto(origin + '/aws');
+  }
+  await anon.goto(origin + '/remediation');
+  await anon.getByText('Autonomous dispatch enabled').waitFor();
+  const publicBoard = await anon.locator('body').innerText();
+  assert.ok(!publicBoard.includes('private-') && !publicBoard.includes('Private blocked response') && !publicBoard.includes('Root cause still open'));
+  await anon.screenshot({ path: 'artifacts/remediation-public.png', fullPage: true });
+  // Actual server file watcher -> SSE -> client refresh, without navigation.
+  board.delivery.receiver.remediation.enabled = false;
+  writeFileSync(boardFile, JSON.stringify(board));
+  await anon.getByText('New dispatch paused', { exact: true }).waitFor({ timeout: 10_000 });
+  board.delivery.receiver.remediation.generatedAt = '2020-01-01T00:00:00Z';
+  writeFileSync(boardFile, JSON.stringify(board));
+  await anon.getByText('Remediation status is stale or unavailable').waitFor({ timeout: 10_000 });
+  assert.deepEqual(boardErrors, []);
   await anon.close();
   console.log(JSON.stringify({ public: 'passed', deployRequest: q.id, settings: 'user added' }));
 } finally {
