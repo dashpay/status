@@ -7,5 +7,6 @@ import 'dotenv/config';
 const mode = process.env.STATUS_MODE || (process.env.INVENTORY_PATH ? 'legacy' : 'web');
 if (mode === 'agent') await import('../agent/index.js');
 else if (mode === 'legacy') await import('./legacy.js');
+else if (mode === 'incidents') (await import('./incident-service.js')).startIncidents();
 else if (mode === 'web') (await import('./web.js')).startWeb();
 else throw new Error(`unknown STATUS_MODE ${mode}`);

@@ -13,7 +13,7 @@ test('report-backed networks never claim health without a fresh report', () => {
     assert.equal(evaluateNetwork(mainnet, state, settings, now).level, 'unreachable');
   }
   const state = { generatedAt: new Date(now).toISOString(), hosts: [{
-    name: 'mainnet-observer', role: 'fullnode', state: 'running', probe: { ok: true, data: {
+    name: 'mainnet-observer', role: 'fullnode', state: 'running', probe: { ok: true, at: new Date(now).toISOString(), data: {
       core: { chain: 'main', blocks: 100 }, mainnet: { chainLockHeight: 100, chainLockAgeSeconds: 1, bigBans: 0, platformHeight: 50, quorumServer: { status: 200, listed: 10, quorums: 4 } },
     } },
   }] };
@@ -67,6 +67,72 @@ test('evaluation gives a level with concrete reasons, and orphan containers are 
   const op = projectNetwork(network, e, { hosts: [] }, true);
   assert.equal(op.hosts[0].instanceId, 'i-1');
   assert.match(op.hosts[3].reasons[0].text, /ETIMEDOUT/);
+});
+
+test('only explicit successful one-shot migrations are complete; shared-image failures are not orphans', () => {
+  const migration = { name: 'services-explorer-migrate-1', service: 'explorer-migrate', repo: 'ghcr.io/pshenmic/platform-explorer-indexer', running: false, state: 'exited', exitCode: 0, restartPolicy: 'no', oneShot: true };
+  const indexer = { ...migration, name: 'services-explorer-indexer-1', service: 'explorer-indexer', oneShot: false, running: true, state: 'running' };
+  const row = (m) => evaluateNetwork(network, { hosts: [evo('a', { containers: [m, indexer] })] }, settings).rows[0];
+  assert.equal(row(migration).level, 'ok');
+  assert.match(row(migration).reasons[0].text, /one-shot completed successfully/);
+  for (const changes of [{ exitCode: 1 }, { exitCode: undefined }, { restartPolicy: 'always' }, { restartPolicy: undefined }, { restarting: true }]) {
+    assert.equal(row({ ...migration, ...changes }).level, 'down', JSON.stringify(changes));
+  }
+  assert.equal(row({ ...migration, oneShot: false }).level, 'down', 'ordinary stopped service is not completed by a zero exit');
+  const onlyMigration = evaluateNetwork(network, { hosts: [evo('a', { containers: [{ ...indexer, running: false, state: 'restarting' }, { ...migration, running: true, state: 'running' }] })] }, settings).rows[0];
+  assert.equal(onlyMigration.level, 'down', 'a running migration does not supersede a crashed indexer with the same image');
+});
+
+test('explorer availability fails closed for crashes, unhealthy processes and missing indexing heights', () => {
+  const explorer = { status: 200, indexerRunning: true, indexerRestarting: false, indexedHeight: 50, chainHeight: 50 };
+  const row = (changes) => evaluateNetwork(network, { hosts: [evo('a', { explorer: { ...explorer, ...changes } })] }, settings).rows[0];
+  assert.equal(row({}).level, 'ok');
+  for (const changes of [{ indexerRunning: false }, { indexerRestarting: true }, { indexerState: 'restarting' }, { indexerHealth: 'unhealthy' }, { status: 500 }]) assert.equal(row(changes).level, 'down');
+  for (const changes of [{ indexerHealth: 'starting' }, { chainHeight: null }, { indexedHeight: null }, { indexedHeight: 0 }, { chainHeight: '50' }, { indexedHeight: 51 }, { chainHeight: 80 }]) assert.equal(row(changes).level, 'warn', JSON.stringify(changes));
+  const reference = evo('tip', { tenderdash: { height: 100 } });
+  assert.equal(evaluateNetwork(network, { hosts: [evo('a', { explorer }), reference] }, settings).rows[0].level, 'warn', 'stale explorer chain height cannot hide network lag');
+});
+
+test('missing, malformed and future host timestamps cannot certify explorer or network health', () => {
+  const now = Date.parse('2026-10-02T10:00:00Z');
+  for (const at of [undefined, 'invalid', new Date(now + 90_000).toISOString()]) {
+    const h = evo('a'); h.probe.at = at;
+    const e = evaluateNetwork(network, { hosts: [h], generatedAt: new Date(now).toISOString() }, settings, now);
+    assert.equal(e.rows[0].level, 'unreachable');
+    assert.equal(e.summary.platform, null);
+  }
+});
+
+test('explorer runtime identity stays private while readiness diagnostics remain public', () => {
+  const h = evo('a', { explorer: { status: 200, indexerRunning: true, indexedHeight: 50, chainHeight: 50, indexerId: 'private-container-identity', indexerRestarting: false } });
+  const state = { hosts: [h] }, e = evaluateNetwork(network, state, settings);
+  assert.equal(projectNetwork(network, e, state, false).hosts[0].explorer.indexerId, undefined);
+  assert.equal(projectNetwork(network, e, state, true).hosts[0].explorer.indexerId, 'private-container-identity');
+});
+
+test('explorer repair readiness requires fresh independent indexing progress and bounded lag under the same identity', async () => {
+  const { explorerReadiness } = await import('./evaluate.js');
+  const now = Date.parse('2026-10-02T10:00:00Z');
+  const sample = (at, indexedHeight, chainHeight) => ({ instanceId: 'i-wallet', state: 'running', probe: { ok: true, at: new Date(at).toISOString(), data: { explorer: {
+    status: 200, indexerRunning: true, indexerState: 'running', indexerRestarting: false, indexerHealth: null, indexerId: 'idx-1', indexerRestarts: 3, network: 'dash-devnet-sakura-g1', indexedHeight, chainHeight,
+  } } } });
+  const previous = sample(now - 30_000, 100, 110), current = sample(now, 110, 115);
+  assert.deepEqual(explorerReadiness(current, previous, 10, now), { ready: true });
+  assert.equal(explorerReadiness(current, null, 10, now).ready, false);
+  assert.equal(explorerReadiness(current, current, 10, now).ready, false);
+  assert.equal(explorerReadiness(current, previous, -1, now).ready, false);
+  assert.equal(explorerReadiness(current, previous, 10, now + 240_000).ready, false);
+  const invalidPrevious = structuredClone(previous); invalidPrevious.probe.data.explorer.chainHeight = 99;
+  assert.equal(explorerReadiness(current, invalidPrevious, 10, now).ready, false);
+  for (const changes of [{ indexedHeight: 100 }, { indexedHeight: 99 }, { indexedHeight: 116 }, { chainHeight: 109 }, { chainHeight: 150 }, { indexedHeight: null }, { indexerRunning: false }, { indexerState: 'restarting' }, { indexerRestarting: true }, { indexerHealth: 'starting' }, { indexerHealth: 'unhealthy' }, { indexerHealth: 'unknown' }, { indexerId: 'replaced' }, { indexerRestarts: 4 }, { indexerRestarts: undefined }, { network: 'dash-devnet-sakura-g2' }, { status: 500 }]) {
+    const bad = structuredClone(current);
+    Object.assign(bad.probe.data.explorer, changes);
+    assert.equal(explorerReadiness(bad, previous, 10, now).ready, false, JSON.stringify(changes));
+  }
+  const replacedHost = { ...current, instanceId: 'i-replacement' };
+  assert.equal(explorerReadiness(replacedHost, previous, 10, now).ready, false);
+  const future = sample(now + 90_000, 120, 125);
+  assert.equal(explorerReadiness(future, previous, 10, now).ready, false);
 });
 
 test('roles: admins cover everything, viewers never operate, one admin must remain', async () => {

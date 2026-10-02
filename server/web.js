@@ -9,6 +9,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createAuth } from './auth.js';
 import { createCi } from './ci.js';
+import { loadIncidentState, publicIssues, apiAuthorized, readSecret } from './incidents.js';
+import { remediationView } from './remediation.js';
 import { publicInventory } from './aws-public.js';
 import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, loadSettings, memberOf, operatorFor, readJSON, saveSettings, validateSettings, writeAtomic } from '../shared/settings.js';
 import { expectations } from '../shared/monitoring.js';
@@ -92,7 +94,24 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
       problems: hosts.filter((h) => !['ok', 'stopped'].includes(h.level) && !h.duplicate).map((h) => ({ name: h.name, role: h.role, level: h.level, reason: h.reasons.find((r) => r.level === h.level)?.text })) };
   }
 
+  // Additive API: public projection; complete evidence only for admins or the
+  // dedicated read-only machine token. A member grant is not account-wide access.
+  app.get('/api/issues', (req, res) => {
+    reloadSettings();
+    const state = loadIncidentState(dataDir);
+    const full = isAdmin(req) || apiAuthorized(req.get('authorization'), readSecret(process.env.INCIDENT_API_TOKEN_FILE));
+    const body = full && state ? { schemaVersion: 1, generatedAt: state.generatedAt, issues: state.issues, sources: state.sources, delivery: { ...state.delivery, pending: state.outbox?.length || 0, quarantined: state.quarantined?.length || 0 } } : publicIssues(state, visible(req).map((n) => n.name));
+    const observedAt = Date.parse(state?.generatedAt);
+    const stale = !Number.isFinite(observedAt) || clock() - observedAt > 180_000 || observedAt > clock() + 60_000;
+    res.status(stale ? 503 : 200).json({ ...body, stale });
+  });
+
   app.get('/api/health', (req, res) => res.json({ service: 'dash-status', status: 'ok' }));
+  app.get('/api/remediation', (req, res) => {
+    reloadSettings();
+    const full = isAdmin(req) || apiAuthorized(req.get('authorization'), readSecret(process.env.INCIDENT_API_TOKEN_FILE));
+    res.json(remediationView(loadIncidentState(dataDir), { full, visibleNetworks: visible(req).map((n) => n.name), now: clock() }));
+  });
   app.get('/api/me', (req, res) => {
     const u = user(req);
     const a = accessFor(settings, u);
@@ -152,7 +171,14 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     debounce.set('aws', setTimeout(() => push('aws', { at: new Date(clock()).toISOString() }), 500));
   };
   const watchers = [];
-  for (const [dir, fn] of [[dirs.state, onStateFile], [dirs.ops, onOpFile], [awsDir, onAwsFile]]) {
+  const incidentsDir = join(dataDir, 'incidents');
+  mkdirSync(incidentsDir, { recursive: true });
+  const onIncidentFile = (file) => {
+    if (file !== 'state.json') return;
+    clearTimeout(debounce.get('remediation'));
+    debounce.set('remediation', setTimeout(() => push('remediation', { at: new Date(clock()).toISOString() }), 300));
+  };
+  for (const [dir, fn] of [[dirs.state, onStateFile], [dirs.ops, onOpFile], [awsDir, onAwsFile], [incidentsDir, onIncidentFile]]) {
     try { watchers.push(watch(dir, (_, f) => f && !f.endsWith('.tmp') && fn(f))); } catch { /* directory created by the agent later */ }
   }
 

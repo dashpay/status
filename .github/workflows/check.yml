@@ -21,6 +21,8 @@ jobs:
           cache: npm
       - run: npm ci --include=dev
       - run: npm test
+      - name: Incident receiver replay, authentication and worker safeguards
+        run: python3 -m unittest discover -s deploy/incident-broker -p 'test_*.py'
       - run: npm run lint
       - run: npm run build
       - run: npx playwright install --with-deps chromium

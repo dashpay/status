@@ -97,6 +97,19 @@ def repo(image):
     return re.sub(r'^((index\.)?docker\.io/)?(library/)?', '', name)
 
 
+def is_running(c):
+    state = c.get('State') or {}
+    return (state.get('Running') is True and state.get('Status') in (None, 'running')
+            and not any(state.get(k) for k in ('Restarting', 'Paused', 'Dead')))
+
+
+def explorer_migration(c):
+    config = c.get('Config') or {}
+    service = (config.get('Labels') or {}).get('com.docker.compose.service')
+    return (repo(config.get('Image', '')) == 'ghcr.io/pshenmic/platform-explorer-indexer'
+            and (service == 'explorer-migrate' or (config.get('Cmd') or [])[-1:] == ['migrate']))
+
+
 def docker():
     if not shutil.which('docker'):
         return None, {}
@@ -119,7 +132,10 @@ def docker():
             for b in binds or []:
                 ports.append('%s:%s->%s' % (b.get('HostIp') or '0.0.0.0', b.get('HostPort'), port))
         out.append(dict(id=c['Id'], name=name, image=ref, repo=repo(ref), digest=digest.split('@')[1] if digest else None,
-                        imageCreated=img.get('Created'), state=st['Status'], running=bool(st['Running']) and not st.get('Restarting'),
+                        imageCreated=img.get('Created'), state=st['Status'], running=is_running(c),
+                        restarting=bool(st.get('Restarting') or st['Status'] == 'restarting'),
+                        service=(c['Config'].get('Labels') or {}).get('com.docker.compose.service'),
+                        restartPolicy=(c['HostConfig'].get('RestartPolicy') or {}).get('Name'), oneShot=explorer_migration(c),
                         health=(st.get('Health') or {}).get('Status'), startedAt=st.get('StartedAt'),
                         finishedAt=st.get('FinishedAt'), exitCode=st.get('ExitCode'), restarts=c.get('RestartCount', 0),
                         ports=sorted(ports), network=c['HostConfig'].get('NetworkMode')))
@@ -131,7 +147,7 @@ def docker():
 def find(raw, repos, running=True):
     for name, c in sorted(raw.items()):
         if (c.get('Config', {}).get('Labels') or {}).get('com.docker.compose.service') == 'miner': continue
-        if repo(c['Config']['Image']) in repos and (not running or c['State']['Running']):
+        if repo(c['Config']['Image']) in repos and (not running or is_running(c)):
             return c
     return None
 
@@ -521,10 +537,22 @@ def explorer(raw):
         return None
     code, v, ms = get_json('http://127.0.0.1:3005/status', 10)
     v = v if isinstance(v, dict) else {}
-    idx = find(raw, ['ghcr.io/pshenmic/platform-explorer-indexer'])
-    return dict(status=code, latencyMs=ms, apiVersion=(v.get('api') or {}).get('version'), indexedHeight=((v.get('api') or {}).get('block') or {}).get('height'),
-                chainHeight=((v.get('tenderdash') or {}).get('block') or {}).get('height'), network=v.get('network'),
-                identities=v.get('identitiesCount'), transactions=v.get('transactionsCount'), indexerRunning=bool(idx))
+    # The migration uses the same image as the long-running indexer. It must
+    # never stand in for it, even while migrating, nor mask a crash/restart loop.
+    candidates = {name: c for name, c in raw.items() if not explorer_migration(c)}
+    repos = ['ghcr.io/pshenmic/platform-explorer-indexer']
+    idx = find(candidates, repos) or find(candidates, repos, running=False)
+    state = (idx or {}).get('State') or {}
+    api = v.get('api') if isinstance(v.get('api'), dict) else {}
+    chain = v.get('tenderdash') if isinstance(v.get('tenderdash'), dict) else {}
+    height = lambda obj: (obj.get('block') or {}).get('height') if isinstance(obj.get('block'), dict) else None
+    return dict(status=code, latencyMs=ms, apiVersion=api.get('version'), indexedHeight=height(api),
+                chainHeight=height(chain), network=v.get('network'),
+                identities=v.get('identitiesCount'), transactions=v.get('transactionsCount'), indexerRunning=bool(idx and is_running(idx)),
+                indexerId=(idx or {}).get('Id'), indexerState=state.get('Status'),
+                indexerRestarting=bool(state.get('Restarting') or state.get('Status') == 'restarting'),
+                indexerHealth=(state.get('Health') or {}).get('Status'), indexerExitCode=state.get('ExitCode'),
+                indexerRestarts=(idx or {}).get('RestartCount'))
 
 
 def new_faucet(raw):

@@ -8,8 +8,10 @@ import { classify } from './discover.js';
 import { createOps, manifestFor, operationBudget, validateRequest } from './ops.js';
 import { gatewayPublicPort } from './collector.js';
 import { DEFAULT_SETTINGS } from '../shared/settings.js';
+import { legacyNetwork } from './fixtures/legacy-network.js';
 
 const settings = structuredClone(DEFAULT_SETTINGS);
+settings.networks.push(structuredClone(legacyNetwork));
 const testnet = settings.networks[0];
 
 test('classify maps EC2 Name tags to roles, including suffixed restores and dh- hosts', () => {

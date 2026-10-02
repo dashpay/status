@@ -16,6 +16,67 @@ def container(image, cmd=None, env=None):
 
 
 class Probes(unittest.TestCase):
+    def test_docker_preserves_successful_migration_evidence(self):
+        c = container('ghcr.io/pshenmic/platform-explorer-indexer:2.5.3', ['/app/indexer', 'migrate'])
+        c.update(Id='migration', Name='/services-explorer-migrate-1', Image='image-id')
+        c['Config']['Labels'] = {'com.docker.compose.service': 'explorer-migrate'}
+        c['HostConfig']['RestartPolicy'] = {'Name': 'no'}
+        c['State'] = {'Status': 'exited', 'Running': False, 'ExitCode': 0}
+        def run(args):
+            if args[1:3] == ['ps', '-aq']: return b'migration'
+            if args[1] == 'inspect': return json.dumps([c]).encode()
+            if args[1:3] == ['image', 'inspect']: return b'[{"Id":"image-id"}]'
+            self.fail(args)
+        with patch.object(p.shutil, 'which', return_value='/usr/bin/docker'), patch.object(p, 'run', run):
+            out, _ = p.docker()
+        self.assertTrue(out[0]['oneShot'])
+        self.assertEqual(out[0]['restartPolicy'], 'no')
+        self.assertEqual(out[0]['exitCode'], 0)
+        self.assertFalse(out[0]['running'])
+
+    def test_explorer_never_mistakes_migration_for_indexer(self):
+        for migration in [container('ghcr.io/pshenmic/platform-explorer-indexer:2.5.3', ['/app/indexer', 'migrate']),
+                          container('ghcr.io/pshenmic/platform-explorer-indexer:2.5.3')]:
+            migration['Config']['Labels'] = {'com.docker.compose.service': 'explorer-migrate'}
+            raw = {'api': container('ghcr.io/pshenmic/platform-explorer-api:2.5.3'), 'migration': migration}
+            with patch.object(p, 'get_json', return_value=(200, {'api': {'block': {'height': 324}}, 'tenderdash': {'block': {'height': 11008}}}, 1)):
+                check = p.explorer(raw)
+            self.assertFalse(check['indexerRunning'])
+            self.assertIsNone(check['indexerId'])
+            self.assertEqual(check['indexedHeight'], 324)
+
+    def test_explorer_runtime_state_and_health_are_not_existence(self):
+        for state, expected in [({'Status': 'running', 'Running': True}, True),
+                                ({'Status': 'restarting', 'Running': True, 'Restarting': True, 'ExitCode': 101}, False),
+                                ({'Status': 'restarting', 'Running': True}, False),
+                                ({'Status': 'exited', 'Running': False, 'ExitCode': 101}, False),
+                                ({'Status': 'running', 'Running': True, 'Paused': True}, False),
+                                ({'Status': 'running', 'Running': True, 'Health': {'Status': 'unhealthy'}}, True)]:
+            with self.subTest(state=state):
+                idx = container('ghcr.io/pshenmic/platform-explorer-indexer:2.5.3')
+                idx.update(Id='indexer', RestartCount=7, State=state)
+                raw = {'api': container('ghcr.io/pshenmic/platform-explorer-api:2.5.3'), 'idx': idx}
+                with patch.object(p, 'get_json', return_value=(200, {}, 1)):
+                    check = p.explorer(raw)
+                self.assertEqual(check['indexerRunning'], expected)
+                self.assertEqual(check['indexerState'], state['Status'])
+                self.assertEqual(check['indexerHealth'], (state.get('Health') or {}).get('Status'))
+                self.assertEqual(check['indexerRestarts'], 7)
+                self.assertEqual(check['indexerRestarting'], state['Status'] == 'restarting')
+
+    def test_explorer_selects_live_indexer_over_stopped_same_image(self):
+        old = container('ghcr.io/pshenmic/platform-explorer-indexer:2.5.3')
+        old['State'] = {'Status': 'exited', 'Running': False}
+        live = container('ghcr.io/pshenmic/platform-explorer-indexer:2.5.3')
+        live['Id'] = 'live-indexer'
+        raw = {'api': container('ghcr.io/pshenmic/platform-explorer-api:2.5.3'), 'a-old': old, 'z-live': live}
+        with patch.object(p, 'get_json', return_value=(200, {'api': 'bad', 'tenderdash': {'block': 'bad'}}, 1)):
+            check = p.explorer(raw)
+        self.assertTrue(check['indexerRunning'])
+        self.assertEqual(check['indexerId'], 'live-indexer')
+        self.assertIsNone(check['indexedHeight'])
+        self.assertIsNone(check['chainHeight'])
+
     def test_malformed_protobuf_is_bounded(self):
         for data in [b'\x80'*100,b'\x0a\x08a',b'\x09a',b'\x0da']:
             with self.assertRaises(ValueError): p.protobuf(data)

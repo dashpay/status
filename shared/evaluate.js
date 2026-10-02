@@ -36,11 +36,36 @@ function versionOf(component, container, data, tags = {}) {
 }
 
 const pct = (used, total) => (total ? Math.round((used / total) * 1000) / 10 : null);
+const height = (v) => Number.isSafeInteger(v) && v > 0;
+
+// Repair readiness is stronger than HTTP/process availability. The caller
+// persists independent host samples; this pure evaluator never starts a probe
+// or assumes that a historical indexed block proves current progress.
+export function explorerReadiness(current, previous, maxLagBlocks, now = Date.now()) {
+  const no = (reason) => ({ ready: false, reason });
+  if (!Number.isSafeInteger(maxLagBlocks) || maxLagBlocks < 0) return no('invalid lag threshold');
+  const valid = (h) => {
+    const at = Date.parse(h?.probe?.at), e = h?.probe?.data?.explorer;
+    return h?.probe?.ok === true && h.state === 'running' && typeof h.instanceId === 'string' && h.instanceId
+      && Number.isFinite(at) && now - at <= 180_000 && at <= now + 60_000 && e?.status === 200
+      && e.indexerRunning === true && e.indexerState === 'running' && e.indexerRestarting === false && (e.indexerHealth == null || e.indexerHealth === 'healthy')
+      && typeof e.indexerId === 'string' && e.indexerId && Number.isSafeInteger(e.indexerRestarts) && e.indexerRestarts >= 0
+      && typeof e.network === 'string' && e.network && height(e.indexedHeight) && height(e.chainHeight) && e.indexedHeight <= e.chainHeight;
+  };
+  if (!valid(current)) return no('current explorer observation incomplete or unhealthy');
+  if (!valid(previous)) return no('previous explorer observation incomplete or unhealthy');
+  const a = previous.probe.data.explorer, b = current.probe.data.explorer;
+  if (current.instanceId !== previous.instanceId || a.indexerId !== b.indexerId || a.network !== b.network || a.indexerRestarts !== b.indexerRestarts) return no('explorer identity or restart continuity changed');
+  if (Date.parse(current.probe.at) <= Date.parse(previous.probe.at)) return no('observations are not independent and ordered');
+  if (b.chainHeight < a.chainHeight || b.indexedHeight <= a.indexedHeight) return no('indexing progress not observed');
+  if (b.indexedHeight > b.chainHeight || b.chainHeight - b.indexedHeight > maxLagBlocks) return no('explorer height disagrees with or lags the chain');
+  return { ready: true };
+}
 
 export function evaluateNetwork(network, state, settings, now = Date.now(), tags = {}, expected = {}) {
   const t = settings.thresholds;
   const hosts = state?.hosts || [];
-  const fresh = (h) => { const at = Date.parse(h?.probe?.at); return !Number.isFinite(at) || (now - at <= Math.max(180_000, (state?.pollSeconds || 30) * 3000) && at <= now + 60_000); };
+  const fresh = (h) => { const at = Date.parse(h?.probe?.at); return Number.isFinite(at) && now - at <= Math.max(180_000, (state?.pollSeconds || 30) * 3000) && at <= now + 60_000; };
   const live = (h) => (h?.probe?.ok && fresh(h) ? h.probe.data : null);
   const coreTip = Math.max(0, ...hosts.map((h) => live(h)?.core?.blocks || 0));
   const platformTip = Math.max(0, ...hosts.map((h) => live(h)?.tenderdash?.height || live(h)?.dapi?.height || 0));
@@ -55,8 +80,8 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
     const flag = (l, text) => { reasons.push({ level: l, text }); if (RANK[l] > RANK[level]) level = l; };
     if (h.state !== 'running') flag('stopped', `instance ${h.state}`);
     else if (h.probe?.skipped) { flag('info', 'service health not observed; EC2 state only'); }
-    else if (!fresh(h)) flag('unreachable', 'host observation is stale');
     else if (!h.probe?.ok) flag('unreachable', `probe failed: ${h.probe?.error || 'no result yet'}`);
+    else if (!fresh(h)) flag('unreachable', 'host observation is stale');
     else {
       const c = d.core;
       if (CORE_ROLES.has(h.role)) {
@@ -104,9 +129,12 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
       if (h.p2p && !h.p2p.ok) flag('warn', `P2P :${h.p2p.port} not reachable from status host (${h.p2p.error})`);
       for (const k of d.containers || []) {
         const why = `container ${k.name} ${k.state}${k.exitCode ? ` (exit ${k.exitCode})` : ''}`;
-        // A stopped container is an orphan when a running one serves the same image repo.
-        const replaced = (d.containers || []).some((o) => o !== k && o.running && o.repo === k.repo);
-        if (!k.running) flag(replaced || k.state === 'created' ? 'info' : 'down', replaced ? `${why}; superseded by a running ${k.repo} container` : why);
+        const completed = k.oneShot === true && k.state === 'exited' && k.exitCode === 0 && k.restartPolicy === 'no' && !k.restarting;
+        // Shared images can serve different jobs (migration and indexer). Only
+        // a replacement of the same service can supersede a stopped service.
+        const replaced = !k.oneShot && (d.containers || []).some((o) => o !== k && o.running && o.repo === k.repo && (k.service ? o.service === k.service : !o.service));
+        if (completed) flag('info', `${why}; one-shot completed successfully`);
+        else if (!k.running) flag(replaced || k.state === 'created' ? 'info' : 'down', replaced ? `${why}; superseded by a running ${k.repo} container` : why);
         else if (k.health === 'unhealthy') flag('warn', `container ${k.name} unhealthy`);
       }
       const s = d.system;
@@ -139,8 +167,16 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
       }
       if (d.explorer) {
         if (d.explorer.status !== 200) flag('down', `explorer API /status HTTP ${d.explorer.status}`);
-        else if (!d.explorer.indexerRunning) flag('down', 'explorer indexer not running');
-        else if ((d.explorer.chainHeight || 0) - (d.explorer.indexedHeight || 0) > t.platformLagBlocks) flag('warn', `explorer indexer ${(d.explorer.chainHeight || 0) - (d.explorer.indexedHeight || 0)} blocks behind`);
+        else if (d.explorer.indexerRestarting === true || d.explorer.indexerState === 'restarting') flag('down', 'explorer indexer restarting');
+        else if (d.explorer.indexerRunning !== true) flag('down', 'explorer indexer not running');
+        else if (d.explorer.indexerHealth === 'unhealthy') flag('down', 'explorer indexer unhealthy');
+        else if (d.explorer.indexerHealth === 'starting') flag('warn', 'explorer indexer health check starting');
+        else if (!height(d.explorer.chainHeight) || !height(d.explorer.indexedHeight)) flag('warn', 'explorer indexing heights unavailable');
+        else if (d.explorer.indexedHeight > d.explorer.chainHeight) flag('warn', 'explorer indexed height exceeds its chain height');
+        else {
+          const lag = Math.max(platformTip, d.explorer.chainHeight) - d.explorer.indexedHeight;
+          if (lag > t.platformLagBlocks) flag('warn', `explorer indexer ${lag} blocks behind`);
+        }
       }
       if (network.chainType === 'mainnet') {
         const m = d.mainnet || {};
@@ -250,10 +286,10 @@ export function projectNetwork(network, evaluation, state, operator) {
       masternode: c.masternode ? { state: c.masternode.state, type: c.masternode.type, proTxHash: c.masternode.proTxHash, pose: c.masternode.posePenalty, lastPaid: c.masternode.lastPaidHeight, registered: c.masternode.registeredHeight, service: c.masternode.service } : null,
       platform: d.tenderdash ? { height: td.height, blockTime: td.blockTime, peers: td.peers, catchingUp: td.catchingUp, network: td.network, protocol: td.protocolApp, version: td.version, votingPower: td.votingPower, inValidatorSet: td.inValidatorSet, nodeId: td.nodeId, proposer: td.proposer, round: td.round, commitRound: td.commitRound, thresholdSigned: td.thresholdSigned } : null,
       dapi: d.dapi ? { ok: d.dapi.ok, query: d.dapi.query, latencyMs: d.dapi.latencyMs, height: d.dapi.height, dapiVersion: d.dapi.dapiVersion, driveVersion: d.dapi.driveVersion, tls: d.dapi.tls || null, error: operator ? d.dapi.error : undefined } : null,
-      insight: d.insight || null, faucet: d.faucet ? (operator || network.showBalances ? d.faucet : { ...d.faucet, balance: undefined, utxos: undefined }) : null, quorumServer: d.quorumServer || null, explorer: d.explorer || null,
+      insight: d.insight || null, faucet: d.faucet ? (operator || network.showBalances ? d.faucet : { ...d.faucet, balance: undefined, utxos: undefined }) : null, quorumServer: d.quorumServer || null, explorer: d.explorer ? { ...d.explorer, indexerId: operator ? d.explorer.indexerId : undefined } : null,
       wallets: c.wallets && (network.showBalances || operator) ? c.wallets.filter((w) => w.name).map((w) => ({ name: w.name, trusted: w.trusted, pending: w.pending, immature: w.immature, coinjoin: w.coinjoin })) : c.wallets ? { count: c.wallets.filter((w) => w.name).length } : null,
       system: d.system ? { load: s.load, cpus: s.cpus, memPercent: pct(s.memTotal - s.memAvailable, s.memTotal), memTotal: s.memTotal, swapPercent: s.swapTotal ? pct(s.swapTotal - s.swapFree, s.swapTotal) : null, disks: (s.disks || []).map((x) => ({ mount: x.mount, percent: pct(x.used, x.size), size: x.size, avail: x.avail })), uptime: s.uptime, os: s.os, kernel: s.kernel } : null,
-      containers: (d.containers || []).map((k) => ({ name: k.name, component: COMPONENT_OF[k.repo] || null, sidecar: sidecarOf(k), image: k.image, version: COMPONENT_OF[k.repo] ? versionOf(COMPONENT_OF[k.repo], k, d, evaluation.tags) : tagOf(k.image), digest: k.digest, state: k.state, running: k.running, restarts: k.restarts, startedAt: k.startedAt, health: k.health })),
+      containers: (d.containers || []).map((k) => ({ name: k.name, component: COMPONENT_OF[k.repo] || null, sidecar: sidecarOf(k), image: k.image, version: COMPONENT_OF[k.repo] ? versionOf(COMPONENT_OF[k.repo], k, d, evaluation.tags) : tagOf(k.image), digest: k.digest, state: k.state, running: k.running, restarting: k.restarting, service: k.service, restartPolicy: k.restartPolicy, oneShot: k.oneShot, exitCode: k.exitCode, restarts: k.restarts, startedAt: k.startedAt, health: k.health })),
       p2p: h.p2p ? { port: h.p2p.port, ok: h.p2p.ok, ms: h.p2p.ms } : null,
       dapiPublic: h.dapiPublic ? { ok: h.dapiPublic.ok, ms: h.dapiPublic.ms } : null,
       mainnet: d.mainnet ? {

@@ -306,7 +306,7 @@ export function createCi({ dataDir, fetcher = fetch, clock = Date.now, github = 
         utilization24h: runners.length ? runners.reduce((a, r) => a + r.day.busySec, 0) / (runners.length * 86_400) : null,
         medianQueueSec24h: median(dq), p90QueueSec24h: pctile(dq, 0.9), queuedNow: queued.length, oldestQueuedAt: queued[0]?.createdAt || null,
       },
-      hosts: hosts.map((h) => ({ id: h.id, label: regs[h.id]?.label || h.id, receivedAt: h.receivedAt, stale: now - Date.parse(h.receivedAt) > STALE_MS, reporter: h.reporter, python: h.python, ...h.host })).sort((a, b) => a.label.localeCompare(b.label)),
+      hosts: hosts.map((h) => ({ id: h.id, label: regs[h.id]?.label || h.id, receivedAt: h.receivedAt, measuredAt: h.at, stale: now - Date.parse(h.receivedAt) > STALE_MS, reporter: h.reporter, python: h.python, ...h.host })).sort((a, b) => a.label.localeCompare(b.label)),
       runners,
       queue: gh.queue ? { ...gh.queue, jobs: queued.slice(0, 50) } : null,
       workflows: workflows.slice(0, 40),

@@ -20,7 +20,9 @@
         "ecr:DescribeImages",
         "s3:ListAllMyBuckets",
         "ce:GetCostAndUsage",
-        "ce:GetCostForecast"
+        "ce:GetCostForecast",
+        "ec2:DescribeInstanceStatus",
+        "cloudwatch:DescribeAlarms"
       ],
       "Resource": "*"
     }
