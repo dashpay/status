@@ -39,7 +39,7 @@ test('public board needs no session and hides operator fields', async () => {
   const w = await start();
   try {
     const overview = await (await w.req('/api/overview')).json();
-    assert.deepEqual(overview.networks.map((n) => n.name), ['testnet', 'devnet-moutai', 'mainnet']);
+    assert.deepEqual(overview.networks.map((n) => n.name), ['testnet', 'mainnet']);
     const n = await (await w.req('/api/networks/testnet')).json();
     assert.equal(n.hosts[0].name, 'seed-2');
     assert.equal(n.hosts[0].instanceId, undefined);
@@ -269,5 +269,22 @@ test('console devnet connection files reach members only', async () => {
     assert.deepEqual(r.files.map((f) => f.name), ['devnet-fixture.conf', 'devnet-fixture.inventory', 'devnet-fixture.yml']);
     assert.match(r.files[0].text, /^devnet=fixture-g1$/m);
     assert.equal((await w.req('/api/networks/testnet/config')).status, 404, 'managed networks have no console connection files');
+  } finally { w.close(); }
+});
+
+test('issue API is additive, fails visibly when stale, and limits private detail to admins', async () => {
+  const w = await start();
+  try {
+    assert.equal((await w.req('/api/issues')).status, 503);
+    mkdirSync(join(w.dataDir, 'incidents'), { recursive: true });
+    const issues = [{ id: 'a'.repeat(24), domain: 'network', scope: 'testnet', target: 'PRIVATE-HOST', code: 'host_health', severity: 'critical', status: 'open', evidence: { key: 'PRIVATE-EVIDENCE' } },
+      { id: 'b'.repeat(24), domain: 'network', scope: 'hidden-network', target: 'PRIVATE', code: 'host_health', severity: 'critical', status: 'open' }];
+    writeFileSync(join(w.dataDir, 'incidents', 'state.json'), JSON.stringify({ generatedAt: new Date().toISOString(), issues, sources: {}, outbox: [] }));
+    const anonymous = await w.req('/api/issues'); assert.equal(anonymous.status, 200);
+    const text = await anonymous.text(); assert.ok(!text.includes('PRIVATE')); assert.ok(!text.includes('hidden-network'));
+    const invalid = await w.req('/api/issues', { headers: { authorization: 'Bearer invented' } });
+    assert.ok(!(await invalid.text()).includes('PRIVATE'));
+    await w.login(); const full = await (await w.req('/api/issues')).json();
+    assert.equal(full.issues[0].evidence.key, 'PRIVATE-EVIDENCE'); assert.equal(full.delivery.pending, 0);
   } finally { w.close(); }
 });

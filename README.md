@@ -1,7 +1,7 @@
 # Dash Status
 
 Live infrastructure board and operator console for DCG-run Dash networks
-(testnet, devnets such as Moutai, mainnet support hosts), served at
+(testnet, active devnets, limited mainnet observer signals), served at
 https://status.testnet.networks.dash.org.
 
 ## How it works
@@ -50,7 +50,7 @@ and networks, save.
 | operator | deploy, restore and health-gate the granted networks |
 | admin | everything, on every network: settings, users, new devnets, Platform resets, deletion |
 
-**Existing networks (testnet, Moutai):** *Deploy* chooses nodes, components and
+**Existing managed networks:** *Deploy* chooses nodes, components and
 image tags (Docker Hub suggestions, architecture check). The agent imports live
 state, enrolls nodes that are not yet enrolled (no restarts) and plans with images
 pinned by digest. Nothing changes until the plan is confirmed; execution withdraws
@@ -77,7 +77,7 @@ DAPI, gateway, helper or Tenderdash, one validator at a time), have their servic
 re-applied from Settings defaults, and be deleted (instances, disks, BYOIP
 addresses, DNS; the journal record keeps the name reserved).
 
-**Platform wipe/redeploy** (admins, dashmate devnets such as Moutai) follows the
+**Platform wipe/redeploy** (admins, registered dashmate devnets) follows the
 Platform reset rulebook: baseline and private backups on every HPMN and the seed,
 image staging, a fresh ChainLock anchor verified everywhere and a canary on a
 temporary dashmate home — all before review. After confirmation: wipe Platform on
@@ -207,3 +207,11 @@ role services and upgrade convergence. Probes are read-only: they never submit p
 
 New functional failures can expose old service problems hidden by homepage-only checks. Inspect the
 individual source and timestamps before changing the monitored service.
+
+## Machine-readable issues and incident response
+
+`GET /api/issues` aggregates network, CI and AWS issues, with a redacted public
+view and a scoped authenticated detail view. Optional durable delivery to an
+OpenClaw receiver uses tailnet-only HTTPS, HMAC authentication, deduplication and
+a serialized, owner-authorized repair worker. See [deployment, behavior and
+coverage limits](deploy/INCIDENTS.md). Retired Moutai is no longer a default network.

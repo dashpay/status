@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createAuth } from './auth.js';
 import { createCi } from './ci.js';
+import { loadIncidentState, publicIssues, apiAuthorized, readSecret } from './incidents.js';
 import { publicInventory } from './aws-public.js';
 import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, loadSettings, memberOf, operatorFor, readJSON, saveSettings, validateSettings, writeAtomic } from '../shared/settings.js';
 import { expectations } from '../shared/monitoring.js';
@@ -91,6 +92,18 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     return { ...rest, hostCount: hosts.length, roles: hosts.reduce((a, h) => { if (!h.duplicate) a[h.role] = (a[h.role] || 0) + 1; return a; }, {}),
       problems: hosts.filter((h) => !['ok', 'stopped'].includes(h.level) && !h.duplicate).map((h) => ({ name: h.name, role: h.role, level: h.level, reason: h.reasons.find((r) => r.level === h.level)?.text })) };
   }
+
+  // Additive API: public projection; complete evidence only for admins or the
+  // dedicated read-only machine token. A member grant is not account-wide access.
+  app.get('/api/issues', (req, res) => {
+    reloadSettings();
+    const state = loadIncidentState(dataDir);
+    const full = isAdmin(req) || apiAuthorized(req.get('authorization'), readSecret(process.env.INCIDENT_API_TOKEN_FILE));
+    const body = full && state ? { schemaVersion: 1, generatedAt: state.generatedAt, issues: state.issues, sources: state.sources, delivery: { ...state.delivery, pending: state.outbox?.length || 0, quarantined: state.quarantined?.length || 0 } } : publicIssues(state, visible(req).map((n) => n.name));
+    const observedAt = Date.parse(state?.generatedAt);
+    const stale = !Number.isFinite(observedAt) || clock() - observedAt > 180_000 || observedAt > clock() + 60_000;
+    res.status(stale ? 503 : 200).json({ ...body, stale });
+  });
 
   app.get('/api/health', (req, res) => res.json({ service: 'dash-status', status: 'ok' }));
   app.get('/api/me', (req, res) => {

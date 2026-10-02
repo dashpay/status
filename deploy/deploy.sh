@@ -15,15 +15,25 @@ docker build --quiet -t "dash-status:${rev}" --build-arg "RELEASE_REVISION=${rev
 previous=$(docker image inspect dash-status:current --format '{{.Id}}' 2>/dev/null || true)
 install -d -o 1000 -g 1000 -m 0750 /srv/dash-status/data
 install -d -o 1000 -g 1000 -m 0700 /srv/dash-status/agent /srv/dash-status/agent/devnets
+# Preserve the optional incident sidecar on future rollouts. Loading the small
+# compose env file only supplies a non-secret receiver URL; never source it.
+compose() {
+  if [ -f /etc/dash-status/incidents/compose.env ]; then
+    install -d -o 1000 -g 1000 -m 0700 /srv/dash-status/data/incidents
+    docker compose --env-file /etc/dash-status/incidents/compose.env -f deploy/compose.yml -f deploy/incident-compose.yml "$@"
+  else
+    docker compose -f deploy/compose.yml "$@"
+  fi
+}
 docker tag "dash-status:${rev}" dash-status:current
 case "${DEPLOY_ONLY:-}" in
-  "") docker compose -f deploy/compose.yml up -d --remove-orphans ;;
-  web) docker compose -f deploy/compose.yml up -d --no-deps web ;;
+  "") compose up -d --remove-orphans ;;
+  web) compose up -d --no-deps web ;;
   *) echo "DEPLOY_ONLY must be empty or web" >&2; exit 2 ;;
 esac
 for i in $(seq 1 30); do
   if curl -fsS -m 3 http://127.0.0.1:3006/api/health >/dev/null 2>&1; then
-    echo "web healthy on ${rev}"; docker compose -f deploy/compose.yml ps --format '{{.Service}} {{.Status}}'
+    echo "web healthy on ${rev}"; compose ps --format '{{.Service}} {{.Status}}'
     # Each deploy leaves a ~370 MB image: keep the running one and the two
     # newest others for rollback, so the root disk never fills (a full disk
     # fails the next build mid-download).
@@ -33,7 +43,7 @@ for i in $(seq 1 30); do
       case " $(echo $keep) " in *" $image "*) continue ;; esac
       [ "$(docker image inspect "$image" --format '{{.Id}}')" = "$current" ] || docker rmi "$image" >/dev/null 2>&1 || true
     done
-    docker image prune -f >/dev/null 2>&1 || true
+    # Never globally prune: this host may retain unrelated human/build images.
     exit 0
   fi
   sleep 2
@@ -41,6 +51,6 @@ done
 echo "web did not become healthy; rolling back" >&2
 if [ -n "$previous" ]; then
   docker tag "$previous" dash-status:current
-  if [ "${DEPLOY_ONLY:-}" = web ]; then docker compose -f deploy/compose.yml up -d --no-deps web; else docker compose -f deploy/compose.yml up -d; fi
+  if [ "${DEPLOY_ONLY:-}" = web ]; then compose up -d --no-deps web; else compose up -d; fi
 fi
 exit 1

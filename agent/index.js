@@ -11,6 +11,7 @@ import { createPool, loadOrCreateKey } from './ssh.js';
 import { createCollector } from './collector.js';
 import { createOps, manifestFor } from './ops.js';
 import { createAwsInventory } from './aws.js';
+import { createAwsHealth } from './aws-health.js';
 import { createConfigWriter } from './devnet-config.js';
 
 const DATA = process.env.STATUS_DATA_DIR || '/var/lib/dash-status';
@@ -27,6 +28,7 @@ let discover = createDiscovery({ region: settings.aws.region, tagKey: settings.a
 let awsKey = JSON.stringify([settings.aws.region, settings.aws.tagKey]);
 const collector = createCollector({ pool, stateDir: dirs.state, log });
 const aws = createAwsInventory({ dataDir: DATA, home: settings.aws.region, log });
+const awsHealth = createAwsHealth({ dataDir: DATA, log });
 // Connection facts for console devnets (members' Connect tab), from the workdirs.
 const devnetConfigs = createConfigWriter({ privateDir: PRIVATE, dataDir: DATA, registry: () => readJSON(join(DATA, 'devnets.json'), {}), log });
 const wake = new Set();
@@ -118,6 +120,7 @@ async function loop() {
 }
 
 async function main() {
+  setInterval(() => awsHealth.tick().catch((e) => log('aws health collection failed:', e.name)), 30_000).unref();
   log(`agent starting; key ${key.pub.split(' ').slice(0, 2).join(' ').slice(0, 40)}…`);
   setInterval(() => {
     try { ops.tick(); } catch (e) { log('ops:', e.message); }

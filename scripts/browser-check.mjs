@@ -6,6 +6,7 @@ import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createWeb } from '../server/web.js';
+import { legacyNetwork } from '../agent/fixtures/legacy-network.js';
 import { DEFAULT_SETTINGS } from '../shared/settings.js';
 
 const temp = mkdtempSync(join(tmpdir(), 'dash-status-browser-'));
@@ -33,6 +34,7 @@ mkdirSync(join(dataDir, 'state'), { recursive: true });
 writeFileSync(join(dataDir, 'state', 'testnet.json'), JSON.stringify(state('testnet', 'test', 'dash-testnet-51')));
 writeFileSync(join(dataDir, 'state', 'devnet-moutai.json'), JSON.stringify(state('devnet-moutai', 'devnet-moutai', 'dash-devnet-moutai')));
 const settings = structuredClone(DEFAULT_SETTINGS);
+settings.networks.push(structuredClone(legacyNetwork));
 settings.operators.push({ id: 42, login: 'fixture-operator', role: 'admin', networks: ['*'] });
 writeFileSync(join(dataDir, 'settings.json'), JSON.stringify(settings));
 

@@ -49,6 +49,6 @@ test('mainnet-support cannot enter EC2 discovery, even with malformed legacy set
   const forbidden = { ...DEFAULT_SETTINGS.networks.find((n) => n.name === 'mainnet'), source: undefined, tag: 'mainnet-support' };
   assert.deepEqual(await discover([forbidden]), { mainnet: [] });
   assert.equal(calls, 0);
-  const bad = structuredClone(DEFAULT_SETTINGS); bad.networks[2] = forbidden;
+  const bad = structuredClone(DEFAULT_SETTINGS); bad.networks[bad.networks.findIndex((n) => n.name === 'mainnet')] = forbidden;
   assert.throws(() => validateSettings(bad), /separate report observer/);
 });

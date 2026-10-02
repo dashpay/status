@@ -1,0 +1,35 @@
+services:
+  web:
+    environment:
+      INCIDENT_API_TOKEN_FILE: /run/secrets/incident-read-token
+    volumes:
+      - /etc/dash-status/incidents/incident-read-token:/run/secrets/incident-read-token:ro
+  incidents:
+    image: dash-status:current
+    pull_policy: never
+    init: true
+    user: "1000:1000"
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 384m
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16777216"]
+    environment:
+      STATUS_MODE: incidents
+      STATUS_DATA_DIR: /data
+      INCIDENT_WEBHOOK_URL: ${INCIDENT_WEBHOOK_URL:?set the HTTPS Tailscale receiver URL}
+      INCIDENT_HMAC_FILE: /run/secrets/incident-hmac
+    extra_hosts:
+      - "${INCIDENT_RECEIVER_HOST:?set receiver FQDN}:${INCIDENT_RECEIVER_IP:?set receiver Tailscale IP}"
+    volumes:
+      - /srv/dash-status/data:/data:ro
+      - /srv/dash-status/data/incidents:/data/incidents
+      - /etc/dash-status/incidents/incident-hmac:/run/secrets/incident-hmac:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "const s=JSON.parse(require('fs').readFileSync('/data/incidents/state.json'));const t=Date.parse(s.generatedAt);process.exit(Number.isFinite(t)&&Date.now()-t<180000&&t<=Date.now()+60000?0:1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging: { driver: json-file, options: { max-size: 10m, max-file: "3" } }
