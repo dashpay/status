@@ -42,7 +42,7 @@ export function transitionRecord(original, plan, id, desired, observations, at) 
 
 export function createResetJournal({ dirs, ctx, client }) {
   const work = (r) => join(dirs.private, 'devnets', r.network);
-  const dir = (r) => { const d = join(dirs.private, 'resets', r.id); mkdirSync(d, { recursive: true, mode: 0o700 }); return d; };
+  const dir = (r) => { const d = join(dirs.private, 'resets', r.nativeJournalExec || r.id); mkdirSync(d, { recursive: true, mode: 0o700 }); return d; };
   const file = (r, name) => join(dir(r), `${name}.json`);
   const store = (r, name, value) => writeAtomic(file(r, name), JSON.stringify(value), 0o600);
   const load = (r, name) => readJSON(file(r, name));
@@ -61,6 +61,9 @@ export function createResetJournal({ dirs, ctx, client }) {
     return { item, data };
   }
   async function prepare(r, choices) {
+    // Native resolve publishes without overwriting. Each new preparation keeps
+    // its own immutable artifacts; confirmed resumes retain their saved path.
+    r.nativeJournalExec = r.execId || r.id;
     const d = db(r);
     need(d.n.metadata.name === r.network && d.plan.profile === 'devnet-dashmate-compose', 'native reset requires matching dashmate deployment');
     const { Table: table } = await d.client.send(new DescribeTableCommand({ TableName: d.TableName }));

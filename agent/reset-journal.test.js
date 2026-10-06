@@ -40,7 +40,7 @@ function setup(t) {
   }};
   const ctx={dashnet:async (_r,args)=>{
     const file=args[args.indexOf('--out')+1];
-    writeFileSync(file,JSON.stringify({images:['drive','helper'].map((component)=>({component,pinned:pin(component==='helper'?'dashmate-helper':'drive','b'),platforms:[{architecture:'arm64',os:'linux',digest:'sha256:'+'b'.repeat(64)}]}))}));return 0;
+    writeFileSync(file,JSON.stringify({images:['drive','helper'].map((component)=>({component,pinned:pin(component==='helper'?'dashmate-helper':'drive','b'),platforms:[{architecture:'arm64',os:'linux',digest:'sha256:'+'b'.repeat(64)}]}))}),{flag:'wx'});return 0;
   }};
   const journal=createResetJournal({dirs,ctx,client}), r={id:'test-op',network:'devnet-test',anchor:{height:123}};
   return {journal,r,root,work,requests,item:()=>item,lost:()=>{lost=true;}};
@@ -93,4 +93,20 @@ test('unchanged sidecars keep pins; target helper cannot replace Tor',async()=>{
   const result=await resetSidecars(existing,{core_tor:'tor:old',gateway_rate_limiter_redis:'redis:alpine'},['amd64','arm64'],()=>{throw Error('must not resolve moving tags');});
   assert.deepEqual(result,existing);
   await assert.rejects(resetSidecars(existing,{core_tor:'tor:new'},['arm64']),/preserved Core/);
+});
+
+test('prepare again preserves previous immutable artifacts and resume uses the saved attempt',async(t)=>{
+  const {journal,r,root,item}=setup(t);
+  await journal.prepare(r,{drive:'dashpay/drive:old-choice'});
+  const first=join(root,'private','resets',r.id,'candidate-lock.json');
+  const before=readFileSync(first,'utf8');
+  r.execId=r.id+'.12345';
+  await journal.prepare(r,{drive:'dashpay/drive:new-choice'});
+  assert.equal(readFileSync(first,'utf8'),before);
+  assert.equal(r.nativeJournalExec,r.execId);
+  assert.match(readFileSync(join(root,'private','resets',r.execId,'candidate.yaml'),'utf8'),/new-choice/);
+  journal.seal(r,observed,[]);
+  await journal.begin(r);
+  await journal.begin(r);
+  assert.equal(JSON.parse(item().Data.S).upgrade.planId,r.nativePlanId);
 });

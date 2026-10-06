@@ -47,7 +47,7 @@ export function createReset({ ctx, dirs, pool, getSettings, journalImpl, wait = 
   }
 
   async function stage(r, name, hosts, extra = {}, { parallel = 8, timeoutMs = 20 * 60_000 } = {}) {
-    const dir = join(dirs.private, 'resets', r.id);
+    const dir = join(dirs.private, 'resets', r.execId || r.id);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     // A re-prepare gets a new execution id, so the baseline is retaken.
     const base = { config: r.network, exec: r.execId || r.id, coreChain: r.review?.coreChain || r.coreChain, images: r.request.images, epochSeconds: r.epoch, ...extra };
