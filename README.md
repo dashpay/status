@@ -77,7 +77,7 @@ DAPI, gateway, helper or Tenderdash, one validator at a time), have their servic
 re-applied from Settings defaults, and be deleted (instances, disks, BYOIP
 addresses, DNS; the journal record keeps the name reserved).
 
-**Platform wipe/redeploy** (admins, registered dashmate devnets) follows the
+**Platform wipe/redeploy** (admins, dashmate devnets including console-created dashnet deployments) follows the
 Platform reset rulebook: baseline and private backups on every HPMN and the seed,
 image staging, a fresh ChainLock anchor verified everywhere and a canary on a
 temporary dashmate home — all before review. After confirmation: wipe Platform on
@@ -85,6 +85,18 @@ all HPMNs, reset only the seed's Tenderdash data, apply images/anchor/epoch writ
 only `config.json`, rendered Platform files and `dynamic-compose.yml`, start, and
 verify READY, images, consensus, epochs (config/env/parsed), DAPI TLS and Core
 preservation. Each stage must succeed on every target before the next.
+
+For **console-created dashnet devnets**, reset keeps the installed immutable images
+and epoch settings (use Deploy for version changes). Preparation binds the exact
+validator instance IDs and addresses to the deployment plan and canaries every
+validator using its installed helper, in an isolated copy of its dashmate home.
+Confirmation removes only the owned Drive/Tenderdash chain-data volumes and
+restarts Platform through dashnet's Compose project. Core/Tor, registrations,
+node identities, TLS certificates, wallet/miner/web hosts and log volumes are
+preserved. The on-host Platform anchor/identity metadata and the console's Connect
+files follow the verified reset; historical creation plans are not rewritten.
+No reset is auto-confirmed. Failed stages retain backups and per-host receipts
+for resume. A full destructive end-to-end reset is not part of UI smoke tests.
 
 **Settings** (admins): probe/discovery cadence, thresholds, access, new devnet
 defaults (placement, sizing, versions, services) and per network: EC2 tag, chain,

@@ -15,7 +15,8 @@ export default function ResetPlatform({ name }) {
   if (!session.admin) return <div className="mt-6"><Empty>Only admins can reset Platform.</Empty></div>;
   if (error) return <div className="mt-6"><Err error={error} /></div>;
   if (!n) return <div className="mt-6 text-dim">Loading…</div>;
-  if (n.chainType !== 'devnet' || n.kind === 'dashnet') return <div className="mt-6"><Empty>Platform wipe/redeploy applies to dashmate-managed devnets.</Empty></div>;
+  if (n.chainType !== 'devnet' || n.kind === 'external') return <div className="mt-6"><Empty>Platform wipe/redeploy applies to dashmate-managed devnets.</Empty></div>;
+  const native = n.kind === 'dashnet';
   const validators = n.hosts.filter((h) => h.role === 'validator' && !h.duplicate);
   const seeds = n.hosts.filter((h) => h.role === 'seed' && !h.duplicate);
   const current = (c) => {
@@ -28,7 +29,7 @@ export default function ResetPlatform({ name }) {
   async function submit() {
     setBusy(true); setSubmitError(null);
     try {
-      const r = await api(`/api/networks/${name}/ops`, { method: 'POST', body: { action: 'platform-reset', images: value, options: { epochSeconds: epoch } } });
+      const r = await api(`/api/networks/${name}/ops`, { method: 'POST', body: { action: 'platform-reset', ...(native ? {} : { images: value, options: { epochSeconds: epoch } }) } });
       navigate(`/n/${name}/ops/${r.id}`);
     } catch (e) { setSubmitError(e); setBusy(false); }
   }
@@ -45,19 +46,20 @@ export default function ResetPlatform({ name }) {
       </Section>
       <Section title="Version set">
         <div className="panel p-3 grid gap-3 sm:grid-cols-2">
+          {native && <p className="sm:col-span-2 text-[12px] text-dim">Wipe and redeploy the installed release, keeping its image pins and epoch settings. Use Deploy to change versions.</p>}
           {Object.keys(REPOS).map((c) => (
             <label key={c} className="text-[12px]"><div className="text-dim mb-1">{c} <span className="mono">{REPOS[c]}</span> · running <span className="mono">{current(c)}</span></div>
-              <input className="input w-full mono" value={value[c]} onChange={(e) => setImages({ ...value, [c]: e.target.value.trim() })} /></label>
+              <input className="input w-full mono" readOnly={native} value={value[c]} onChange={(e) => setImages({ ...value, [c]: e.target.value.trim() })} /></label>
           ))}
-          <label className="text-[12px]"><div className="text-dim mb-1">Epoch length (seconds; dashmate platform.drive.abci.epochTime)</div>
-            <input className="input w-32 mono" value={epoch} onChange={(e) => setEpoch(Number(e.target.value) || 0)} /></label>
+          {!native && <label className="text-[12px]"><div className="text-dim mb-1">Epoch length (seconds; dashmate platform.drive.abci.epochTime)</div>
+            <input className="input w-32 mono" value={epoch} onChange={(e) => setEpoch(Number(e.target.value) || 0)} /></label>}
         </div>
       </Section>
       <Section title="What runs">
         <ol className="panel p-3 text-[12px] list-decimal list-inside space-y-0.5">
-          <li><b>Prepare (no changes):</b> baseline and private backups on every target, pull images, fresh ChainLock anchor verified on every target, configuration canary on one HPMN.</li>
+          <li><b>Prepare (no changes):</b> baseline and private backups on every target, {native ? 'verify installed images' : 'pull images'}, fresh ChainLock anchor verified on every target, configuration canary {native ? 'on every HPMN' : 'on one HPMN'}.</li>
           <li><b>Review</b> the version set, anchor and canary, then confirm.</li>
-          <li><b>Wipe</b> Platform on all HPMNs (<span className="mono">dashmate reset --platform --force</span>), then reset only the seed's Tenderdash data directory.</li>
+          <li><b>Wipe</b> Platform on all HPMNs {native ? '(only the Drive and Tenderdash chain-data volumes)' : <>(<span className="mono">dashmate reset --platform --force</span>), then reset only the seed’s Tenderdash data directory</>}.</li>
           <li><b>Apply</b> the images, anchor and epoch; render only Platform files; start the seed, then every HPMN.</li>
           <li><b>Verify</b> READY, containers and images, consensus, epochs at config/env/parsed layers, DAPI TLS, Core unchanged.</li>
         </ol>

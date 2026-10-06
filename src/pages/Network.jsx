@@ -29,7 +29,7 @@ export default function Network({ name, tab }) {
             <Link to={`/n/${name}`} className={`btn ${tab === 'hosts' ? '!border-accent' : ''}`}>Hosts</Link>
             <Link to={`/n/${name}/ops`} className={`btn ${tab === 'ops' ? '!border-accent' : ''}`}>Operations</Link>
             {n.kind === 'dashnet' && <Link to={`/n/${name}/connect`} className={`btn ${tab === 'connect' ? '!border-accent' : ''}`}>Connect</Link>}
-            {session.admin && n.chainType === 'devnet' && n.kind !== 'dashnet' && <Link to={`/n/${name}/reset`} className="btn btn-danger">Platform reset…</Link>}
+            {session.admin && n.chainType === 'devnet' && n.kind !== 'external' && <Link to={`/n/${name}/reset`} className="btn btn-danger">Platform reset…</Link>}
             {operator && n.deployable && <Link to={`/n/${name}/deploy`} className="btn btn-primary">Deploy…</Link>}
           </div>
         )}

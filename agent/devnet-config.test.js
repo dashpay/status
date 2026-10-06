@@ -59,4 +59,7 @@ test('the agent writes facts for live console devnets and rewrites them when the
   utimesSync(join(work, 'deployment.json'), new Date(), new Date(Date.now() + 5000));
   refresh();
   assert.equal(JSON.parse(readFileSync(out, 'utf8')).platform.epochSeconds, 600);
+  writeFileSync(join(work, 'platform-reset.json'), JSON.stringify({ anchor: { height: 9000 } }));
+  refresh();
+  assert.equal(JSON.parse(readFileSync(out, 'utf8')).core.genesisCoreHeight, 9000, 'Connect follows verified reset anchor, not the original creation');
 });

@@ -28,7 +28,7 @@ const newest = (dir, prefix) => {
   return files.length ? join(dir, files.at(-1)) : null;
 };
 
-export function devnetFacts({ name, reg = {}, plan, record, lock }) {
+export function devnetFacts({ name, reg = {}, plan, record, lock, reset }) {
   if (!plan?.coreNetwork || !Array.isArray(plan.targets)) return null;
   const d = record?.deployment || {};
   const nodes = d.nodes || {};
@@ -44,7 +44,7 @@ export function devnetFacts({ name, reg = {}, plan, record, lock }) {
     core: {
       devnet: plan.coreNetwork, chain: plan.coreNetwork.startsWith('devnet-') ? plan.coreNetwork : `devnet-${plan.coreNetwork}`,
       port: ports.coreP2P, blockSeconds: plan.miningIntervalSeconds, premineHeight: plan.premineHeight || null,
-      ...PROFILE.core, sporkAddress: d.sporkAddress || null, genesisCoreHeight: d.genesisCoreHeight ?? null, genesisBlock: d.coreGenesis || null,
+      ...PROFILE.core, sporkAddress: d.sporkAddress || null, genesisCoreHeight: reset?.anchor?.height ?? d.genesisCoreHeight ?? null, genesisBlock: d.coreGenesis || null,
       seeds: [...hosts.filter((h) => h.role === 'wallet'), ...validators].filter((h) => h.publicIp).slice(0, 4).map((h) => `${h.publicIp}:${ports.coreP2P}`),
     },
     platform: {
@@ -69,11 +69,11 @@ export function createConfigWriter({ privateDir, dataDir, registry, log = () => 
       const work = join(privateDir, 'devnets', name);
       const out = join(dataDir, 'devnets', name, 'config.json');
       if (reg.status === 'deleted' || !existsSync(join(work, 'deployment.json'))) continue;
-      const sources = [join(work, 'deployment.json'), newest(work, 'deployed.'), join(work, 'lock.json')].filter((p) => p && existsSync(p));
+      const sources = [join(work, 'deployment.json'), newest(work, 'deployed.'), join(work, 'lock.json'), join(work, 'platform-reset.json')].filter((p) => p && existsSync(p));
       const key = JSON.stringify([...sources.map((p) => [p, statSync(p).mtimeMs]), reg.dns, reg.walletAddress, reg.displayName]);
       if (seen.get(name) === key && existsSync(out)) continue;
       try {
-        const facts = devnetFacts({ name, reg, plan: readJSON(join(work, 'deployment.json')), record: readJSON(newest(work, 'deployed.') || ''), lock: readJSON(join(work, 'lock.json')) });
+        const facts = devnetFacts({ name, reg, plan: readJSON(join(work, 'deployment.json')), record: readJSON(newest(work, 'deployed.') || ''), lock: readJSON(join(work, 'lock.json')), reset: readJSON(join(work, 'platform-reset.json')) });
         if (!facts) continue;
         mkdirSync(join(dataDir, 'devnets', name), { recursive: true });
         writeAtomic(out, JSON.stringify({ ...facts, generatedAt: new Date().toISOString() }));

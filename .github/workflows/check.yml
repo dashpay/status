@@ -21,6 +21,8 @@ jobs:
           cache: npm
       - run: npm ci --include=dev
       - run: npm test
+      - name: Native Platform reset preservation contracts
+        run: python3 -m unittest discover -s agent -p 'test_reset_dashnet.py'
       - name: Incident receiver replay, authentication and worker safeguards
         run: python3 -m unittest discover -s deploy/incident-broker -p 'test_*.py'
       - run: npm run lint
@@ -31,6 +33,8 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends nginx
           node scripts/smoke-api-compat.mjs
+      - name: Native Platform reset UI (desktop and mobile)
+        run: node scripts/browser-reset-check.mjs
       - name: Rendered public board and operator deploy flow (fixtures)
         run: node scripts/browser-check.mjs
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
