@@ -2,8 +2,10 @@ services:
   web:
     environment:
       INCIDENT_API_TOKEN_FILE: /run/secrets/incident-read-token
+      GITHUB_RELEASE_WEBHOOK_SECRET_FILE: /run/secrets/github-release-webhook
     volumes:
       - /etc/dash-status/incidents/incident-read-token:/run/secrets/incident-read-token:ro
+      - /etc/dash-status/incidents/github-release-webhook:/run/secrets/github-release-webhook:ro
   incidents:
     image: dash-status:current
     pull_policy: never

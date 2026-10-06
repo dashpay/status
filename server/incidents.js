@@ -99,6 +99,7 @@ function hostProofs(row, network, settings, coreTip, platformTip, now) {
   return [...proofs];
 }
 export const TITLES = {
+  platform_release_compatibility: 'Platform release compatibility check and dash-network-go fix',
   collector_stale: 'Network observations missing or stale', discovery_failed: 'Network discovery incomplete',
   host_health: 'Network host health check failed', endpoint_failed: 'Network endpoint check failed',
   reporter_missing: 'CI reporter has never reported', reporter_stale: 'CI reporter stopped reporting',

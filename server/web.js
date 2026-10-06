@@ -11,6 +11,7 @@ import { createAuth } from './auth.js';
 import { createCi } from './ci.js';
 import { loadIncidentState, publicIssues, apiAuthorized, readSecret } from './incidents.js';
 import { remediationView } from './remediation.js';
+import { receiveRelease } from './release-webhook.js';
 import { publicInventory } from './aws-public.js';
 import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, loadSettings, memberOf, operatorFor, readJSON, saveSettings, validateSettings, writeAtomic } from '../shared/settings.js';
 import { expectations } from '../shared/monitoring.js';
@@ -56,6 +57,13 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
       debounce.set('ci', setTimeout(() => push('ci', { at: new Date(clock()).toISOString() }), 2000));
       res.json(r);
     } catch (e) { res.status(400).json({ error: e.message }); }
+  });
+  app.post('/api/webhooks/github/platform-release', express.raw({ type: 'application/json', limit: '1mb' }), (req, res) => {
+    try {
+      const result = receiveRelease({ dataDir, secret: readSecret(process.env.GITHUB_RELEASE_WEBHOOK_SECRET_FILE), raw: req.body,
+        signature: req.get('x-hub-signature-256'), event: req.get('x-github-event'), delivery: req.get('x-github-delivery'), now: clock() });
+      res.status(202).json(result);
+    } catch (e) { res.status(e.status || 503).json({ error: e.status ? e.message : 'Release persistence unavailable; redeliver this event' }); }
   });
   app.use(express.json({ limit: '64kb' }));
   app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });

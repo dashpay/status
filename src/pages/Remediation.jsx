@@ -20,7 +20,7 @@ export default function Remediation() {
   return <div className="pt-5">
     <div className="flex items-start justify-between gap-3 flex-wrap">
       <div><h1 className="text-xl font-semibold">Autonomous remediation</h1>
-        <p className="text-dim text-[12px] mt-1">Network, CI and AWS issues · from detection to verified recovery</p></div>
+        <p className="text-dim text-[12px] mt-1">Network, CI and AWS issues · release compatibility checks and fixes</p></div>
       <button className="btn" onClick={reload}>Refresh</button>
     </div>
     <div className="mt-4"><Err error={error} /></div>
@@ -66,7 +66,7 @@ function Issue({ item, now }) {
   const [label, color] = STAGES[item.stage];
   return <details className="panel group" data-issue-id={item.id}>
     <summary className="cursor-pointer list-none p-3 flex flex-wrap items-start gap-3">
-      <span className={`tag shrink-0 ${color}`}>{label}</span>
+      <span className={`tag shrink-0 ${color}`}>{item.taskType === 'compatibility' ? item.stageLabel : label}</span>
       <div className="min-w-0 flex-1 basis-52">
         <div className="font-semibold break-words">{item.title}</div>
         <div className="text-[11px] text-dim mt-1 break-all">{[item.domain.toUpperCase(), item.target || item.network, item.scope !== item.network ? item.scope : null].filter(Boolean).join(' · ')}</div>
@@ -75,7 +75,7 @@ function Issue({ item, now }) {
       </div>
       <div className="text-[11px] text-dim shrink-0 text-right">
         <div title={clock(item.observedAt)}>Observed {ago(item.observedAt, now)} ago</div>
-        <div className="mt-1">Monitoring: {item.stage === 'classified' ? 'reclassified' : item.monitoring === 'resolved' ? 'recovered' : 'open'}</div>
+        <div className="mt-1">{item.taskType === 'compatibility' ? `Compatibility: ${item.monitoring === 'resolved' ? 'verified' : 'pending'}` : `Monitoring: ${item.stage === 'classified' ? 'reclassified' : item.monitoring === 'resolved' ? 'recovered' : 'open'}`}</div>
         <div className="mt-2 group-open:hidden">Details ↓</div><div className="mt-2 hidden group-open:block">Details ↑</div>
       </div>
     </summary>
@@ -89,7 +89,7 @@ function Issue({ item, now }) {
         {[['Detected', item.firstSeen], ['Repair started', item.startedAt], ['Response finished', item.finishedAt], ['Recovery observed', item.resolvedAt]].map(([title, value]) => <div key={title}><dt>{title}</dt><dd className="mono text-[11px]">{clock(value)}</dd></div>)}
       </dl>
       {item.retryAt && <p className="text-dim">Next eligible check: {clock(item.retryAt)}</p>}
-      {item.lastOutcome && <p className="text-dim">Last response: {item.lastOutcome === 'resolved' ? 'repair reported complete' : item.lastOutcome === 'blocked' ? 'blocked' : 'no change required'}. Service recovery is verified separately.</p>}
+      {item.lastOutcome && <p className="text-dim">Last response: {item.lastOutcome === 'resolved' ? 'work reported complete' : item.lastOutcome === 'blocked' ? 'blocked' : 'no change required'}. {item.taskType === 'compatibility' ? 'Compatibility requires version-bound test evidence; live upgrades are never triggered.' : 'Service recovery is verified separately.'}</p>}
       <div className="mono text-[10px] text-dim break-all">Issue {item.id}{item.runId && ` · Run ${item.runId}`}</div>
     </div>
   </details>;
