@@ -16,6 +16,7 @@ Prints one JSON line with results.
 """
 import base64, fcntl, hashlib, json, os, re, secrets, subprocess, sys, time, urllib.request
 from pathlib import Path
+from explorer_chain import Explorer, retained_explorer
 
 arg = sys.argv[1]
 cfg = json.loads(Path(arg[1:]).read_text() if arg.startswith('@') else base64.b64decode(arg))
@@ -278,6 +279,12 @@ def insight_blocks(seconds=300):
 
 # ---- compose --------------------------------------------------------------
 def compose(faucet_image, frontend_image):
+    previous = json.loads((ROOT / 'compose.json').read_text()) if (ROOT / 'compose.json').exists() else {}
+    installed = [s for s in ('explorer-indexer', 'explorer-api', 'explorer-migrate') if s in previous.get('services', {})]
+    if installed:
+        if len(installed) != 3 or any(previous['services'][s].get('labels', {}).get('dashnet.auxiliary') != cfg['auxiliary'] for s in installed):
+            raise RuntimeError('managed Explorer configuration ownership mismatch')
+    retained = installed and not previous['services']['explorer-api']['image'].startswith('ghcr.io/pshenmic/platform-explorer-')
     pg = secret('postgres')
     ev = cfg['explorerVersion']
     # quorum-list-server reads either a complete config.toml or, when none
@@ -314,10 +321,11 @@ def compose(faucet_image, frontend_image):
                      healthcheck=dict(test=['CMD-SHELL', 'pg_isready -h 127.0.0.1 -p 5433 -U explorer -d explorer'], interval='5s', retries=30)),
         **{'explorer-migrate': dict(svc(idx, env_file=[f'{ROOT}/explorer-indexer.env'], command=['/app/indexer', 'migrate'], depends_on={'postgres': {'condition': 'service_healthy'}}), restart='no')},
         **{'explorer-indexer': svc(idx, env_file=[f'{ROOT}/explorer-indexer.env'], command=['/app/indexer'], depends_on={'explorer-migrate': {'condition': 'service_completed_successfully'}})},
-        **{'explorer-api': svc(f'ghcr.io/pshenmic/platform-explorer-api:{ev}', env_file=[f'{ROOT}/explorer-api.env'], volumes=patch_explorer_api(f'ghcr.io/pshenmic/platform-explorer-api:{ev}'), depends_on={'explorer-migrate': {'condition': 'service_completed_successfully'}})},
+        **{'explorer-api': svc(f'ghcr.io/pshenmic/platform-explorer-api:{ev}', env_file=[f'{ROOT}/explorer-api.env'], volumes=[] if retained else patch_explorer_api(f'ghcr.io/pshenmic/platform-explorer-api:{ev}'), depends_on={'explorer-migrate': {'condition': 'service_completed_successfully'}})},
         **{'explorer-frontend': svc(frontend_image)},
         caddy=svc('caddy:2', volumes=[f'{ROOT}/Caddyfile:/etc/caddy/Caddyfile:ro', 'caddy-data:/data', 'caddy-config:/config']),
     ), volumes={'explorer-db': {}, 'caddy-data': {}, 'caddy-config': {}})
+    spec = retained_explorer(previous, spec)
     # Files are replaced atomically, so a running container keeps the old inode.
     # A content hash per service makes compose recreate exactly the services
     # whose bind-mounted or env files changed (e.g. Caddy after a new site).
@@ -326,7 +334,7 @@ def compose(faucet_image, frontend_image):
         digest = hashlib.sha256(b''.join(Path(f).read_bytes() for f in sorted(files))).hexdigest()[:16]
         svc_spec['labels'] = {**svc_spec.get('labels', {}), 'devnet.config': digest}
     write('compose.json', json.dumps(spec, indent=1))
-    sh('docker', 'compose', '-f', str(ROOT / 'compose.json'), 'pull', '--quiet', 'quorums', 'insight', 'postgres', 'explorer-migrate', 'explorer-api', 'caddy', timeout=1200)
+    sh('docker', 'compose', '-f', str(ROOT / 'compose.json'), 'pull', '--quiet', 'quorums', 'insight', 'postgres', 'caddy', *([] if retained else ['explorer-migrate', 'explorer-api']), timeout=1200)
     # The explorer's indexer and API read Platform; until Platform starts
     # (after the quorums form) run everything else.
     pending = ['explorer-indexer', 'explorer-api'] if cfg.get('platformPending') else []
@@ -361,7 +369,7 @@ def topup_cron():
     # Periodic top-up from the dashnet wallet reuses this script (saved by the agent).
     write('topup.json', json.dumps(dict(cfg, topupOnly=True)), 0o600)
     cron = Path('/etc/cron.d/devnet-faucet-topup')
-    cron.write_text(f'*/15 * * * * root /usr/bin/python3 {ROOT}/services.py @{ROOT}/topup.json >> /var/log/devnet-faucet-topup.log 2>&1\n')
+    cron.write_text(f'*/15 * * * * root /usr/bin/python3 {Path(__file__).resolve()} @{ROOT}/topup.json >> /var/log/devnet-faucet-topup.log 2>&1\n')
     os.chmod(cron, 0o644)
 
 
@@ -427,7 +435,8 @@ frontend_image = build_explorer_frontend()
 compose(faucet_image, frontend_image)
 topup_cron()
 platform = not cfg.get('platformPending')
-result = dict(faucetBalance=balance, faucetImage=faucet_image, frontendImage=frontend_image,
+explorer = Explorer(cfg['auxiliary'], cfg['platformChainId']).reconcile() if platform else None
+result = dict(explorerChain=explorer, faucetBalance=balance, faucetImage=faucet_image, frontendImage=frontend_image,
               quorums=wait('http://127.0.0.1:8080/health'), quorumList=wait_quorums() if platform else None,
               insight=wait('http://127.0.0.1:3001/insight-api/status'), insightBlocks=insight_blocks(), faucet=wait('http://127.0.0.1:8000/health'),
               explorerApi=wait('http://127.0.0.1:3005/status', 300) if platform else None,

@@ -1,11 +1,14 @@
 // Public services for console-created devnets, placed on the dashnet wallet
 // host: quorum-list-server, Platform Explorer and dash-faucet behind Caddy TLS.
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { ChangeResourceRecordSetsCommand, GetChangeCommand } from '@aws-sdk/client-route-53';
 
 export const shortName = (name) => name.replace(/^devnet-/, '');
 
 const REMOTE = readFileSync(new URL('./services-remote.py', import.meta.url), 'utf8');
+const EXPLORER = readFileSync(new URL('./explorer-chain.py', import.meta.url), 'utf8');
+const RUNNER = `/opt/devnet-services/runners/${createHash('sha256').update(REMOTE).update(EXPLORER).digest('hex')}`;
 const RELAY_PORT = 26667;
 
 // Every seed name reaches every validator (one Caddy); three keep Let's
@@ -76,8 +79,10 @@ function servicesConfig(name, d, dplan) {
 
 async function runRemote(pool, wallet, cfg, onLine, timeoutMs = 100 * 60_000) {
   const arg = Buffer.from(JSON.stringify(cfg)).toString('base64');
-  await pool.exec(host(wallet), 'sudo install -d -m 0700 /opt/devnet-services && sudo tee /opt/devnet-services/services.py >/dev/null && sudo chmod 0700 /opt/devnet-services/services.py', REMOTE, 60_000);
-  const out = await pool.exec(host(wallet), `set -o pipefail; { sudo python3 /opt/devnet-services/services.py ${arg} 2>&1 1>&3 | tee /tmp/devnet-services.log >&2; } 3>&1`, null, timeoutMs, onLine);
+  // Immutable source paths: never overwrite an active install/top-up script.
+  await pool.exec(host(wallet), `sudo install -d -m 0700 ${RUNNER} && if ! sudo test -f ${RUNNER}/services.py; then sudo tee ${RUNNER}/services.py >/dev/null; fi`, REMOTE, 60_000);
+  await pool.exec(host(wallet), `if ! sudo test -f ${RUNNER}/explorer_chain.py; then sudo tee ${RUNNER}/explorer_chain.py >/dev/null; fi`, EXPLORER, 60_000);
+  const out = await pool.exec(host(wallet), `set -o pipefail; { sudo python3 ${RUNNER}/services.py ${arg} 2>&1 1>&3 | tee /tmp/devnet-services.log >&2; } 3>&1`, null, timeoutMs, onLine);
   return JSON.parse(out.trim().split('\n').pop());
 }
 

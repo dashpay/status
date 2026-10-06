@@ -14,6 +14,7 @@ import { readJSON, writeAtomic } from '../shared/settings.js';
 import { createResetJournal, RESET_COMPONENTS } from './reset-journal.js';
 import { resetSidecars, sidecarsFor } from './reset-images.js';
 import { mapLimit } from './collector.js';
+import { reconcileExplorer } from './explorer.js';
 
 const NATIVE_SCRIPT = readFileSync(new URL('./reset-dashnet.py', import.meta.url), 'utf8');
 const SCRIPT = readFileSync(new URL('./reset-remote.py', import.meta.url), 'utf8');
@@ -36,7 +37,7 @@ export function validateReset(settings, q) {
   return { network: n, images, epoch };
 }
 
-export function createReset({ ctx, dirs, pool, getSettings, journalImpl, wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
+export function createReset({ ctx, dirs, pool, getSettings, journalImpl, explorer = reconcileExplorer, wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   const { step, save, write } = ctx;
   const journal = journalImpl || createResetJournal({ dirs, ctx });
 
@@ -131,14 +132,22 @@ export function createReset({ ctx, dirs, pool, getSettings, journalImpl, wait = 
         r.expectedMiner = ready.result.minerId;
       }
     }
-    if (r.native) journal.seal(r, observed, sidecars);
+    if (r.native) {
+      const wallet = nativePlan.targets.find((t) => t.role === 'wallet');
+      if (wallet) {
+        const done = step(r, 'Check managed Explorer ownership and database');
+        r.explorer = await explorer({ pool, target:wallet, network:r.network, chain:nativePlan.platformChainId || `dash-${r.coreChain}`, checkOnly:true });
+        done('ok', r.explorer?.installed ? 'Old index will be backed up and rebuilt for the new chain' : 'No managed Explorer installed');
+      }
+      journal.seal(r, observed, sidecars);
+    }
     const hb = base.filter((_, i) => all[i].resetRole === 'hpmn').map((x) => x.result);
     const sb = base.filter((_, i) => all[i].resetRole === 'seed').map((x) => x.result);
     const uniq = (xs) => [...new Set(xs.map((x) => JSON.stringify(x ?? null)))].map((x) => JSON.parse(x));
     r.review = {
       kind: 'platform-reset', planId: `reset-${r.id}-${r.anchor.height}`, preparedAt: new Date().toISOString(), coreChain: network.coreNetwork,
       targets: r.targets, hpmns: hpmns.length, seeds: seeds.length, anchor: r.anchor, previousAnchor: uniq(hb.map((x) => x.anchor)),
-      native: r.native, coreMigrationMode: r.native ? 'parallel-v1' : undefined, coreMigrations: r.coreMigrations, targetImages: r.nativeImages, requested: r.resolvedChoices, current: uniq(hb.map((x) => x.images)), next: r.native ? r.nativeImages[hpmns[0].name] : r.request.images, epoch: { current: uniq(hb.map((x) => x.epochTime)), next: r.native ? hb[0].epochTime : epoch },
+      explorer: r.explorer, native: r.native, coreMigrationMode: r.native ? 'parallel-v1' : undefined, coreMigrations: r.coreMigrations, targetImages: r.nativeImages, requested: r.resolvedChoices, current: uniq(hb.map((x) => x.images)), next: r.native ? r.nativeImages[hpmns[0].name] : r.request.images, epoch: { current: uniq(hb.map((x) => x.epochTime)), next: r.native ? hb[0].epochTime : epoch },
       dashmate: uniq(hb.map((x) => x.dashmate)), configFormat: uniq(hb.map((x) => x.configFormatVersion)), tor: uniq(hb.map((x) => x.tor?.enabled)),
       seedImages: uniq(sb.map((x) => x.tenderdashImage)), canary: canary.result.checks, rendered: canary.result.rendered,
       coreHeight: Math.max(...hb.map((x) => x.height)),
@@ -273,6 +282,15 @@ export function createReset({ ctx, dirs, pool, getSettings, journalImpl, wait = 
     r.result = { healthy: true, consensusHeight: Math.max(...v.map((x) => x.consensus.height)), epochs: v[0]?.epochs, restarts: Object.fromEntries(Object.entries(r.stages.verify).filter(([, x]) => Object.keys(x.result?.restarts || {}).length).map(([k, x]) => [k, x.result.restarts])) };
     if (r.native) {
       const plan = readJSON(join(dirs.private, 'devnets', r.network, 'deployment.json'));
+      const wallet = plan.targets.find((t) => t.role === 'wallet');
+      if (wallet) {
+        const done = step(r, 'Reconcile Explorer index with the new Platform chain');
+        try {
+          r.result.explorer = await explorer({ pool, target:wallet, network:r.network, chain:plan.platformChainId || `dash-${r.coreChain}`, anchor:r.anchor.height });
+          save(r);
+          done('ok', r.result.explorer.installed ? `indexed ${r.result.explorer.indexed}/${r.result.explorer.chain}; previous database preserved` : 'No managed Explorer installed');
+        } catch (error) { done('failed', error.message); throw error; }
+      }
       const receiptHosts = plan.targets.map((t) => ({ name:t.name, instanceId:t.instanceId, publicIp:t.sshAddress, resetRole:t.role }));
       await barrier(r, 'Commit verified native host version receipts', 'journal-commit', receiptHosts);
       await journal.complete(r);
