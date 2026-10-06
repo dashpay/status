@@ -42,7 +42,11 @@ test('native reset binds every deployed validator, canaries all, excludes wallet
   const ctx = { step: () => () => {}, save: () => {}, write: () => {} };
   let begun = 0, committed = 0;
   const journalImpl = { prepare:async (r) => { r.nativeArchitectures = Object.fromEntries(hosts.map((h)=>[h.name,'arm64'])); r.nativeImages = Object.fromEntries(hosts.map((h)=>[h.name,{}])); return { targets:hosts }; }, original:()=>({deployment:{}}), seal:()=>{}, begin:async()=>{begun++;}, complete:async()=>{committed++;} };
-  const reset = createReset({ ctx, dirs, pool, journalImpl, getSettings: () => ({ networks: [{ name, chainType: 'devnet', coreNetwork: name, kind: 'dashnet' }] }) });
+  const reset = createReset({ explorer:async({checkOnly})=>{
+    calls.push([checkOnly ? 'explorer-check' : 'explorer-reconcile', 'wallet-001']);
+    if (!checkOnly && fail === 'explorer') throw Error('Explorer not caught up');
+    return {installed:true,indexed:8,chain:8};
+  }, ctx, dirs, pool, journalImpl, getSettings: () => ({ networks: [{ name, chainType: 'devnet', coreNetwork: name, kind: 'dashnet' }] }) });
   const record = () => ({ id: 'native-reset-test', network: name, request: { network: name, action: 'platform-reset' } });
   const r = record();
   await reset.prepareReset(r);
@@ -57,11 +61,16 @@ test('native reset binds every deployed validator, canaries all, excludes wallet
   fail = 'wipe:validators-002';
   await assert.rejects(reset.executeReset(r), /wipe failed/);
   assert.ok(!calls.some(([s]) => ['apply','start'].includes(s)));
+  fail = 'explorer';
+  await assert.rejects(reset.executeReset(r), /Explorer not caught up/);
+  assert.equal(committed, 0, 'native completion waits for Explorer');
   fail = null;
   await reset.executeReset(r);
   assert.equal(calls.filter(([s,h]) => s === 'wipe' && h === 'validators-001').length, 1);
   assert.ok(r.result.healthy);
-  assert.equal(begun, 2); assert.equal(committed, 1);
+  assert.equal(begun, 3); assert.equal(committed, 1);
+  assert.equal(r.review.explorer.installed, true);
+  assert.equal(r.result.explorer.indexed, 8);
   assert.ok(!calls.some(([s,h]) => h === 'wallet-001' && ['wipe','apply','start'].includes(s)));
 });
 
@@ -91,7 +100,7 @@ test('release-required Core migration is reviewed, sequential, resumes and alway
   }};
   const journalImpl={prepare:async(r)=>{r.nativeImages=Object.fromEntries(hosts.map(h=>[h.name,{}]));r.nativeArchitectures=Object.fromEntries(hosts.map(h=>[h.name,'arm64']));return {targets:hosts};},original:()=>({deployment:{}}),
     seal:(r)=>{r.nativeTransitions=Object.fromEntries(hosts.map(h=>[h.name,{preserve:{coreId:'old'}}]));},begin:async()=>{begun=true;},complete:async(r)=>{assert.equal(mining,false);assert.equal(r.nativeTransitions['validators-001'].preserve.coreConfig,'migrated');complete=true;}};
-  const reset=createReset({dirs,pool,journalImpl,ctx:{step:()=>()=>{},save:()=>{},write:()=>{}},getSettings:()=>({networks:[{name,chainType:'devnet',kind:'dashnet',coreNetwork:name}]}),wait:async()=>{}});
+  const reset=createReset({ explorer:async()=>({installed:false}),dirs,pool,journalImpl,ctx:{step:()=>()=>{},save:()=>{},write:()=>{}},getSettings:()=>({networks:[{name,chainType:'devnet',kind:'dashnet',coreNetwork:name}]}),wait:async()=>{}});
   const r={id:'core-migration',network:name,request:{network:name,action:'platform-reset'}};
   await reset.prepareReset(r);
   assert.equal(r.review.coreMigrationMode,'parallel-v1');
@@ -141,7 +150,7 @@ test('reset-only parallel Core migration restarts all 13 before verification, re
   }};
   const journalImpl={prepare:async(r)=>{r.nativeImages=Object.fromEntries(hosts.map(h=>[h.name,{}]));r.nativeArchitectures=Object.fromEntries(hosts.map(h=>[h.name,'arm64']));return {targets:hosts};},original:()=>({deployment:{}}),
     seal:(r)=>{r.nativeTransitions=Object.fromEntries(hosts.map(h=>[h.name,{preserve:{coreId:'old'}}]));},begin:async()=>{begun=true;},complete:async(r)=>{assert.equal(mining,false);assert.equal(r.nativeTransitions['validators-001'].preserve.coreConfig,'migrated');complete=true;}};
-  const reset=createReset({dirs,pool,journalImpl,ctx:{step:()=>()=>{},save:()=>{},write:()=>{}},getSettings:()=>({networks:[{name,chainType:'devnet',kind:'dashnet',coreNetwork:name}]}),wait:async()=>{}});
+  const reset=createReset({ explorer:async()=>({installed:false}),dirs,pool,journalImpl,ctx:{step:()=>()=>{},save:()=>{},write:()=>{}},getSettings:()=>({networks:[{name,chainType:'devnet',kind:'dashnet',coreNetwork:name}]}),wait:async()=>{}});
   const r={id:'core-migration',network:name,request:{network:name,action:'platform-reset'}};
   await reset.prepareReset(r);
   assert.equal(r.review.coreMigrationMode,'parallel-v1');

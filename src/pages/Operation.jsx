@@ -269,6 +269,7 @@ function ResetReview({ op, review, operator, pending, act }) {
           <div className="text-dim">Renders only: <span className="mono">{review.rendered.join(', ')}</span></div>
         </div>
       </Section>
+      {review.explorer?.installed && <Section title="Explorer index recovery"><p className="panel p-3 text-[12px]">This confirmation also rebuilds Explorer for the new Platform chain. The previous index and a private backup are preserved; installed Explorer images stay unchanged. Completion requires the index and API to catch up.</p></Section>}
       {Object.values(review.coreMigrations || {}).some((changes) => changes.length > 0) && <Section title="Automatic Core compatibility migration">
         <div className="panel p-3 text-[12px] space-y-2">
           <p>The selected release requires Core RPC access and compatibility changes. This same confirmation includes them: back up, migrate Core/Tor services {review.coreMigrationMode === 'parallel-v1' ? 'together in parallel (up to 32 validators per batch)' : 'one node at a time'} with mining paused. {review.coreMigrationMode === 'parallel-v1' ? 'After every restarted Core is READY and synced, resume mining, verify quorum connections, then finish redeploying Platform.' : 'Verify READY and quorum connections, then finish redeploying Platform.'} Core chain, wallets, keys and Core image are preserved.</p>

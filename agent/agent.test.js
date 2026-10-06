@@ -378,7 +378,7 @@ test('service images are prebuilt on the wallet host without the chain, best eff
   const lines = [], calls = [];
   const pool = { exec: async (h, cmd) => {
     calls.push([h.name, cmd]);
-    const run = cmd.match(/python3 \/opt\/devnet-services\/services\.py (\S+)/);
+    const run = cmd.match(/python3 \/opt\/devnet-services\/runners\/[a-f0-9]{64}\/services\.py (\S+)/);
     if (!run) return '';
     const cfg = JSON.parse(Buffer.from(run[1], 'base64').toString());
     assert.equal(cfg.prebuildOnly, true);
@@ -438,7 +438,7 @@ test('services before Platform skip only the Platform-dependent checks', async (
   const result = { faucetBalance: 50000, quorums: 200, quorumList: null, insight: 200, insightBlocks: 4100, faucet: 200, explorerApi: null, explorerValidators: null, explorerFrontend: 200, walletAddress: 'y1', promoCodes: {} };
   let sent;
   const pool = { exec: async (h, cmd) => {
-    const run = cmd.match(/python3 \/opt\/devnet-services\/services\.py (\S+)/);
+    const run = cmd.match(/python3 \/opt\/devnet-services\/runners\/[a-f0-9]{64}\/services\.py (\S+)/);
     if (!run) return '';
     sent = JSON.parse(Buffer.from(run[1], 'base64').toString());
     return JSON.stringify(result);
@@ -477,7 +477,7 @@ test('services publish DAPI seeds and the quorum host SDKs derive from the Core 
   const r53 = { send: async (c) => { for (const x of c.input?.ChangeBatch?.Changes || []) upserts.push([x.ResourceRecordSet.Name, x.ResourceRecordSet.ResourceRecords[0].Value]); return { ChangeInfo: { Id: 'c', Status: 'INSYNC' } }; } };
   let sent;
   const pool = { exec: async (h, cmd) => {
-    const run = cmd.match(/python3 \/opt\/devnet-services\/services\.py (\S+)/);
+    const run = cmd.match(/python3 \/opt\/devnet-services\/runners\/[a-f0-9]{64}\/services\.py (\S+)/);
     if (!run) return '';
     sent = JSON.parse(Buffer.from(run[1], 'base64').toString());
     return JSON.stringify({ faucetBalance: 50000, quorums: 200, quorumList: 4, insight: 200, insightBlocks: 4100, faucet: 200, explorerApi: 200, explorerValidators: 200, explorerFrontend: 200, walletAddress: 'y1', promoCodes: {} });

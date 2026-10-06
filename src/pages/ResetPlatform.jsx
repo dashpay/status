@@ -63,6 +63,7 @@ export default function ResetPlatform({ name }) {
           <li><b>Wipe</b> Platform on all HPMNs {native ? '(only the Drive and Tenderdash chain-data volumes)' : <>(<span className="mono">dashmate reset --platform --force</span>), then reset only the seed’s Tenderdash data directory</>}.</li>
           {native && <li><b>Migrate Core automatically</b> when required by the release, with private backups, parallel restarts (up to 32 validators per batch) and fleet health checks. Core chain and wallets are never wiped.</li>}
           <li><b>Apply</b> the images, anchor and epoch; render only Platform files; start the seed, then every HPMN.</li>
+          {native && <li><b>Rebuild Explorer</b> for the new chain, keeping the previous index and a private backup. Installed Explorer images are preserved.</li>}
           <li><b>Verify</b> READY, containers and images, consensus, epochs at config/env/parsed layers, DAPI TLS, Core unchanged.</li>
         </ol>
       </Section>

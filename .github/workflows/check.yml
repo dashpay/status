@@ -23,6 +23,8 @@ jobs:
       - run: npm test
       - name: Native Platform reset preservation contracts
         run: python3 -m unittest discover -s agent -p 'test_reset_dashnet.py'
+      - name: Explorer chain reset and retained deployment contracts
+        run: python3 -m unittest discover -s agent -p 'test_explorer_chain.py'
       - name: Incident receiver replay, authentication and worker safeguards
         run: python3 -m unittest discover -s deploy/incident-broker -p 'test_*.py'
       - run: npm run lint
