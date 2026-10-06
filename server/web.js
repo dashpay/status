@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createAuth } from './auth.js';
 import { createCi } from './ci.js';
+import { operationMaintenance } from './operation-maintenance.js';
 import { loadIncidentState, publicIssues, apiAuthorized, readSecret } from './incidents.js';
 import { remediationView } from './remediation.js';
 import { publicInventory } from './aws-public.js';
@@ -100,7 +101,8 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     reloadSettings();
     const state = loadIncidentState(dataDir);
     const full = isAdmin(req) || apiAuthorized(req.get('authorization'), readSecret(process.env.INCIDENT_API_TOKEN_FILE));
-    const body = full && state ? { schemaVersion: 1, generatedAt: state.generatedAt, issues: state.issues, sources: state.sources, delivery: { ...state.delivery, pending: state.outbox?.length || 0, quarantined: state.quarantined?.length || 0 } } : publicIssues(state, visible(req).map((n) => n.name));
+    const maintenance = operationMaintenance(dataDir, settings, clock());
+    const body = full && state ? { schemaVersion: 1, generatedAt: state.generatedAt, maintenance, issues: state.issues, sources: state.sources, delivery: { ...state.delivery, pending: state.outbox?.length || 0, quarantined: state.quarantined?.length || 0 } } : publicIssues(state, visible(req).map((n) => n.name));
     const observedAt = Date.parse(state?.generatedAt);
     const stale = !Number.isFinite(observedAt) || clock() - observedAt > 180_000 || observedAt > clock() + 60_000;
     res.status(stale ? 503 : 200).json({ ...body, stale });
@@ -110,7 +112,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   app.get('/api/remediation', (req, res) => {
     reloadSettings();
     const full = isAdmin(req) || apiAuthorized(req.get('authorization'), readSecret(process.env.INCIDENT_API_TOKEN_FILE));
-    res.json(remediationView(loadIncidentState(dataDir), { full, visibleNetworks: visible(req).map((n) => n.name), now: clock() }));
+    res.json(remediationView({ ...loadIncidentState(dataDir), maintenance:operationMaintenance(dataDir, settings, clock()) }, { full, visibleNetworks: visible(req).map((n) => n.name), now: clock() }));
   });
   app.get('/api/me', (req, res) => {
     const u = user(req);

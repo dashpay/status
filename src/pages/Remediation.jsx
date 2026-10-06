@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { ago, clock, useNow, useResource, useSession } from '../lib.js';
 import { Empty, Err, Section } from '../ui.jsx';
 
-const STAGES = { working: ['Working', 'lv-deploying'], queued: ['Queued', 'text-dim'], blocked: ['Blocked', 'lv-warn'],
+const STAGES = { maintenance: ['Maintenance', 'text-dim'], working: ['Working', 'lv-deploying'], queued: ['Queued', 'text-dim'], blocked: ['Blocked', 'lv-warn'],
   verifying: ['Verifying', 'lv-warn'], followup: ['Recovered · follow-up', 'text-dim'], fixed: ['Verified fixed', 'lv-ok'], recovered: ['Recovered', 'lv-ok'],
   classified: ['Monitoring corrected', 'text-dim'], review: ['Review only', 'text-dim'], unknown: ['Awaiting status', 'text-dim'] };
 
@@ -38,6 +38,7 @@ export default function Remediation() {
         {data.public && <p className="mt-2 text-dim">Public view · target names and repair notes are available to signed-in administrators.</p>}
         {data.truncated && <p className="mt-2 lv-warn">The worker history is truncated; some response details are unavailable.</p>}
       </div>
+      {!!data.maintenance?.length && <div className="panel mt-3 p-3 text-[12px]"><b>Operation maintenance</b> · {data.maintenance.map((m) => m.network).join(', ')}. Expected downtime stays visible; automatic remediation is held for these networks until operations end and fresh monitoring arrives.</div>}
       <div className="grid grid-cols-2 lg:grid-cols-6 gap-2 mt-3">
         {['queued', 'working', 'blocked', 'followup', 'verifying', 'fixed'].map((stage) => <button key={stage} onClick={() => setFilter(stage)}
           className={`panel text-left px-3 py-3 ${filter === stage ? 'ring-1 ring-[#58a6ff]' : ''}`} aria-pressed={filter === stage}>

@@ -110,7 +110,7 @@ export const TITLES = {
   idle_address: 'Unassociated public address requires ownership review',
 };
 
-export function deriveIssues({ settings, states, ci, aws, now = Date.now() }) {
+export function deriveIssues({ settings, states, ci, aws, maintenance = {}, now = Date.now() }) {
   const issues = [], sources = {}, checks = {}, samples = {}, suppressions = {};
   const source = (key, at, complete, max) => {
     sources[key] = { observedAt: Number.isFinite(Date.parse(at)) ? at : null, fresh: fresh(at, now, max), complete: complete === true, maxAgeMs: max };
@@ -134,7 +134,7 @@ export function deriveIssues({ settings, states, ci, aws, now = Date.now() }) {
     const s = states?.[n.name], generation = n.generation ?? s?.generation ?? n.coreNetwork ?? 'unversioned';
     const identity = [generation], key = `network:${n.name}`, max = Math.max(180_000, settings.pollSeconds * 4000);
     const suppressed = ['creating', 'services'].includes(n.lifecycle?.status) || n.lifecycle?.platform?.status === 'starting'
-      || n.maintenance?.active === true || s?.maintenance?.active === true || text(s?.journal?.owner);
+      || maintenance[n.name]?.active === true || n.maintenance?.active === true || s?.maintenance?.active === true || text(s?.journal?.owner);
     suppressions[n.name] = suppressed;
     const current = source(key, s?.generatedAt, object(s) && Array.isArray(s.hosts), max);
     source(`${key}:monitor`, iso(now), true, max);

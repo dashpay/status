@@ -1,6 +1,7 @@
 // Single writer. No cloud, SSH, Docker or OpenClaw credentials in this process.
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { operationMaintenance, heldByOperation } from './operation-maintenance.js';
 import { createCi } from './ci.js';
 import { loadSettings, readJSON } from '../shared/settings.js';
 import { deriveIssues, reconcile, loadIncidentState, saveIncidentState, readSecret, signedHeaders, validateDestination } from './incidents.js';
@@ -10,8 +11,10 @@ export async function cycle({ dataDir, ci, destination, secret, fetcher = fetch,
   const states = Object.fromEntries(settings.networks.map((n) => [n.name, readJSON(join(dataDir, 'state', `${n.name}.json`))]));
   const aws = readJSON(join(dataDir, 'aws', 'inventory.json'));
   if (aws) aws.health = readJSON(join(dataDir, 'aws', 'health.json'));
-  const derived = deriveIssues({ settings, states, ci: (ci || createCi({ dataDir })).summary({ admin: true }), aws, now });
+  const maintenance = operationMaintenance(dataDir, settings, now);
+  const derived = deriveIssues({ settings, states, maintenance, ci: (ci || createCi({ dataDir })).summary({ admin: true }), aws, now });
   const state = reconcile(loadIncidentState(dataDir), derived, now);
+  state.maintenance = maintenance;
   // Commit events before any attempt; lost acknowledgements replay eventId safely.
   saveIncidentState(dataDir, state);
   if (destination && secret && (!state.delivery?.nextAttemptAt || Date.parse(state.delivery.nextAttemptAt) <= now)) {
@@ -26,7 +29,7 @@ export async function cycle({ dataDir, ci, destination, secret, fetcher = fetch,
     }
     const events = [];
     let bytes = 0;
-    for (const event of state.outbox.slice(0, state.delivery?.batchSize || 50)) {
+    for (const event of state.outbox.filter((e) => !heldByOperation(e.issue, maintenance) && !state.issues.some((i) => i.id === e.issue.id && i.suppressed)).slice(0, state.delivery?.batchSize || 50)) {
       const size = Buffer.byteLength(JSON.stringify(event));
       if (bytes + size > 400_000) break;
       events.push(event); bytes += size;
