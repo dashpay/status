@@ -41,15 +41,15 @@ export default function ResetPlatform({ name }) {
       </div>
       <p className="text-dim text-[12px] mt-1">Resets Platform state on {validators.length} HPMNs and {seeds.length} Tenderdash seed(s). Core chain, wallets, masternode registrations, node identities, certificates and Tor settings are preserved. Wallet, miner and web hosts are not touched.</p>
       <Section title="Targets">
-        <div className="panel p-3 text-[12px] mono">{[...validators, ...seeds].map((h) => h.name).join('  ')}</div>
+        <div className="panel p-3 text-[12px] mono break-words">{[...validators, ...seeds].map((h) => h.name).join('  ')}</div>
         {unreachable.length > 0 && <div className="lv-down text-[12px] mt-1">Not reachable: {unreachable.map((h) => h.name).join(', ')}. Every target must be reachable.</div>}
       </Section>
       <Section title="Version set">
-        <div className="panel p-3 grid gap-3 sm:grid-cols-2">
+        <div className="panel p-3 grid min-w-0 gap-3 sm:grid-cols-2">
           {native && <p className="sm:col-span-2 text-[12px] text-dim">Wipe and redeploy the installed release, keeping its image pins and epoch settings. Use Deploy to change versions.</p>}
           {Object.keys(REPOS).map((c) => (
-            <label key={c} className="text-[12px]"><div className="text-dim mb-1">{c} <span className="mono">{REPOS[c]}</span> · running <span className="mono">{current(c)}</span></div>
-              <input className="input w-full mono" readOnly={native} value={value[c]} onChange={(e) => setImages({ ...value, [c]: e.target.value.trim() })} /></label>
+            <label key={c} className="text-[12px] min-w-0"><div className="text-dim mb-1">{c} <span className="mono">{REPOS[c]}</span> · running <span className="mono break-all">{current(c)}</span></div>
+              <input className="input w-full min-w-0 mono" readOnly={native} value={value[c]} onChange={(e) => setImages({ ...value, [c]: e.target.value.trim() })} /></label>
           ))}
           {!native && <label className="text-[12px]"><div className="text-dim mb-1">Epoch length (seconds; dashmate platform.drive.abci.epochTime)</div>
             <input className="input w-32 mono" value={epoch} onChange={(e) => setEpoch(Number(e.target.value) || 0)} /></label>}

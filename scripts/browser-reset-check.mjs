@@ -18,7 +18,7 @@ const at = new Date().toISOString();
 writeFileSync(join(root, 'state/devnet-sakura.json'), JSON.stringify({ network: 'devnet-sakura', generatedAt: at, hosts: [
   { name: 'validators-001', role: 'validator', state: 'running', publicIp: '192.0.2.1', probe: { ok: true, at, data: {
     core: { chain: 'devnet-sakura', blocks: 100, headers: 100, synced: true, masternode: { state: 'READY' } },
-    containers: ['drive', 'tenderdash', 'rs-dapi'].map((component) => ({ name: component, image: `dashpay/${component}:1`, repo: `dashpay/${component}`, running: true, state: 'running', restarts: 0 })),
+    containers: ['drive', 'tenderdash', 'rs-dapi'].map((component) => ({ name: component, image: `index.docker.io/dashpay/${component}@sha256:${'a'.repeat(64)}`, repo: `dashpay/${component}`, running: true, state: 'running', restarts: 0 })),
   } } },
 ] }));
 const fetcher = async (url) => url.includes('access_token') ? Response.json({ access_token: 'fixture' }) : Response.json({ id: 42, login: 'fixture' });
