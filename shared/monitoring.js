@@ -15,6 +15,18 @@ export function expectations(operations = [], now = Date.now()) {
     }
     if (!op.confirmedAt || !op.progress || !['running', 'succeeded', 'failed', 'interrupted', 'cancelled'].includes(op.status)) continue;
     const active = op.status === 'running' && now - Date.parse(op.updatedAt) < 15 * 60_000;
+    // Native reset reviews resolve the manifest to each host's architecture.
+    // The registry retains the manifest pin; comparing that to a running child
+    // digest falsely reports drift after a successfully verified reset.
+    if (op.request?.action === 'platform-reset' && op.review?.native) {
+      for (const [node, images] of Object.entries(op.review.targetImages || {})) {
+        for (const component of ['drive', 'dapi', 'tenderdash', 'gateway']) {
+          if (typeof images[component] !== 'string') continue;
+          targets[node] ??= {};
+          targets[node][component] = { to: images[component], active, since: op.finishedAt || op.confirmedAt };
+        }
+      }
+    }
     for (const c of [...(op.review?.changes || []), ...(op.artifacts?.phases || []).flatMap((p) => p.changes || [])]) {
       if (typeof c.to !== 'string' || !c.node || !c.component) continue;
       targets[c.node] ??= {};

@@ -85,3 +85,25 @@ test('architecture-specific reviewed creation digests prove tag intent; unresolv
   network.images.core='dashpay/dashd:24';
   assert.equal(convergence(h,{containers:[c]},network,expectations([op],now),comp)[0].status,'unknown','old creation intent must not override a later tag');
 });
+
+test('native reset uses reviewed per-host pins, not manifest digests or transient helper images', () => {
+  const stamp = new Date(now).toISOString();
+  const op = { createdAt: stamp, updatedAt: stamp, status: 'review', progress: {}, request: { action: 'platform-reset' }, review: { native: true, targetImages: {
+    'hp-1': { drive: 'dashpay/drive@sha256:arm', helper: 'dashpay/dashmate-helper@sha256:helper' },
+    'hp-2': { drive: 'dashpay/drive@sha256:amd' },
+  } } };
+  assert.deepEqual(expectations([op], now), {});
+  op.confirmedAt = stamp; op.status = 'succeeded'; op.finishedAt = stamp;
+  const pins = expectations([op], now);
+  assert.equal(pins['hp-1'].helper, undefined, 'helper is not a running service');
+  assert.equal(pins['hp-2'].drive.to, 'dashpay/drive@sha256:amd');
+  const h = host(now + 1000), network = { images: { drive: 'dashpay/drive@sha256:manifest' } };
+  const container = { repo: 'dashpay/drive', image: 'index.docker.io/dashpay/drive@sha256:arm', running: true };
+  const check = (expect) => convergence(h, { containers: [container] }, network, expect, { 'dashpay/drive': 'drive' })[0].status;
+  assert.equal(check(pins), 'matched');
+  container.image = 'dashpay/drive@sha256:wrong';
+  assert.equal(check(pins), 'drift', 'real drift is still reported');
+  container.image = 'dashpay/drive@sha256:next';
+  const later = { createdAt: new Date(now + 100).toISOString(), confirmedAt: stamp, finishedAt: stamp, status: 'succeeded', progress: {}, review: { changes: [{ node: 'hp-1', component: 'drive', to: container.image }] } };
+  assert.equal(check(expectations([later, op], now)), 'matched', 'later upgrades supersede reset pins');
+});
