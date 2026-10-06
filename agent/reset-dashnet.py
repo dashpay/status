@@ -439,7 +439,7 @@ class Reset:
                     out[service] = c
         return out
 
-    def core_migrate(self):
+    def core_restart(self):
         b = self.baseline_record()
         prepared = read(self.state / 'prepared.json')
         if not prepared.get('coreMigration'):
@@ -482,6 +482,32 @@ class Reset:
                 os.replace(tmp, destination)
             write(self.home / '.dashnet-compose.json', overrides)
             self.compose(self.home, 'up', '-d', '--no-deps', *prepared['coreFingerprints'])
+        return {'restarted': True}
+
+    def core_migrate(self):
+        # Retain the reviewed rolling path for older, already-confirmed plans.
+        self.core_restart()
+        return self.core_verify()
+
+    def core_ready(self):
+        return self.core_verify(finalize=False)
+
+    def core_verify(self, finalize=True):
+        b = self.baseline_record()
+        prepared = read(self.state / 'prepared.json')
+        if not prepared.get('coreMigration'):
+            self.preserved(b)
+            return {'migrated': False, 'journal': self.journal_baseline()}
+        if (self.state / 'baseline-effective.json').exists():
+            self.preserved(b)
+            return {'migrated': True, 'journal': b['journal']}
+        marker = self.state / 'core-migration.json'
+        need(marker.exists() and (self.state / 'wipe-started.json').exists(), 'Core restart must precede migration verification')
+        stage = self.state / 'render'
+        for rel, value in prepared['files'].items():
+            need(digest(stage / rel) == value, 'prepared migration files changed')
+        doc = read(self.home / 'config.json')
+        self.migration_guard(b, prepared)
         deadline = time.monotonic() + 300
         settled = None
         while True:
@@ -506,7 +532,7 @@ class Reset:
                             pass  # peer may already have disconnected
                     write(marker, {'phase': 'reconnected', 'coreConfigBefore': b['journal']['preservation']['coreConfig']})
                     ready = False
-                if ready:
+                if ready and finalize:
                     valid = set(self.rpc('protx', 'list', 'valid'))
                     missing = [member for quorum in self.rpc('quorum', 'dkgstatus').get('quorumConnections', [])
                                for member in quorum.get('quorumConnections', [])
@@ -523,6 +549,8 @@ class Reset:
             need(time.monotonic() < deadline, 'Core migration not READY, synchronized and reconnected')
             time.sleep(3)
         self.migration_guard(b, prepared)
+        if not finalize:
+            return {'ready': True}
         expected = hashlib.sha256(self.normalized(stage / self.node / 'core/dash.conf', (stage / self.node / 'core/dash.conf').read_bytes(), doc)).hexdigest()
         observed = self.journal_baseline()
         need(observed['preservation']['coreConfig'] == expected, 'Core migration configuration not verified')
@@ -775,11 +803,11 @@ def main():
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise Fail('another dashnet operation is running') from None
-            method = {'anchor-check':'anchor_check','canary':'render','journal-baseline':'journal_baseline','journal-commit':'journal_commit','core-migrate':'core_migrate','mining-pause':'mining_pause','mining-resume':'mining_resume','migration-ready':'migration_ready'}.get(stage, stage)
-            need(method in ['baseline','stage','anchor','anchor_check','render','release','journal_baseline','journal_commit','core_migrate','mining_pause','mining_resume','migration_ready','prewipe','wipe','apply','start','verify'], 'invalid stage')
+            method = {'anchor-check':'anchor_check','canary':'render','journal-baseline':'journal_baseline','journal-commit':'journal_commit','core-migrate':'core_migrate','core-restart':'core_restart','core-verify':'core_verify','core-ready':'core_ready','mining-pause':'mining_pause','mining-resume':'mining_resume','migration-ready':'migration_ready'}.get(stage, stage)
+            need(method in ['baseline','stage','anchor','anchor_check','render','release','journal_baseline','journal_commit','core_migrate','core_restart','core_verify','core_ready','mining_pause','mining_resume','migration_ready','prewipe','wipe','apply','start','verify'], 'invalid stage')
             def timed_out(_signum, _frame):
                 raise TimeoutError('Core migration timed out; mining recovery lease remains armed')
-            if method == 'core_migrate':
+            if method in ['core_migrate', 'core_restart', 'core_verify', 'core_ready']:
                 signal.signal(signal.SIGALRM, timed_out)
                 signal.alarm(600)
             try:

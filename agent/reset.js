@@ -54,7 +54,7 @@ export function createReset({ ctx, dirs, pool, getSettings, journalImpl, wait = 
     r.stages ??= {};
     r.stages[name] ??= {};
     const results = await mapLimit(hosts, parallel, async (h) => {
-      if (r.stages[name][h.name]?.ok && !['verify', 'mining-pause', 'mining-resume'].includes(name)) return r.stages[name][h.name];
+      if (r.stages[name][h.name]?.ok && !['verify', 'core-ready', 'mining-pause', 'mining-resume'].includes(name)) return r.stages[name][h.name];
       const q = Buffer.from(JSON.stringify({ ...base, ...(r.native ? { images:r.nativeImages?.[h.name], architecture:r.nativeArchitectures?.[h.name], sidecars:r.nativeSidecars?.[h.name], transition:r.nativeTransitions?.[h.name] } : {}), role: h.resetRole, address: h.publicIp, node: h.name })).toString('base64');
       let v;
       try { v = JSON.parse((await pool.exec(h, `sudo -n python3 - ${name} ${q}`, r.native ? NATIVE_SCRIPT : SCRIPT, timeoutMs)).trim().split('\n').pop()); }
@@ -138,11 +138,60 @@ export function createReset({ ctx, dirs, pool, getSettings, journalImpl, wait = 
     r.review = {
       kind: 'platform-reset', planId: `reset-${r.id}-${r.anchor.height}`, preparedAt: new Date().toISOString(), coreChain: network.coreNetwork,
       targets: r.targets, hpmns: hpmns.length, seeds: seeds.length, anchor: r.anchor, previousAnchor: uniq(hb.map((x) => x.anchor)),
-      native: r.native, coreMigrations: r.coreMigrations, targetImages: r.nativeImages, requested: r.resolvedChoices, current: uniq(hb.map((x) => x.images)), next: r.native ? r.nativeImages[hpmns[0].name] : r.request.images, epoch: { current: uniq(hb.map((x) => x.epochTime)), next: r.native ? hb[0].epochTime : epoch },
+      native: r.native, coreMigrationMode: r.native ? 'parallel-v1' : undefined, coreMigrations: r.coreMigrations, targetImages: r.nativeImages, requested: r.resolvedChoices, current: uniq(hb.map((x) => x.images)), next: r.native ? r.nativeImages[hpmns[0].name] : r.request.images, epoch: { current: uniq(hb.map((x) => x.epochTime)), next: r.native ? hb[0].epochTime : epoch },
       dashmate: uniq(hb.map((x) => x.dashmate)), configFormat: uniq(hb.map((x) => x.configFormatVersion)), tor: uniq(hb.map((x) => x.tor?.enabled)),
       seedImages: uniq(sb.map((x) => x.tenderdashImage)), canary: canary.result.checks, rendered: canary.result.rendered,
       coreHeight: Math.max(...hb.map((x) => x.height)),
     };
+  }
+
+  async function pauseMigrationMining(r) {
+    const deadline = Date.now() + 10 * 60_000;
+    for (;;) {
+      if (r.cancelRequested) throw Error('cancelled by operator');
+      const paused = await stage(r, 'mining-pause', [r.minerTarget], { expectedMiner:r.expectedMiner }, { timeoutMs:90_000 });
+      if (paused.failed.length) throw Error('mining pause failed; Core was not migrated');
+      if (paused.results[0].result.quiet) return;
+      if (Date.now() >= deadline) throw Error('no quiet DKG window for Core migration');
+      await wait(5000);
+    }
+  }
+
+  async function migrateCoreTogether(r, migrations) {
+    const pending = migrations.filter((h) => !r.stages['core-migrate']?.[h.name]?.ok);
+    let error;
+    try {
+      // Reset-only: Platform is already withdrawn on EVERY validator. Keep
+      // mining paused across the batch; wallet Core is never restarted.
+      // Larger fleets are bounded to 32 concurrent SSH/Compose operations.
+      for (let i = 0; i < pending.length; i += 32) {
+        const batch = pending.slice(i, i + 32);
+        await pauseMigrationMining(r);
+        await barrier(r, `Restart required Core configurations together (${batch.length} validators)`, 'core-restart', batch, {}, { parallel:32, timeoutMs:11 * 60_000 });
+        // Renew the independent 15-minute lease before another bounded phase.
+        await pauseMigrationMining(r);
+        await barrier(r, 'Check restarted Core fleet: READY and synchronized', 'core-ready', batch, {}, { parallel:32, timeoutMs:11 * 60_000 });
+      }
+    } catch (e) { error = e; }
+    finally {
+      // Includes lost-ACK retries with no pending migrations; never cache cleanup.
+      const resumed = await stage(r, 'mining-resume', [r.minerTarget], { expectedMiner:r.expectedMiner }, { timeoutMs:90_000 });
+      if (resumed.failed.length) error = Error('mining resume unverified; recovery timer is armed; Resume retries cleanup');
+    }
+    if (error) throw error;
+    // Block production can be required for full quorum convergence. Resume it
+    // only after every restarted Core is READY/synced; verify all links before
+    // applying Platform, without holding mining frozen during this final wait.
+    for (let i = 0; i < pending.length; i += 32) {
+      const batch = pending.slice(i, i + 32);
+      const receipts = await barrier(r, 'Verify migrated Core fleet quorum links with mining resumed', 'core-verify', batch, {}, { parallel:32, timeoutMs:11 * 60_000 });
+      r.stages['core-migrate'] ??= {};
+      batch.forEach((h, index) => {
+        r.stages['core-migrate'][h.name] = receipts[index];
+        r.nativeTransitions[h.name].preserve = receipts[index].result.journal.preservation;
+      });
+      save(r);
+    }
   }
 
   async function executeReset(r) {
@@ -163,39 +212,44 @@ export function createReset({ ctx, dirs, pool, getSettings, journalImpl, wait = 
     if (r.native) {
       const migrations = hpmns.filter((h) => r.coreMigrations?.[h.name]?.length);
       r.progress.phase = 'core-migration'; save(r);
-      for (const h of migrations) {
-        if (r.stages['core-migrate']?.[h.name]?.ok) continue;
-        const done = step(r, `Automatic Core configuration migration on ${h.name}; chain and wallets preserved`);
-        let migrationError;
-        try {
-          const deadline = Date.now() + 10 * 60_000;
-          for (;;) {
-            if (r.cancelRequested) throw Error('cancelled by operator');
-            const paused = await stage(r, 'mining-pause', [r.minerTarget], { expectedMiner:r.expectedMiner }, { timeoutMs:90_000 });
-            if (paused.failed.length) throw Error('mining pause failed; Core was not migrated');
-            if (paused.results[0].result.quiet) break;
-            if (Date.now() >= deadline) throw Error('no quiet DKG window for Core migration');
-            await wait(5000);
+      if (migrations.length && r.review?.coreMigrationMode === 'parallel-v1') {
+        await migrateCoreTogether(r, migrations);
+      } else {
+        // Older reviews retain their explicitly reviewed rolling restart order.
+        for (const h of migrations) {
+          if (r.stages['core-migrate']?.[h.name]?.ok) continue;
+          const done = step(r, `Automatic Core configuration migration on ${h.name}; chain and wallets preserved`);
+          let migrationError;
+          try {
+            const deadline = Date.now() + 10 * 60_000;
+            for (;;) {
+              if (r.cancelRequested) throw Error('cancelled by operator');
+              const paused = await stage(r, 'mining-pause', [r.minerTarget], { expectedMiner:r.expectedMiner }, { timeoutMs:90_000 });
+              if (paused.failed.length) throw Error('mining pause failed; Core was not migrated');
+              if (paused.results[0].result.quiet) break;
+              if (Date.now() >= deadline) throw Error('no quiet DKG window for Core migration');
+              await wait(5000);
+            }
+            const migrated = await stage(r, 'core-migrate', [h], {}, { timeoutMs:11 * 60_000 });
+            if (migrated.failed.length) throw Error(`Core migration failed on ${h.name}; Resume continues the same migration`);
+            r.nativeTransitions[h.name].preserve = migrated.results[0].result.journal.preservation;
+            save(r);
+            done('ok', 'Core READY, synchronized, quorum links reconnected; data and identities preserved');
+          } catch (error) {
+            done('failed', error.message); migrationError = error;
+          } finally {
+            // Cleanup bypasses cancellation and stage caches. An independent
+            // host timer also resumes mining after a killed/lost controller.
+            const resumed = await stage(r, 'mining-resume', [r.minerTarget], { expectedMiner:r.expectedMiner }, { timeoutMs:90_000 });
+            if (resumed.failed.length) migrationError = Error('mining resume unverified; recovery timer is armed; Resume retries cleanup');
           }
-          const migrated = await stage(r, 'core-migrate', [h], {}, { timeoutMs:11 * 60_000 });
-          if (migrated.failed.length) throw Error(`Core migration failed on ${h.name}; Resume continues the same migration`);
-          r.nativeTransitions[h.name].preserve = migrated.results[0].result.journal.preservation;
-          save(r);
-          done('ok', 'Core READY, synchronized, quorum links reconnected; data and identities preserved');
-        } catch (error) {
-          done('failed', error.message); migrationError = error;
-        } finally {
-          // Cleanup bypasses cancellation and stage caches. An independent
-          // host timer also resumes mining after a killed/lost controller.
-          const resumed = await stage(r, 'mining-resume', [r.minerTarget], { expectedMiner:r.expectedMiner }, { timeoutMs:90_000 });
-          if (resumed.failed.length) migrationError = Error('mining resume unverified; recovery timer is armed; Resume retries cleanup');
+          if (migrationError) throw migrationError;
         }
-        if (migrationError) throw migrationError;
-      }
-      // Includes a resume after a lost cleanup response on the last node.
-      if (migrations.length) {
-        const resumed = await stage(r, 'mining-resume', [r.minerTarget], { expectedMiner:r.expectedMiner }, { timeoutMs:90_000 });
-        if (resumed.failed.length) throw Error('mining must be resumed before Platform startup');
+        // Includes a resume after a lost cleanup response on the last node.
+        if (migrations.length) {
+          const resumed = await stage(r, 'mining-resume', [r.minerTarget], { expectedMiner:r.expectedMiner }, { timeoutMs:90_000 });
+          if (resumed.failed.length) throw Error('mining must be resumed before Platform startup');
+        }
       }
     }
     r.progress.phase = 'apply'; save(r);

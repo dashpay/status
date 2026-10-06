@@ -271,7 +271,7 @@ function ResetReview({ op, review, operator, pending, act }) {
       </Section>
       {Object.values(review.coreMigrations || {}).some((changes) => changes.length > 0) && <Section title="Automatic Core compatibility migration">
         <div className="panel p-3 text-[12px] space-y-2">
-          <p>The selected release requires Core RPC access and compatibility changes. This same confirmation includes them: back up, migrate Core/Tor services one node at a time with mining paused, verify READY and quorum connections, then finish redeploying Platform. Core chain, wallets, keys and Core image are preserved.</p>
+          <p>The selected release requires Core RPC access and compatibility changes. This same confirmation includes them: back up, migrate Core/Tor services {review.coreMigrationMode === 'parallel-v1' ? 'together in parallel (up to 32 validators per batch)' : 'one node at a time'} with mining paused. {review.coreMigrationMode === 'parallel-v1' ? 'After every restarted Core is READY and synced, resume mining, verify quorum connections, then finish redeploying Platform.' : 'Verify READY and quorum connections, then finish redeploying Platform.'} Core chain, wallets, keys and Core image are preserved.</p>
           {[...new Set(Object.values(review.coreMigrations).flat().map((c) => `${c.option ? `Core ${c.option}` : `${c.user} RPC access`}: add ${c.added.join(', ') || 'none'}${c.removed.length ? `; remove ${c.removed.join(', ')}` : ''}`))].map((line) => <div className="mono break-words" key={line}>{line}</div>)}
         </div>
       </Section>}

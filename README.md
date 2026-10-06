@@ -93,11 +93,11 @@ architecture-specific pins, stages the target release and canaries every validat
 Preparation binds the exact validator instance IDs and addresses to the deployment
 plan and uses the target helper in an isolated copy of each dashmate home. Release-required Core RPC access and compatibility migrations are included in the
 same review/confirmation. After withdrawing Platform, the controller migrates
-affected Core/Tor services one node at a time, preserving Core image, chain, data
+affected Core/Tor services together (up to 32 validators per batch), preserving Core image, chain, data
 mounts, credentials and identities. Mining pauses only in a quiet DKG window and
-resumes after READY/sync/quorum reconnection checks; an independent 15-minute
+stays paused across restart and fleet READY/sync checks, then resumes before final quorum-link verification so block production can drive convergence; an independent 15-minute
 lease also resumes it after controller loss. Core migration is bounded to ten
-minutes per node and keeps original backups plus resumable per-host receipts.
+minutes per host/phase; the lease renews before each phase. Original backups and resumable per-host receipts are retained. Parallel mode is reset-only (all Platform services must already be withdrawn); existing reviewed rolling plans keep their original order. Wallet Core is never restarted.
 Confirmation removes only the owned Drive/Tenderdash chain-data volumes and
 restarts Platform through dashnet's Compose project. Core data, Tor settings, registrations,
 node identities, TLS certificates, wallet/miner/web hosts and log volumes are
@@ -239,3 +239,28 @@ view and a scoped authenticated detail view. Optional durable delivery to an
 OpenClaw receiver uses tailnet-only HTTPS, HMAC authentication, deduplication and
 a serialized, owner-authorized repair worker. See [deployment, behavior and
 coverage limits](deploy/INCIDENTS.md). Retired Moutai is no longer a default network.
+
+### Operation-aware remediation maintenance
+
+Confirmed/running mutating console operations automatically hold remediation for
+their managed Testnet/devnet network. Preparation/review and read-only doctor
+requests do not. Raw health stays visible; other networks, Mainnet, CI and AWS
+continue through the normal incident path. The Remediation page lists networks
+in maintenance even when no incident exists yet.
+
+The producer suppresses new network events and holds already-queued outbox events
+without changing their immutable bytes. The broker refreshes the private issue
+snapshot immediately before dispatch and rejects suppressed/maintenance events,
+including events queued before the next producer cycle. The API reads operation
+records directly, not the collector's delayed/missing native journal field.
+Existing repair sessions are not forcibly killed; their usual live-operation
+ownership checks remain mandatory. A narrow operation-start/admission race is
+not a distributed lock.
+
+Terminal operations release this hold; healthy recovery requires fresh
+post-maintenance measurements. Abandoned operation records expire after 35 minutes
+without a saved progress update, with an absolute 24-hour cap, so they cannot
+silence monitoring indefinitely. Manual maintenance/journal gates remain separate.
+
+Deployment requires both the status web/incident-worker changes and the broker
+refresh check. Merging this source does not deploy either component.

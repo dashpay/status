@@ -69,3 +69,15 @@ test('verified monitoring correction is not an outage recovery or stale batch bl
   data.generatedAt = new Date(now - 200_000).toISOString();
   assert.equal(remediationView(data, options).cases[0].stage, 'blocked');
 });
+
+test('maintenance is visible without claiming recovery or hiding already-running repair ownership',()=>{
+  const data=state([issue('a'),issue('b')],[{issueId:'b',active:true,workerState:'running'}]);
+  data.maintenance={testnet:{active:true,operations:[{id:'op',action:'platform-reset'}]},secret:{active:true,operations:[{id:'private'}]}};
+  const view=remediationView(data,options);
+  assert.equal(view.cases.find(c=>c.id==='a').stage,'maintenance');
+  assert.equal(view.cases.find(c=>c.id==='b').stage,'working');
+  assert.equal(view.counts.maintenance,1);
+  const publicView=remediationView(data,{...options,full:false});
+  assert.deepEqual(publicView.maintenance,[{network:'testnet',operations:undefined}]);
+  assert.ok(!JSON.stringify(publicView).includes('private'));
+});

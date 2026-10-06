@@ -156,7 +156,10 @@ class ResetTests(unittest.TestCase):
              patch.object(self.r,'snapshot',return_value={'new':'snapshot'}), patch.object(mod.os,'chown'), \
              patch.object(mod.time,'monotonic',side_effect=lambda:next(clock)), patch.object(mod.time,'sleep'), \
              patch.object(mod,'run',side_effect=lambda args,**_:calls.append(('run',args))):
-            first=self.r.core_migrate()
+            restarted=self.r.core_restart()
+            self.assertTrue(restarted['restarted'])
+            self.assertFalse((self.r.state/'baseline-effective.json').exists(),'restart alone is not verified migration')
+            first=self.r.core_verify()
             second=self.r.core_migrate()
         self.assertTrue(first['migrated'] and second['migrated'])
         self.assertEqual(live.read_text(), changed.read_text())

@@ -59,6 +59,23 @@ class Tests(unittest.TestCase):
             request = json.loads(argv[argv.index('--params') + 1])
             self.assertEqual(request, {'key': 'agent:main:incident-test', 'model': 'openai/gpt-6-astra@openai:work', 'thinkingLevel': 'high'})
 
+    def test_refresh_rechecks_operation_maintenance_for_already_queued_events(self):
+        first=event(); other=copy.deepcopy(first)
+        other['eventId']='b'*24+':1'; other['issue']['id']='b'*24; other['issue']['scope']='other'
+        snapshot={'generatedAt':envelope()['sentAt'],'sources':{},'issues':[first['issue'],other['issue']],
+                  'maintenance':{'testnet':{'active':True}}}
+        token=pathlib.Path(self.temp.name)/'token'; token.write_text('fixture')
+        with patch.object(b.urllib.request,'build_opener') as opener:
+            response=opener.return_value.open.return_value.__enter__.return_value
+            response.read.return_value=json.dumps(snapshot).encode()
+            self.assertEqual([x['eventId'] for x in b.refreshed_events([first,other],token)],[other['eventId']])
+            snapshot['maintenance']={}; snapshot['issues'][0]['suppressed']=True
+            response.read.return_value=json.dumps(snapshot).encode()
+            self.assertEqual([x['eventId'] for x in b.refreshed_events([first,other],token)],[other['eventId']])
+            snapshot['issues'][0]['suppressed']=False
+            response.read.return_value=json.dumps(snapshot).encode()
+            self.assertEqual(len(b.refreshed_events([first,other],token)),2)
+
     def test_durable_dedup_and_conflict(self):
         p = envelope(event()); self.assertEqual(b.ingest(self.db, p), ['a'*24+':1'])
         b.ingest(self.db, p); self.assertEqual(self.db.execute('select count(*) from events').fetchone()[0], 1)

@@ -6,7 +6,7 @@ const text = (value, size = 800) => typeof value === 'string' ? value.slice(0, s
 const iso = (value) => value != null && value !== '' && Number.isFinite(new Date(value).getTime()) ? new Date(value).toISOString() : null;
 const WAIT = { capacity: 'Waiting for a repair slot', resource_conflict: 'Waiting for the current resource owner',
   cooldown: 'Waiting for the scope cooldown', budget: 'Waiting for the dispatch budget', paused: 'New dispatch is paused', eligible: 'Ready for dispatch' };
-const LABEL = { queued: 'Queued', working: 'Working', blocked: 'Blocked', followup: 'Recovered · follow-up', verifying: 'Verifying', fixed: 'Verified fixed', recovered: 'Recovered', classified: 'Monitoring corrected', review: 'Review only', unknown: 'Awaiting status' };
+const LABEL = { maintenance: 'Maintenance', queued: 'Queued', working: 'Working', blocked: 'Blocked', followup: 'Recovered · follow-up', verifying: 'Verifying', fixed: 'Verified fixed', recovered: 'Recovered', classified: 'Monitoring corrected', review: 'Review only', unknown: 'Awaiting status' };
 
 export function remediationView(state, { full = false, visibleNetworks = [], now = Date.now() } = {}) {
   const feed = state?.delivery?.receiver?.remediation;
@@ -22,6 +22,9 @@ export function remediationView(state, { full = false, visibleNetworks = [], now
     let stage = 'unknown', reason = 'Waiting for remediation status';
     if (issue.severity === 'info') { stage = 'review'; reason = 'Informational finding; no automatic cleanup'; }
     else if (response?.active) { stage = 'working'; reason = response.workerState === 'uncertain' ? 'Existing repair retains ownership; completion is being checked' : 'Repair session in progress'; }
+    else if (issue.suppressed || (issue.domain === 'network' && state.maintenance?.[issue.scope]?.active)) {
+      stage = 'maintenance'; reason = 'Active network operation; automatic repair is held until fresh post-operation monitoring';
+    }
     else if (response?.workerState === 'queued' || state?.outbox?.some((e) => e.issue?.id === issue.id)) {
       stage = 'queued'; reason = WAIT[response?.waitReason] || 'Awaiting delivery to the repair worker';
     } else if (issue.status === 'resolved' && producerFresh && issue.resolutionEvidence?.reason === 'verified_control_signal') {
@@ -53,7 +56,7 @@ export function remediationView(state, { full = false, visibleNetworks = [], now
     });
     return result;
   });
-  const order = ['working', 'queued', 'blocked', 'verifying', 'followup', 'unknown', 'review', 'fixed', 'recovered', 'classified'];
+  const order = ['working', 'maintenance', 'queued', 'blocked', 'verifying', 'followup', 'unknown', 'review', 'fixed', 'recovered', 'classified'];
   cases.sort((a, b) => order.indexOf(a.stage) - order.indexOf(b.stage) || (b.observedAt || '').localeCompare(a.observedAt || ''));
   const counts = Object.fromEntries(order.map((stage) => [stage, cases.filter((c) => c.stage === stage).length]));
   return { schemaVersion: 1, public: !full, generatedAt: iso(state?.generatedAt), workerAt,
@@ -61,5 +64,6 @@ export function remediationView(state, { full = false, visibleNetworks = [], now
     dispatch: !workerFresh ? 'unknown' : feed.enabled ? 'enabled' : 'paused',
     maxActive: Number.isSafeInteger(feed?.maxActive) ? feed.maxActive : null,
     delivery: { pending: full ? state?.outbox?.length || 0 : null, failed: !!state?.delivery?.error, lastAckAt: iso(state?.delivery?.lastAckAt) },
+    maintenance: Object.entries(state?.maintenance || {}).filter(([name]) => full || visible.has(name)).map(([network, value]) => ({ network, operations:full ? value.operations : undefined })),
     counts, queuedEvents: cases.reduce((sum, c) => sum + c.pendingEvents, 0), cases };
 }

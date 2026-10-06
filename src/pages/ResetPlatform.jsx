@@ -61,7 +61,7 @@ export default function ResetPlatform({ name }) {
           <li><b>Prepare (no service changes):</b> baseline and private backups on every target, resolve and pull target images, fresh ChainLock anchor verified on every target, configuration canary {native ? 'on every HPMN' : 'on one HPMN'}.</li>
           <li><b>Review</b> the version set, anchor and canary, then confirm.</li>
           <li><b>Wipe</b> Platform on all HPMNs {native ? '(only the Drive and Tenderdash chain-data volumes)' : <>(<span className="mono">dashmate reset --platform --force</span>), then reset only the seed’s Tenderdash data directory</>}.</li>
-          {native && <li><b>Migrate Core automatically</b> when required by the release, with private backups, one-node-at-a-time restarts and health checks. Core chain and wallets are never wiped.</li>}
+          {native && <li><b>Migrate Core automatically</b> when required by the release, with private backups, parallel restarts (up to 32 validators per batch) and fleet health checks. Core chain and wallets are never wiped.</li>}
           <li><b>Apply</b> the images, anchor and epoch; render only Platform files; start the seed, then every HPMN.</li>
           <li><b>Verify</b> READY, containers and images, consensus, epochs at config/env/parsed layers, DAPI TLS, Core unchanged.</li>
         </ol>

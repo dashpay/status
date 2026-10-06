@@ -417,6 +417,11 @@ def refreshed_events(events, token_file):
         issue = current.get(event['issue']['id'])
         if not issue or issue.get('status') != 'open' or issue.get('revision') != event['issue']['revision']:
             continue
+        # Recheck the current operation projection even if this event was
+        # queued before maintenance began, or before the producer's next cycle.
+        if issue.get('suppressed') or (issue.get('domain') == 'network' and
+                snapshot.get('maintenance', {}).get(issue.get('scope'), {}).get('active') is True):
+            continue
         # Current producer confirmation is only triage admission. The fixed agent
         # policy still requires independent live reproduction before any repair.
         result.append({**event, 'issue': issue, 'refreshedAt': snapshot['generatedAt']})
