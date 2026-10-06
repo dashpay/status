@@ -40,14 +40,14 @@ export default function ResetPlatform({ name }) {
         <Link to={`/n/${name}`} className="text-dim hover:text-fg">← {n.displayName}</Link>
         <h1 className="text-[18px] font-semibold">Wipe and redeploy Platform</h1>
       </div>
-      <p className="text-dim text-[12px] mt-1">Resets Platform state on {validators.length} HPMNs and {seeds.length} Tenderdash seed(s). Core chain, wallets, masternode registrations, node identities, certificates and Tor settings are preserved. Wallet, miner and web services keep running unchanged.</p>
+      <p className="text-dim text-[12px] mt-1">Resets Platform state on {validators.length} HPMNs and {seeds.length} Tenderdash seed(s). Core chain, wallets, masternode registrations, node identities, certificates and Tor settings are preserved. Required Core configuration migrations run automatically; mining pauses briefly while affected Core services restart.</p>
       <Section title="Targets">
         <div className="panel p-3 text-[12px] mono break-words">{[...validators, ...seeds].map((h) => h.name).join('  ')}</div>
         {unreachable.length > 0 && <div className="lv-down text-[12px] mt-1">Not reachable: {unreachable.map((h) => h.name).join(', ')}. Every target must be reachable.</div>}
       </Section>
       <Section title="Version set">
         <div className="panel p-3 grid min-w-0 gap-3 sm:grid-cols-2">
-          {native && <p className="sm:col-span-2 text-[12px] text-dim">Choose the versions to install after the wipe. The target release is pinned and checked before confirmation. Epoch settings are preserved; the helper follows the Drive tag unless specified.</p>}
+          {native && <p className="sm:col-span-2 text-[12px] text-dim">Choose the versions to install after the wipe. The target release is pinned and checked before confirmation. Required Core RPC configuration changes are included automatically. Epoch settings are preserved; the helper follows the Drive tag unless specified.</p>}
           {components.map((c) => (
             <label key={c} className="text-[12px] min-w-0"><div className="text-dim mb-1">{c} <span className="mono">{REPOS[c]}</span>{c !== 'helper' && <> · running <span className="mono break-all">{current(c)}</span></>}</div>
               <input className="input w-full min-w-0 mono" aria-label={`${c} target image`} placeholder={c === 'helper' ? 'Automatic: match Drive release (or keep installed for a digest)' : ''} value={value[c]} onChange={(e) => setImages({ ...value, [c]: e.target.value.trim() })} /></label>
@@ -61,6 +61,7 @@ export default function ResetPlatform({ name }) {
           <li><b>Prepare (no service changes):</b> baseline and private backups on every target, resolve and pull target images, fresh ChainLock anchor verified on every target, configuration canary {native ? 'on every HPMN' : 'on one HPMN'}.</li>
           <li><b>Review</b> the version set, anchor and canary, then confirm.</li>
           <li><b>Wipe</b> Platform on all HPMNs {native ? '(only the Drive and Tenderdash chain-data volumes)' : <>(<span className="mono">dashmate reset --platform --force</span>), then reset only the seed’s Tenderdash data directory</>}.</li>
+          {native && <li><b>Migrate Core automatically</b> when required by the release, with private backups, one-node-at-a-time restarts and health checks. Core chain and wallets are never wiped.</li>}
           <li><b>Apply</b> the images, anchor and epoch; render only Platform files; start the seed, then every HPMN.</li>
           <li><b>Verify</b> READY, containers and images, consensus, epochs at config/env/parsed layers, DAPI TLS, Core unchanged.</li>
         </ol>

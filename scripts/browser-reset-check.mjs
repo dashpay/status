@@ -55,6 +55,23 @@ try {
     assert.equal(q.images.helper, undefined, 'helper follows target Drive automatically');
     assert.equal(q.options.epochSeconds, undefined);
     assert.equal(q.options.autoRun, undefined);
+    mkdirSync(join(root, 'ops'), { recursive: true });
+    const changes = [{ user:'drive_consensus', added:['getspecialtxes'], removed:[] }, { option:'deprecatedrpc', added:['service'], removed:[] }];
+    writeFileSync(join(root, 'ops', `${id}.json`), JSON.stringify({ id, network:q.network, actor:q.actor, createdAt:at, request:q, status:'review', steps:[], review:{
+      kind:'platform-reset', native:true, planId:`reset-${id}`, preparedAt:at, hpmns:1, seeds:0,
+      coreChain:q.network, coreHeight:100, anchor:{height:100,hash:'a'.repeat(64)}, previousAnchor:[1], current:[q.images], next:q.images,
+      seedImages:[], epoch:{current:[3600],next:3600}, dashmate:['5.0.0-beta.2'], configFormat:[20], tor:[true],
+      coreMigrations:{'validators-001':changes}, canary:{epochTime:3600,epochEnv:3600,coreMigration:changes,anchor:100}, rendered:['Platform and required Core RPC configuration'],
+    } }));
+    await page.reload();
+    await page.getByRole('heading', { name:'Automatic Core compatibility migration' }).waitFor();
+    await page.getByText('drive_consensus RPC access: add getspecialtxes', { exact:true }).waitFor();
+    await page.getByText('Core deprecatedrpc: add service', { exact:true }).waitFor();
+    const confirm = page.getByRole('button', { name:'Wipe Platform and redeploy' });
+    assert.equal(await confirm.isDisabled(),true);
+    await page.locator('input').fill('devnet-sakura');
+    assert.equal(await confirm.isEnabled(),true);
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
     assert.deepEqual(errors, []);
     await page.close();
   }

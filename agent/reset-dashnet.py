@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import shutil
 import socket
+import signal
 import subprocess
 import sys
 import time
@@ -137,7 +138,8 @@ class Reset:
                 k, sep, v = line.partition('=')
                 need(sep and re.fullmatch('[A-Z][A-Z0-9_]*', k), 'invalid Compose environment')
                 env[k] = v
-        project = (self.owned()['core']['Config']['Labels'])['com.docker.compose.project']
+        owned_core = self.owned_optional().get('core')
+        project = owned_core['Config']['Labels']['com.docker.compose.project'] if owned_core else self.baseline_record()['project']
         cmd = ['docker', 'compose', '--project-name', project, '--project-directory', str(base / '.compose')]
         for name in env['COMPOSE_FILE'].split(env.get('COMPOSE_PATH_SEPARATOR') or ':'):
             if name.startswith('/'):
@@ -219,7 +221,9 @@ class Reset:
             'restarts': {k:owned[s]['RestartCount'] for k,s in components.items() if s in owned}}}
 
     def journal_commit(self):
-        change = self.q['transition']
+        change = copy.deepcopy(self.q['transition'])
+        if (self.state / 'baseline-effective.json').exists():
+            change['preserve'] = self.baseline_record()['journal']['preservation']
         actual = self.journal_baseline()
         # Wallet is only observed; its containers and files are not modified.
         need(actual['preservation']['coreId'] == change['preserve']['coreId'] and
@@ -246,7 +250,7 @@ class Reset:
             b = read(self.state / 'baseline.json')
             self.preserved(b)
             return b
-        b = {'preserve': self.snapshot(), 'volumes': self.data_volumes(owned), 'height': info['blocks'],
+        b = {'project': owned['core']['Config']['Labels']['com.docker.compose.project'], 'coreServices': {name: {'id': v['Id'], 'image': v['Config']['Image'], 'mounts': v['Mounts']} for name, v in owned.items() if name in ['core', 'core_tor']}, 'preserve': self.snapshot(), 'volumes': self.data_volumes(owned), 'height': info['blocks'],
              'platform': {s: {'id': c['Id'], 'image': c['Config']['Image']} for s, c in owned.items() if s in PLATFORM},
              'images': images, 'epochTime': epoch, 'anchor': read(self.td / 'genesis.json')['initial_core_chain_locked_height'],
              'dashmate': (self.home / '.version').read_text().strip(), 'configFormatVersion': doc.get('configFormatVersion'),
@@ -261,7 +265,8 @@ class Reset:
 
     def baseline_record(self):
         need((self.state / 'baseline.json').is_file(), 'baseline missing')
-        return read(self.state / 'baseline.json')
+        effective = self.state / 'baseline-effective.json'
+        return read(effective if effective.exists() else self.state / 'baseline.json')
 
     def desired(self):
         images = self.q.get('images') or self.baseline_record()['images']
@@ -304,6 +309,228 @@ class Reset:
              '--env', 'HOME=/tmp', '--env', 'YARN_ENABLE_TELEMETRY=0', '--volume', f'{stage}:{self.home}', self.desired()['helper'],
              '-c', script, 'reset', self.node], timeout=600)
 
+    @staticmethod
+    def core_changes(before, after):
+        """Release-owned RPC access migrations; never credentials, chain or data.
+
+        No UI/operator-supplied RPC permissions are accepted. These values come
+        only from the selected immutable official helper's own migrations.
+        """
+        restored = copy.deepcopy(after)
+        old_users = before['rpc']['users']
+        new_users = restored['rpc']['users']
+        need(set(old_users) == set(new_users), 'target release changes Core RPC identities')
+        changes = []
+        for user, old in old_users.items():
+            previous, desired = old.get('whitelist'), new_users[user].get('whitelist')
+            if previous != desired:
+                need(isinstance(previous, list) and isinstance(desired, list) and desired and
+                     all(isinstance(x, str) and re.fullmatch('[a-z][a-z0-9_]*', x) for x in desired), 'invalid release RPC whitelist migration')
+                changes.append({'user': user, 'added': sorted(set(desired) - set(previous)), 'removed': sorted(set(previous) - set(desired))})
+                new_users[user]['whitelist'] = previous
+        need(restored == before, 'target release changes preserved Core identity, image, credentials or non-RPC settings')
+        return changes
+
+    @staticmethod
+    def core_compatibility_options(old, new):
+        # Comments/spacing are not configuration changes. Everything outside
+        # release-owned RPC compatibility directives must remain identical.
+        semantic = lambda data: [line.strip() for line in data.splitlines() if line.strip() and not line.lstrip().startswith(b'#')]
+        strip = lambda data: [line for line in semantic(data) if not line.startswith((b'rpcwhitelist=', b'deprecatedrpc='))]
+        need(strip(old) == strip(new), 'Core migration changed preserved chain, data, credentials or network settings')
+        options = lambda data: sorted(line.decode().partition('=')[2] for line in semantic(data) if line.startswith(b'deprecatedrpc='))
+        before, after = options(old), options(new)
+        if before == after:
+            return []
+        need(all(re.fullmatch('[a-zA-Z0-9_,.-]+', value) for value in after), 'invalid Core compatibility option')
+        return [{'option': 'deprecatedrpc', 'added': sorted(set(after) - set(before)), 'removed': sorted(set(before) - set(after))}]
+
+    def miner(self):
+        need(self.q['role'] in ['wallet', 'miner'], 'mining control requires the deployment mining node')
+        matches = [c for c in self.all_containers() if
+                   (c['Config'].get('Labels') or {}).get('dashnet.network') == self.q['config'] and
+                   (c['Config'].get('Labels') or {}).get('dashnet.node') == self.node and
+                   (c['Config'].get('Labels') or {}).get('com.docker.compose.service') == 'miner']
+        need(len(matches) == 1, 'owned miner is missing or ambiguous')
+        need(not self.q.get('expectedMiner') or matches[0]['Id'] == self.q['expectedMiner'], 'miner changed since review')
+        return matches[0]
+
+    def migration_ready(self):
+        miner = self.miner()
+        need(miner['State']['Running'] and not miner['State'].get('Paused'), 'miner unavailable for automatic Core migration')
+        need(self.rpc('getblockchaininfo')['chain'] == self.q['coreChain'], 'mining node chain mismatch')
+        run(['systemctl', '--version'])
+        return {'minerId': miner['Id'], 'automaticRecoveryLease': True}
+
+    def mining_pause(self):
+        """Freeze blocks only in a quiet DKG window, with a crash recovery lease."""
+        miner = self.miner()
+        receipt = self.state / 'mining.json'
+        if miner['State'].get('Paused'):
+            need(receipt.exists() and read(receipt)['id'] == miner['Id'], 'miner paused outside this reset')
+            height = self.rpc('getblockcount')
+            need(13 <= height % 24 <= 23, 'paused miner outside quiet DKG window')
+            # A retry may arrive near the old lease expiry. Renew before
+            # starting another bounded migration, and recheck the pause.
+            run(['systemctl', 'restart', read(receipt)['unit'] + '.timer'])
+            need(self.miner()['State'].get('Paused'), 'mining pause expired during recovery')
+            return {'quiet': True, 'height': height}
+        need(miner['State']['Running'], 'miner was not running')
+        height = self.rpc('getblockcount')
+        if not 13 <= height % 24 <= 23:
+            return {'quiet': False, 'height': height}
+        unit = 'dash-status-miner-' + self.q['exec'].replace('.', '-')
+        write(receipt, {'id': miner['Id'], 'unit': unit})
+        # A killed controller must not leave mining frozen indefinitely. Each
+        # per-node migration is bounded below this independent 15-minute lease.
+        run(['systemd-run', '--unit', unit, '--on-active=15m', '--timer-property=AccuracySec=1s',
+             '/usr/bin/docker', 'unpause', miner['Id']])
+        run(['docker', 'pause', miner['Id']])
+        time.sleep(2)  # let an in-flight one-block generate RPC finish
+        height = self.rpc('getblockcount')
+        if not 13 <= height % 24 <= 23:
+            self.mining_resume()
+            return {'quiet': False, 'height': height}
+        need(self.miner()['State'].get('Paused'), 'mining pause not verified')
+        return {'quiet': True, 'height': height}
+
+    def mining_resume(self):
+        receipt = self.state / 'mining.json'
+        if not receipt.exists():
+            return {'resumed': True}
+        saved, miner = read(receipt), self.miner()
+        need(saved['id'] == miner['Id'], 'owned miner changed during Core migration')
+        if miner['State'].get('Paused'):
+            run(['docker', 'unpause', miner['Id']])
+        need(self.miner()['State']['Running'] and not self.miner()['State'].get('Paused'), 'mining resume not verified')
+        # --collect is not universal for transient timers: stop both units so
+        # the next per-node pause can reuse this operation's lease name.
+        for suffix in ['.timer', '.service']:
+            unit = saved['unit'] + suffix
+            if run(['systemctl', 'show', '--property=LoadState', '--value', unit]).strip() != 'not-found':
+                run(['systemctl', 'stop', unit])
+        return {'resumed': True}
+
+    def migration_guard(self, b, prepared):
+        actual = self.snapshot()
+        allowed_names = {name for name, value in b['preserve']['containers'].items()
+                         if value['id'] in [x['id'] for x in b['coreServices'].values()]}
+        need({k:v for k,v in actual['containers'].items() if k not in allowed_names} ==
+             {k:v for k,v in b['preserve']['containers'].items() if k not in allowed_names}, 'unrelated containers changed during Core migration')
+        allowed_files = {str((self.home / p).relative_to(self.root)) for p in prepared['coreFiles']}
+        need({k:v for k,v in actual['files'].items() if k not in allowed_files} ==
+             {k:v for k,v in b['preserve']['files'].items() if k not in allowed_files}, 'identity or unrelated files changed during Core migration')
+        # Core data/Tor volumes and bind locations cannot move. An interrupted
+        # Compose replacement may temporarily have no Core container.
+        owned = self.owned_optional()
+        for name, expected in b['coreServices'].items():
+            if name in owned:
+                need(sorted(owned[name]['Mounts'], key=lambda m:m['Destination']) == sorted(expected['mounts'], key=lambda m:m['Destination']) and owned[name]['Config']['Image'] == expected['image'], 'Core data mounts or image changed during migration')
+
+    def owned_optional(self):
+        # Same ownership selection, without requiring Core during a replacement.
+        out = {}
+        for c in self.all_containers():
+            labels = c['Config'].get('Labels') or {}
+            if labels.get('dashnet.network') == self.q['config'] and labels.get('dashnet.node') == self.node:
+                service = labels.get('com.docker.compose.service')
+                if service in ['core', 'core_tor']:
+                    need(service not in out, 'duplicate owned Core service')
+                    out[service] = c
+        return out
+
+    def core_migrate(self):
+        b = self.baseline_record()
+        prepared = read(self.state / 'prepared.json')
+        if not prepared.get('coreMigration'):
+            self.preserved(b)
+            return {'migrated': False, 'journal': self.journal_baseline()}
+        need((self.state / 'wipe-started.json').exists(), 'Platform must be withdrawn before Core migration')
+        for rel, value in prepared['files'].items():
+            need(digest(self.state / 'render' / rel) == value, 'prepared migration files changed')
+        marker = self.state / 'core-migration.json'
+        if (self.state / 'baseline-effective.json').exists():
+            self.preserved(b)
+            return {'migrated': True, 'journal': b['journal']}
+        if not marker.exists():
+            self.preserved(b)
+            write(marker, {'phase': 'applying', 'coreConfigBefore': b['journal']['preservation']['coreConfig']})
+        self.migration_guard(b, prepared)
+        stage = self.state / 'render'
+        doc = read(self.home / 'config.json')
+        doc['configs'][self.node]['core'] = read(stage / 'config.json')['configs'][self.node]['core']
+        overrides = read(self.home / '.dashnet-compose.json')
+        for name, fingerprint in prepared['coreFingerprints'].items():
+            overrides['services'][name]['labels']['dashnet.config'] = fingerprint
+        # On retry, keep already-converged containers. Stopping/removing data or
+        # selecting a different image is never part of this configuration step.
+        owned = self.owned_optional()
+        converged = all(name in owned and owned[name]['State']['Running'] and
+                        owned[name]['Config']['Labels'].get('dashnet.config') == fp
+                        for name, fp in prepared['coreFingerprints'].items())
+        if not converged:
+            for name in ['core_tor', 'core']:
+                if name in owned and owned[name]['State']['Running']:
+                    run(['docker', 'stop', '--time', '120', owned[name]['Id']], timeout=150)
+            write(self.home / 'config.json', doc)
+            for rel in prepared['coreFiles']:
+                destination = self.home / rel
+                tmp = destination.with_name('.' + destination.name + '.migration')
+                shutil.copy2(stage / rel, tmp)
+                st = destination.stat()
+                os.chown(tmp, st.st_uid, st.st_gid)
+                os.replace(tmp, destination)
+            write(self.home / '.dashnet-compose.json', overrides)
+            self.compose(self.home, 'up', '-d', '--no-deps', *prepared['coreFingerprints'])
+        deadline = time.monotonic() + 300
+        settled = None
+        while True:
+            try:
+                self.migration_guard(b, prepared)
+                info = self.rpc('getblockchaininfo')
+                ready = (info['chain'] == self.q['coreChain'] and not info['initialblockdownload'] and
+                         self.rpc('getblockhash', 1) == b['journal']['preservation']['coreGenesis'] and
+                         self.rpc('mnsync', 'status').get('IsSynced') and
+                         self.rpc('masternode', 'status').get('state') == 'READY' and self.rpc('getconnectioncount') >= 8)
+                current_owned = self.owned_optional()
+                ready = ready and all(name in current_owned and current_owned[name]['State']['Running'] and
+                                      current_owned[name]['Config']['Labels'].get('dashnet.config') == fp
+                                      for name, fp in prepared['coreFingerprints'].items())
+                if ready and read(marker)['phase'] == 'applying':
+                    # A restarted Core may accept peers before mnsync completes;
+                    # reconnect now so both ends establish quorum authentication.
+                    for peer in self.rpc('getpeerinfo'):
+                        try:
+                            self.rpc('disconnectnode', '', peer['id'])
+                        except Fail:
+                            pass  # peer may already have disconnected
+                    write(marker, {'phase': 'reconnected', 'coreConfigBefore': b['journal']['preservation']['coreConfig']})
+                    ready = False
+                if ready:
+                    valid = set(self.rpc('protx', 'list', 'valid'))
+                    missing = [member for quorum in self.rpc('quorum', 'dkgstatus').get('quorumConnections', [])
+                               for member in quorum.get('quorumConnections', [])
+                               if member.get('proTxHash') in valid and not member.get('connected')]
+                    ready = not missing
+                if ready:
+                    settled = settled or time.monotonic()
+                    if time.monotonic() - settled >= 30:
+                        break
+                else:
+                    settled = None
+            except (Fail, KeyError):
+                settled = None
+            need(time.monotonic() < deadline, 'Core migration not READY, synchronized and reconnected')
+            time.sleep(3)
+        self.migration_guard(b, prepared)
+        expected = hashlib.sha256(self.normalized(stage / self.node / 'core/dash.conf', (stage / self.node / 'core/dash.conf').read_bytes(), doc)).hexdigest()
+        observed = self.journal_baseline()
+        need(observed['preservation']['coreConfig'] == expected, 'Core migration configuration not verified')
+        effective = {**b, 'preserve': self.snapshot(), 'configHash': digest(self.home / 'config.json'), 'journal': observed}
+        write(self.state / 'baseline-effective.json', effective)
+        write(marker, {'phase': 'complete', 'coreConfigBefore': b['journal']['preservation']['coreConfig'], 'coreConfigAfter': expected})
+        return {'migrated': True, 'journal': observed}
+
     def release(self):
         b = self.baseline_record()
         self.preserved(b)
@@ -320,10 +547,11 @@ class Reset:
         doc = read(stage / 'config.json')
         current = read(self.home / 'config.json')['configs'][self.node]
         c = doc['configs'][self.node]
-        for user, settings in current['core']['rpc']['users'].items():
-            migrated = c['core']['rpc']['users'].get(user, {})
-            need(settings.get('whitelist') == migrated.get('whitelist'), 'target release requires a Core RPC whitelist migration before Platform reset')
-        need(c['core'] == current['core'], 'target helper migration changes Core configuration; prepare compatible Core settings first')
+        migration = self.core_changes(current['core'], c['core'])
+        for change in migration:
+            for method in change['added']:
+                help_text = self.rpc('help', method)
+                need(isinstance(help_text, str) and help_text.split()[0] == method, 'target RPC permission requires an unavailable Core method')
         for component, path in {'drive':'drive.abci', 'tenderdash':'drive.tenderdash', 'dapi':'dapi.rsDapi', 'gateway':'gateway'}.items():
             entry = c['platform']
             for key in path.split('.'):
@@ -338,10 +566,10 @@ class Reset:
         raw = json.loads(self.compose(stage, 'config', '--format', 'json', override=False))['services']
         selection = set(raw) - {'dashmate_helper'}
         need(selection == set(b['platform']) | {'core', *(['core_tor'] if 'core_tor' in self.owned() else [])}, 'target release changes service selection')
-        return {'sidecars': {s: raw[s]['image'] for s in selection if s in ['core_tor', 'gateway_rate_limiter', 'gateway_rate_limiter_redis']}}
+        return {'coreMigration': migration, 'sidecars': {s: raw[s]['image'] for s in selection if s in ['core_tor', 'gateway_rate_limiter', 'gateway_rate_limiter_redis']}}
 
     def render(self):
-        self.release()
+        release = self.release()
         b = self.baseline_record()
         stage = self.state / 'render'
         doc = read(stage / 'config.json')
@@ -353,7 +581,7 @@ class Reset:
         need(old == new, 'genesis changed beyond the anchor')
         need(digest(self.td / 'node_key.json') == digest(stage / rel / 'node_key.json'), 'node identity changed')
         # Hashes use dashnet's exact Platform service/content fingerprint
-        # algorithm (Core/Tor salted files and fingerprints stay untouched).
+        # algorithm; migrate Core/Tor fingerprints only for reviewed RPC changes.
         overrides = read(stage / '.dashnet-compose.json')
         for service, ref in self.q.get('sidecars', {}).items():
             need(service in overrides['services'], 'unknown sidecar')
@@ -366,12 +594,32 @@ class Reset:
         for name in ['core', 'core_tor']:
             if name in live:
                 need(services[name] == live[name], 'target release changes Core Compose service')
-        # Verify all Core/Tor rendered files semantically, including salted credentials.
+        # Keep salted credentials byte-identical; only the target release's
+        # reviewed RPC access/compatibility lines may change in Core's config.
+        core_files = []
         for path in (self.config / 'core').rglob('*'):
             if path.is_file():
-                rendered = stage / path.relative_to(self.home)
-                need(rendered.is_file() and self.normalized(path, path.read_bytes(), doc) == self.normalized(rendered, rendered.read_bytes(), doc), 'target release changes Core files')
-        for name in b['platform']:
+                relative = path.relative_to(self.home)
+                rendered = stage / relative
+                need(rendered.is_file(), 'target release removed a preserved Core file')
+                old_bytes = self.normalized(path, path.read_bytes(), doc)
+                new_bytes = self.normalized(rendered, rendered.read_bytes(), doc)
+                semantic = lambda data: b'\n'.join(line.strip() for line in data.splitlines() if line.strip() and not line.lstrip().startswith(b'#'))
+                if semantic(old_bytes) != semantic(new_bytes):
+                    need(path.name == 'dash.conf', 'unexpected Core file migration')
+                    # Release templates also select Core RPC compatibility flags
+                    # (beta.2 restores deprecated masternode service/port fields).
+                    # No chain, wallet, image, auth or network directive may move.
+                    release['coreMigration'].extend(self.core_compatibility_options(old_bytes, new_bytes))
+                    auth = [line for line in path.read_bytes().splitlines(keepends=True) if line.startswith(b'rpcauth=')]
+                    lines = iter(auth)
+                    rendered.write_bytes(b''.join(next(lines) if line.startswith(b'rpcauth=') else line for line in rendered.read_bytes().splitlines(keepends=True)))
+                    core_files.append(str(relative))
+                else:
+                    rendered.write_bytes(path.read_bytes())
+        selection = [s for s in ['core', 'core_tor', *b['platform']] if s in services]
+        fingerprints = {}
+        for name in selection:
             model = copy.deepcopy(services[name])
             (model.get('labels') or {}).pop('dashnet.config', None)
             files = {}
@@ -381,19 +629,30 @@ class Reset:
                 if mount.get('type') == 'bind' and source.is_relative_to(self.home) and not source.is_relative_to(ssl):
                     relative = source.relative_to(self.home)
                     path = stage / relative
-                    files[str(relative)] = ({str(p.relative_to(path)): digest(p) for p in sorted(path.rglob('*')) if p.is_file()}
-                                            if path.is_dir() else digest(path) if path.exists() else None)
-            fingerprint = hashlib.sha256(json.dumps([model, files], sort_keys=True).encode()).hexdigest()
-            overrides['services'][name]['labels']['dashnet.config'] = fingerprint
+                    content = lambda p: hashlib.sha256(self.normalized(p, p.read_bytes(), doc)).hexdigest()
+                    files[str(relative)] = ({str(p.relative_to(path)): content(p) for p in sorted(path.rglob('*')) if p.is_file()}
+                                            if path.is_dir() else content(path) if path.exists() else None)
+            entry = [model, files]
+            if name == 'core_tor':
+                entry.append(fingerprints['core'])
+            fingerprints[name] = hashlib.sha256(json.dumps(entry, sort_keys=True).encode()).hexdigest()
+            overrides['services'][name]['labels']['dashnet.config'] = fingerprints[name]
+        if not release['coreMigration']:
+            for name in ['core', 'core_tor']:
+                if name in live:
+                    need(fingerprints[name] == live[name]['labels']['dashnet.config'], 'preserved Core fingerprint differs')
         write(stage / '.dashnet-compose.json', overrides)
         self.preserved(b)
-        write(self.state / 'prepared.json', {'anchor': self.q['anchorHeight'], 'images': self.desired(), 'platform': {s: {'image': services[s]['image']} for s in b['platform']}, 'files': {str(p.relative_to(stage)): digest(p) for p in stage.rglob('*') if p.is_file()}})
-        return {'checks': {'coreSectionUnchanged': True, 'nodeKeyUnchanged': True, 'genesisOnlyAnchorChanged': True,
+        write(self.state / 'prepared.json', {'anchor': self.q['anchorHeight'], 'coreMigration': release['coreMigration'], 'coreFiles': core_files, 'coreFingerprints': {s: fingerprints[s] for s in ['core', 'core_tor'] if s in fingerprints}, 'images': self.desired(), 'platform': {s: {'image': services[s]['image']} for s in b['platform']}, 'files': {str(p.relative_to(stage)): digest(p) for p in stage.rglob('*') if p.is_file()}})
+        return {'checks': {'coreSectionUnchanged': not bool(release['coreMigration']), 'coreChainPreserved': True, 'coreMigration': release['coreMigration'], 'nodeKeyUnchanged': True, 'genesisOnlyAnchorChanged': True,
                            'anchor': self.q['anchorHeight'], 'epochTime': b['epochTime'], 'epochEnv': b['epochTime'], 'genesisChainId': new['chain_id']}, 'images': self.desired(), 'rendered': ['Target release Platform configuration and Compose templates', 'dashnet reset anchor and identity record']}
 
     def prewipe(self):
         b = self.baseline_record()
-        self.preserved(b)
+        if (self.state / 'core-migration.json').exists() and not (self.state / 'baseline-effective.json').exists():
+            self.migration_guard(b, read(self.state / 'prepared.json'))
+        else:
+            self.preserved(b)
         need((self.state / 'prepared.json').is_file(), 'canary missing')
         prepared = read(self.state / 'prepared.json')
         need(prepared['images'] == self.desired(), 'reviewed target images changed')
@@ -401,8 +660,8 @@ class Reset:
             need(digest(self.state / 'render' / rel) == value, 'prepared files changed')
         for ref in [*prepared['images'].values(), *[v['image'] for v in prepared['platform'].values()]]:
             run(['docker', 'image', 'inspect', ref])
-        owned = self.owned()
         if not (self.state / 'wipe-started.json').exists():
+            owned = self.owned()
             need(digest(self.home / 'config.json') == b['configHash'], 'configuration changed since preparation')
             need({s: c['Id'] for s, c in owned.items() if s in PLATFORM} == {s: c['id'] for s, c in b['platform'].items()}, 'Platform changed since preparation')
             need(self.data_volumes(owned) == b['volumes'], 'Platform volumes changed since preparation')
@@ -430,6 +689,7 @@ class Reset:
         need((self.state / 'wipe-started.json').exists(), 'wipe not started')
         stage = self.state / 'render'
         prepared = read(self.state / 'prepared.json')
+        need(not prepared.get('coreMigration') or (self.state / 'baseline-effective.json').exists(), 'required Core migration has not completed')
         need(prepared['anchor'] == self.q['anchorHeight'], 'prepared anchor changed')
         for rel, value in prepared['files'].items():
             need(digest(stage / rel) == value, 'prepared files changed')
@@ -502,7 +762,7 @@ class Reset:
         tls = run(['curl','-s','-o','/dev/null','-w','%{http_code}','--max-time','10',f'https://{self.q["address"]}:1443/']).strip()
         need(tls == '405', 'DAPI TLS not ready')
         return {'consensus': {'height': int(sync['latest_block_height'])}, 'epochs': {'config': b['epochTime'], 'env': env['EPOCH_TIME_LENGTH_S'], 'parsed': int(match.group(1))},
-                'core': {'unchanged': True}, 'restarts': {s:c['RestartCount'] for s,c in owned.items() if s in PLATFORM and c['RestartCount']}}
+                'core': {'chainPreserved': True, 'configurationMigrated': bool(prepared.get('coreMigration'))}, 'restarts': {s:c['RestartCount'] for s,c in owned.items() if s in PLATFORM and c['RestartCount']}}
 
 
 def main():
@@ -515,9 +775,17 @@ def main():
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise Fail('another dashnet operation is running') from None
-            method = {'anchor-check':'anchor_check','canary':'render','journal-baseline':'journal_baseline','journal-commit':'journal_commit'}.get(stage, stage)
-            need(method in ['baseline','stage','anchor','anchor_check','render','release','journal_baseline','journal_commit','prewipe','wipe','apply','start','verify'], 'invalid stage')
-            result = getattr(reset, method)()
+            method = {'anchor-check':'anchor_check','canary':'render','journal-baseline':'journal_baseline','journal-commit':'journal_commit','core-migrate':'core_migrate','mining-pause':'mining_pause','mining-resume':'mining_resume','migration-ready':'migration_ready'}.get(stage, stage)
+            need(method in ['baseline','stage','anchor','anchor_check','render','release','journal_baseline','journal_commit','core_migrate','mining_pause','mining_resume','migration_ready','prewipe','wipe','apply','start','verify'], 'invalid stage')
+            def timed_out(_signum, _frame):
+                raise TimeoutError('Core migration timed out; mining recovery lease remains armed')
+            if method == 'core_migrate':
+                signal.signal(signal.SIGALRM, timed_out)
+                signal.alarm(600)
+            try:
+                result = getattr(reset, method)()
+            finally:
+                signal.alarm(0)
         print(json.dumps({'ok': True, 'stage': stage, 'result': result}))
     except Exception as error:
         print(json.dumps({'ok': False, 'stage': stage, 'error': str(error) if isinstance(error, Fail) else type(error).__name__}))

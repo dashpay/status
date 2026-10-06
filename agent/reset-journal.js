@@ -95,6 +95,7 @@ export function createResetJournal({ dirs, ctx, client }) {
   function seal(r, observations, sidecars) {
     const record = transitionRecord(load(r, 'journal-before').data, planOf(r), r.nativePlanId, load(r, 'target-images'), observations, new Date().toISOString());
     record.upgrade.sidecars = sidecars;
+    record.lastRunner = `status-reset-${r.id}`;
     store(r, 'journal-begun', record);
     r.nativeTransitions = Object.fromEntries(planOf(r).targets.map((t) => [t.name, { id: r.nativePlanId, previousId: observations[t.name].previousId, from: record.upgrade.from[t.name], to: record.upgrade.to[t.name], preserve: observations[t.name].preservation }]));
   }
@@ -128,6 +129,10 @@ export function createResetJournal({ dirs, ctx, client }) {
     let next = load(r, 'journal-complete');
     if (!next) {
       next = clone(begun); next.revision++; next.updatedAt = new Date().toISOString();
+      for (const [name, receipt] of Object.entries(r.stages?.['core-migrate'] || {})) {
+        need(receipt.ok && receipt.result?.journal?.preservation, 'Core migration receipt missing');
+        next.upgrade.baseline[name] = receipt.result.journal.preservation;
+      }
       next.runtime.images = clone(next.upgrade.to); next.runtime.sidecars = next.upgrade.sidecars;
       next.upgrade.phase = 'complete'; next.upgrade.observedAt = next.updatedAt;
       for (const name of Object.keys(next.upgrade.completed)) next.upgrade.completed[name] = true;

@@ -36,7 +36,7 @@ export function validateReset(settings, q) {
   return { network: n, images, epoch };
 }
 
-export function createReset({ ctx, dirs, pool, getSettings, journalImpl }) {
+export function createReset({ ctx, dirs, pool, getSettings, journalImpl, wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   const { step, save, write } = ctx;
   const journal = journalImpl || createResetJournal({ dirs, ctx });
 
@@ -54,7 +54,7 @@ export function createReset({ ctx, dirs, pool, getSettings, journalImpl }) {
     r.stages ??= {};
     r.stages[name] ??= {};
     const results = await mapLimit(hosts, parallel, async (h) => {
-      if (r.stages[name][h.name]?.ok && name !== 'verify') return r.stages[name][h.name];
+      if (r.stages[name][h.name]?.ok && !['verify', 'mining-pause', 'mining-resume'].includes(name)) return r.stages[name][h.name];
       const q = Buffer.from(JSON.stringify({ ...base, ...(r.native ? { images:r.nativeImages?.[h.name], architecture:r.nativeArchitectures?.[h.name], sidecars:r.nativeSidecars?.[h.name], transition:r.nativeTransitions?.[h.name] } : {}), role: h.resetRole, address: h.publicIp, node: h.name })).toString('base64');
       let v;
       try { v = JSON.parse((await pool.exec(h, `sudo -n python3 - ${name} ${q}`, r.native ? NATIVE_SCRIPT : SCRIPT, timeoutMs)).trim().split('\n').pop()); }
@@ -118,7 +118,19 @@ export function createReset({ ctx, dirs, pool, getSettings, journalImpl }) {
       sidecars = await resetSidecars(original.runtime?.sidecars || original.deployment.sidecars || [], requests, [...new Set(Object.values(r.nativeArchitectures))].sort());
       r.nativeSidecars = Object.fromEntries(hpmns.map((h) => [h.name, sidecarsFor(sidecars, r.nativeArchitectures[h.name])]));
     }
-    const canary = (await barrier(r, `Non-destructive configuration canary on ${r.native ? 'every validator' : hpmns[0].name}`, 'canary', r.native ? hpmns : [hpmns[0]], { anchorHeight: r.anchor.height }))[0];
+    const canaries = await barrier(r, `Non-destructive configuration canary on ${r.native ? 'every validator' : hpmns[0].name}`, 'canary', r.native ? hpmns : [hpmns[0]], { anchorHeight: r.anchor.height });
+    const canary = canaries[0];
+    if (r.native) {
+      r.coreMigrations = Object.fromEntries(hpmns.map((h,i) => [h.name, canaries[i].result.checks.coreMigration || []]));
+      if (Object.values(r.coreMigrations).some((c) => c.length)) {
+        const miners = nativePlan.targets.filter((t) => t.role === 'miner' || t.role === 'wallet');
+        if (miners.length !== 1) throw Error('automatic Core migration requires one identified native mining host');
+        const t = miners[0];
+        r.minerTarget = { name:t.name, instanceId:t.instanceId, publicIp:t.sshAddress, resetRole:t.role };
+        const [ready] = await barrier(r, 'Check automatic mining pause/recovery for Core migration', 'migration-ready', [r.minerTarget]);
+        r.expectedMiner = ready.result.minerId;
+      }
+    }
     if (r.native) journal.seal(r, observed, sidecars);
     const hb = base.filter((_, i) => all[i].resetRole === 'hpmn').map((x) => x.result);
     const sb = base.filter((_, i) => all[i].resetRole === 'seed').map((x) => x.result);
@@ -126,7 +138,7 @@ export function createReset({ ctx, dirs, pool, getSettings, journalImpl }) {
     r.review = {
       kind: 'platform-reset', planId: `reset-${r.id}-${r.anchor.height}`, preparedAt: new Date().toISOString(), coreChain: network.coreNetwork,
       targets: r.targets, hpmns: hpmns.length, seeds: seeds.length, anchor: r.anchor, previousAnchor: uniq(hb.map((x) => x.anchor)),
-      native: r.native, targetImages: r.nativeImages, requested: r.resolvedChoices, current: uniq(hb.map((x) => x.images)), next: r.native ? r.nativeImages[hpmns[0].name] : r.request.images, epoch: { current: uniq(hb.map((x) => x.epochTime)), next: r.native ? hb[0].epochTime : epoch },
+      native: r.native, coreMigrations: r.coreMigrations, targetImages: r.nativeImages, requested: r.resolvedChoices, current: uniq(hb.map((x) => x.images)), next: r.native ? r.nativeImages[hpmns[0].name] : r.request.images, epoch: { current: uniq(hb.map((x) => x.epochTime)), next: r.native ? hb[0].epochTime : epoch },
       dashmate: uniq(hb.map((x) => x.dashmate)), configFormat: uniq(hb.map((x) => x.configFormatVersion)), tor: uniq(hb.map((x) => x.tor?.enabled)),
       seedImages: uniq(sb.map((x) => x.tenderdashImage)), canary: canary.result.checks, rendered: canary.result.rendered,
       coreHeight: Math.max(...hb.map((x) => x.height)),
@@ -148,6 +160,44 @@ export function createReset({ ctx, dirs, pool, getSettings, journalImpl }) {
     }
     await barrier(r, `Wipe Platform on ${hpmns.length} HPMNs (${r.native ? 'dashnet Platform data volumes only' : 'dashmate reset --platform --force'})`, 'wipe', hpmns);
     if (seeds.length) await barrier(r, 'Reset seed Tenderdash data only', 'wipe', seeds);
+    if (r.native) {
+      const migrations = hpmns.filter((h) => r.coreMigrations?.[h.name]?.length);
+      r.progress.phase = 'core-migration'; save(r);
+      for (const h of migrations) {
+        if (r.stages['core-migrate']?.[h.name]?.ok) continue;
+        const done = step(r, `Automatic Core configuration migration on ${h.name}; chain and wallets preserved`);
+        let migrationError;
+        try {
+          const deadline = Date.now() + 10 * 60_000;
+          for (;;) {
+            if (r.cancelRequested) throw Error('cancelled by operator');
+            const paused = await stage(r, 'mining-pause', [r.minerTarget], { expectedMiner:r.expectedMiner }, { timeoutMs:90_000 });
+            if (paused.failed.length) throw Error('mining pause failed; Core was not migrated');
+            if (paused.results[0].result.quiet) break;
+            if (Date.now() >= deadline) throw Error('no quiet DKG window for Core migration');
+            await wait(5000);
+          }
+          const migrated = await stage(r, 'core-migrate', [h], {}, { timeoutMs:11 * 60_000 });
+          if (migrated.failed.length) throw Error(`Core migration failed on ${h.name}; Resume continues the same migration`);
+          r.nativeTransitions[h.name].preserve = migrated.results[0].result.journal.preservation;
+          save(r);
+          done('ok', 'Core READY, synchronized, quorum links reconnected; data and identities preserved');
+        } catch (error) {
+          done('failed', error.message); migrationError = error;
+        } finally {
+          // Cleanup bypasses cancellation and stage caches. An independent
+          // host timer also resumes mining after a killed/lost controller.
+          const resumed = await stage(r, 'mining-resume', [r.minerTarget], { expectedMiner:r.expectedMiner }, { timeoutMs:90_000 });
+          if (resumed.failed.length) migrationError = Error('mining resume unverified; recovery timer is armed; Resume retries cleanup');
+        }
+        if (migrationError) throw migrationError;
+      }
+      // Includes a resume after a lost cleanup response on the last node.
+      if (migrations.length) {
+        const resumed = await stage(r, 'mining-resume', [r.minerTarget], { expectedMiner:r.expectedMiner }, { timeoutMs:90_000 });
+        if (resumed.failed.length) throw Error('mining must be resumed before Platform startup');
+      }
+    }
     r.progress.phase = 'apply'; save(r);
     await barrier(r, 'Apply images, anchor and epoch; render Platform files only', 'apply', all, anchor);
     r.progress.phase = 'start'; save(r);

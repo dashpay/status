@@ -64,3 +64,44 @@ test('native reset binds every deployed validator, canaries all, excludes wallet
   assert.equal(begun, 2); assert.equal(committed, 1);
   assert.ok(!calls.some(([s,h]) => h === 'wallet-001' && ['wipe','apply','start'].includes(s)));
 });
+
+test('release-required Core migration is reviewed, sequential, resumes and always restores mining', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'native-core-migration-'));
+  t.after(() => rmSync(root, {recursive:true,force:true}));
+  const dirs={data:root,private:join(root,'private'),state:join(root,'state')};
+  const name='devnet-sakura', work=join(dirs.private,'devnets',name);
+  mkdirSync(work,{recursive:true});mkdirSync(dirs.state);
+  const hosts=['validators-001','validators-002','wallet-001'].map((name,i)=>({name,role:name.startsWith('wallet')?'wallet':'validator',instanceId:`i-${i}`,publicIp:`192.0.2.${i+1}`,sshAddress:`192.0.2.${i+1}`,state:'running',probe:{ok:true}}));
+  writeFileSync(join(dirs.state,`${name}.json`),JSON.stringify({hosts}));
+  writeFileSync(join(work,'deployment.json'),JSON.stringify({targets:hosts}));
+  const calls=[];let fail='validators-002', begun=false, complete=false, mining=false;
+  const pool={exec:async(h,cmd)=>{
+    const [,stage,encoded]=/python3 - (\S+) (\S+)/.exec(cmd);
+    const q=JSON.parse(Buffer.from(encoded,'base64'));
+    calls.push([stage,h.name]);
+    if(['wipe','core-migrate','apply'].includes(stage))assert.ok(begun);
+    if(stage==='mining-pause'){assert.equal(q.role,'wallet');assert.equal(q.expectedMiner,'miner-id');mining=true;}
+    if(stage==='mining-resume')mining=false;
+    if(stage==='core-migrate')assert.ok(mining,'Core never restarts without quiet paused mining');
+    const results={baseline:{images:{},epochTime:3600,anchor:1,height:100,tor:{}},anchor:{height:99,hash:'a'},release:{sidecars:{}},
+      canary:{checks:{coreMigration:[{user:'drive_consensus',added:['getspecialtxes'],removed:[]}]},rendered:[]},
+      'migration-ready':{minerId:'miner-id'},'mining-pause':{quiet:true,height:13},
+      'core-migrate':{migrated:true,journal:{preservation:{coreId:'new-'+h.name,coreConfig:'migrated'}}},verify:{consensus:{height:5}}};
+    return JSON.stringify({ok:!(stage==='core-migrate'&&h.name===fail),result:results[stage]||{}});
+  }};
+  const journalImpl={prepare:async(r)=>{r.nativeImages=Object.fromEntries(hosts.map(h=>[h.name,{}]));r.nativeArchitectures=Object.fromEntries(hosts.map(h=>[h.name,'arm64']));return {targets:hosts};},original:()=>({deployment:{}}),
+    seal:(r)=>{r.nativeTransitions=Object.fromEntries(hosts.map(h=>[h.name,{preserve:{coreId:'old'}}]));},begin:async()=>{begun=true;},complete:async(r)=>{assert.equal(mining,false);assert.equal(r.nativeTransitions['validators-001'].preserve.coreConfig,'migrated');complete=true;}};
+  const reset=createReset({dirs,pool,journalImpl,ctx:{step:()=>()=>{},save:()=>{},write:()=>{}},getSettings:()=>({networks:[{name,chainType:'devnet',kind:'dashnet',coreNetwork:name}]}),wait:async()=>{}});
+  const r={id:'core-migration',network:name,request:{network:name,action:'platform-reset'}};
+  await reset.prepareReset(r);
+  assert.equal(r.review.coreMigrations['validators-001'][0].added[0],'getspecialtxes');
+  assert.ok(!calls.some(([stage])=>['wipe','core-migrate','mining-pause'].includes(stage)),'prepare is non-destructive');
+  await assert.rejects(reset.executeReset(r),/Core migration failed on validators-002/);
+  assert.equal(mining,false,'failure always resumes mining');assert.equal(complete,false);
+  assert.ok(!calls.some(([stage])=>['apply','start'].includes(stage)));
+  fail=null;
+  await reset.executeReset(r);
+  assert.equal(complete,true);assert.equal(mining,false);
+  assert.equal(calls.filter(([s,h])=>s==='core-migrate'&&h==='validators-001').length,1,'completed Core migration not repeated');
+  assert.ok(calls.findIndex(([s])=>s==='apply')>calls.findLastIndex(([s])=>s==='core-migrate'));
+});

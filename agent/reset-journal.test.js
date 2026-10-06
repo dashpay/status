@@ -68,12 +68,15 @@ test('stale journal cannot be claimed; failed/lost ACK execution retains owner a
   assert.equal(item().Owner.S,'status-reset-test-op');
   assert.equal(JSON.parse(item().Data.S).upgrade.phase,'applying');
   await journal.begin(r);
+  r.stages = {'core-migrate': {'validator-1': {ok:true,result:{journal:{preservation:{...preservation,coreId:'f'.repeat(64),coreConfig:'e'.repeat(64)}}}}}};
   lost();await assert.rejects(journal.complete(r),/lost ACK/);
   assert.ok(item().Owner,'claim kept until local receipts are durable');
   await journal.begin(r);await journal.complete(r);
   const record=JSON.parse(item().Data.S);
   assert.equal(record.upgrade.phase,'complete');assert.equal(record.deployment.genesisCoreHeight,123);
   assert.equal(record.runtime.images['validator-1'].drive,pin('drive','b'));
+  assert.equal(record.upgrade.baseline['validator-1'].coreId,'f'.repeat(64),'verified Core migration updates future native preservation evidence');
+  assert.equal(record.upgrade.baseline['wallet-1'].coreId,preservation.coreId);
   assert.equal(record.runtime.images['wallet-1'].helper,beforeImages.helper);
   assert.equal(item().Owner,undefined);
   assert.match(readFileSync(join(work,'network-current.yaml'),'utf8'),/drive@sha256:bbbb/);

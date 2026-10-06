@@ -265,10 +265,16 @@ function ResetReview({ op, review, operator, pending, act }) {
           <div><span className="text-dim">Images after </span><span className="mono">{img(review.next)}</span> · <span className="text-dim">seed Tenderdash now </span><span className="mono">{review.seedImages.join(', ')}</span></div>
           {review.native && <details><summary>Immutable pins for every target</summary>{Object.entries(review.targetImages || {}).map(([name, pins]) => <div key={name} className="mono mt-2">{name}: {img(pins)}</div>)}</details>}
           <div><span className="text-dim">Epoch </span><span className="mono">{review.epoch.current.join(', ')} → {review.epoch.next} s</span> · <span className="text-dim">dashmate </span><span className="mono">{review.dashmate.join(', ')}</span> · <span className="text-dim">config format </span><span className="mono">{review.configFormat.join(', ')}</span> · <span className="text-dim">Tor enabled </span><span className="mono">{review.tor.map(String).join(', ')}</span></div>
-          <div className="pt-1"><span className="text-dim">Canary </span><span className="mono">{`epochTime ${review.canary.epochTime}, env ${review.canary.epochEnv}, Core config unchanged ${review.canary.coreSectionUnchanged}, anchor ${review.canary.anchor}${review.canary.nodeKeyUnchanged ? `, node key preserved, genesis ${review.canary.genesisChainId} (only anchor changes)` : ''}`}</span></div>
+          <div className="pt-1"><span className="text-dim">Canary </span><span className="mono">{`epochTime ${review.canary.epochTime}, env ${review.canary.epochEnv}, ${review.canary.coreMigration?.length ? 'Core configuration migration included' : `Core config unchanged ${review.canary.coreSectionUnchanged}`} , anchor ${review.canary.anchor}${review.canary.nodeKeyUnchanged ? `, node key preserved, genesis ${review.canary.genesisChainId} (only anchor changes)` : ''}`}</span></div>
           <div className="text-dim">Renders only: <span className="mono">{review.rendered.join(', ')}</span></div>
         </div>
       </Section>
+      {Object.values(review.coreMigrations || {}).some((changes) => changes.length > 0) && <Section title="Automatic Core compatibility migration">
+        <div className="panel p-3 text-[12px] space-y-2">
+          <p>The selected release requires Core RPC access and compatibility changes. This same confirmation includes them: back up, migrate Core/Tor services one node at a time with mining paused, verify READY and quorum connections, then finish redeploying Platform. Core chain, wallets, keys and Core image are preserved.</p>
+          {[...new Set(Object.values(review.coreMigrations).flat().map((c) => `${c.option ? `Core ${c.option}` : `${c.user} RPC access`}: add ${c.added.join(', ') || 'none'}${c.removed.length ? `; remove ${c.removed.join(', ')}` : ''}`))].map((line) => <div className="mono break-words" key={line}>{line}</div>)}
+        </div>
+      </Section>}
       {op.status === 'review' && operator && (
         <div className="mt-3 flex flex-wrap items-center gap-3">
           <span className="text-[12px] text-dim">type <span className="mono">{op.network}</span> to confirm</span>

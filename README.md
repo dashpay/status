@@ -91,11 +91,15 @@ Tenderdash, gateway and helper versions. The helper follows the Drive tag unless
 explicitly selected; epoch settings are preserved. Preparation resolves immutable
 architecture-specific pins, stages the target release and canaries every validator.
 Preparation binds the exact validator instance IDs and addresses to the deployment
-plan and uses the target helper in an isolated copy of each dashmate home. A target
-release requiring Core configuration changes is rejected before confirmation; its
-Core compatibility migration must be handled first (no silent Core restart).
+plan and uses the target helper in an isolated copy of each dashmate home. Release-required Core RPC access and compatibility migrations are included in the
+same review/confirmation. After withdrawing Platform, the controller migrates
+affected Core/Tor services one node at a time, preserving Core image, chain, data
+mounts, credentials and identities. Mining pauses only in a quiet DKG window and
+resumes after READY/sync/quorum reconnection checks; an independent 15-minute
+lease also resumes it after controller loss. Core migration is bounded to ten
+minutes per node and keeps original backups plus resumable per-host receipts.
 Confirmation removes only the owned Drive/Tenderdash chain-data volumes and
-restarts Platform through dashnet's Compose project. Core/Tor, registrations,
+restarts Platform through dashnet's Compose project. Core data, Tor settings, registrations,
 node identities, TLS certificates, wallet/miner/web hosts and log volumes are
 preserved. The on-host Platform anchor/identity metadata and the console's Connect
 files follow the verified reset; historical creation plans are not rewritten.
