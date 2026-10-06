@@ -257,11 +257,13 @@ function ResetReview({ op, review, operator, pending, act }) {
   return (
     <>
       <Section title={`Platform wipe/redeploy · ${review.hpmns} HPMNs + ${review.seeds} seed(s)`}>
-        <div className="panel px-3 py-2 text-[12px] space-y-1">
+        <div className="panel px-3 py-2 text-[12px] space-y-1 break-words [overflow-wrap:anywhere]">
           <div><span className="text-dim">Core chain </span><span className="mono">{review.coreChain}</span> · <span className="text-dim">Core height </span><span className="mono">{review.coreHeight}</span></div>
           <div><span className="text-dim">Genesis ChainLock anchor </span><span className="mono lv-warn">{review.anchor.height}</span> <span className="mono text-dim">{review.anchor.hash}</span> <span className="text-dim">(previous {review.previousAnchor.join(', ')})</span></div>
+          {review.requested && <div><span className="text-dim">Requested release </span><span className="mono">{img(review.requested)}</span></div>}
           <div><span className="text-dim">Images now </span><span className="mono">{review.current.map(img).join(' | ')}</span></div>
           <div><span className="text-dim">Images after </span><span className="mono">{img(review.next)}</span> · <span className="text-dim">seed Tenderdash now </span><span className="mono">{review.seedImages.join(', ')}</span></div>
+          {review.native && <details><summary>Immutable pins for every target</summary>{Object.entries(review.targetImages || {}).map(([name, pins]) => <div key={name} className="mono mt-2">{name}: {img(pins)}</div>)}</details>}
           <div><span className="text-dim">Epoch </span><span className="mono">{review.epoch.current.join(', ')} → {review.epoch.next} s</span> · <span className="text-dim">dashmate </span><span className="mono">{review.dashmate.join(', ')}</span> · <span className="text-dim">config format </span><span className="mono">{review.configFormat.join(', ')}</span> · <span className="text-dim">Tor enabled </span><span className="mono">{review.tor.map(String).join(', ')}</span></div>
           <div className="pt-1"><span className="text-dim">Canary </span><span className="mono">{`epochTime ${review.canary.epochTime}, env ${review.canary.epochEnv}, Core config unchanged ${review.canary.coreSectionUnchanged}, anchor ${review.canary.anchor}${review.canary.nodeKeyUnchanged ? `, node key preserved, genesis ${review.canary.genesisChainId} (only anchor changes)` : ''}`}</span></div>
           <div className="text-dim">Renders only: <span className="mono">{review.rendered.join(', ')}</span></div>

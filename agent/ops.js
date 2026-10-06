@@ -365,7 +365,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     if (['succeeded', 'failed', 'cancelled'].includes(r.status)) onChange(r, true);
   }
 
-  const reset = createReset({ ctx: { step, save, write }, dirs, pool, getSettings });
+  const reset = createReset({ ctx: { step, save, write, dashnet }, dirs, pool, getSettings });
   const devnets = devnetsImpl || createDevnets({ ctx: { dashnet, step, save, write, pinBinary, binary }, dirs, key, pool, getSettings, region: getSettings().aws.region, log });
 
   // Poll the request directory: create, confirm, cancel, resume.

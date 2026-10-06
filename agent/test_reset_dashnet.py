@@ -42,13 +42,13 @@ class ResetTests(unittest.TestCase):
     def test_wipe_only_removes_reviewed_platform_data_volumes_not_core_or_logs(self):
         cs = self.containers()
         b = {'platform': {s: {'id': c['Id']} for s,c in cs.items()}, 'volumes': {s:s+'-volume' for s in cs}}
-        mod.write(self.r.state / 'prepared.json', {})
+        mod.write(self.r.state / 'prepared.json', {'images':{},'files':{},'platform':{}})
         mod.write(self.r.state / 'wipe-started.json', {})
         calls, compose = [], []
         def run(args, **_):
             calls.append(args)
             return 'drive_abci-volume\ndrive_tenderdash-volume\ncore-data\ndrive-logs\n'
-        with patch.object(self.r, 'baseline_record', return_value=b), patch.object(self.r, 'preserved'), \
+        with patch.object(self.r, 'desired', return_value={}), patch.object(self.r, 'baseline_record', return_value=b), patch.object(self.r, 'preserved'), \
              patch.object(self.r, 'owned', return_value=cs), patch.object(self.r, 'rpc', return_value={'state':'READY'}), \
              patch.object(self.r, 'compose', side_effect=lambda _, *args: compose.append(args)), patch.object(mod, 'run', side_effect=run):
             self.r.wipe()
@@ -93,6 +93,34 @@ class ResetTests(unittest.TestCase):
         with patch.object(self.r, 'baseline_record', return_value={}), patch.object(self.r, 'preserved'):
             with self.assertRaisesRegex(mod.Fail, 'prepared files changed'):
                 self.r.apply()
+
+    def test_target_helper_core_migration_stops_before_canary_or_wipe(self):
+        doc = {'configs': {'validators-001': {'core': {'rpc': {'users': {
+            'drive_consensus': {'whitelist': ['getblockhash']}}}}}}}
+        mod.write(self.r.home / 'config.json', doc)
+        b = {'configHash': mod.digest(self.r.home / 'config.json'), 'helper': 'old'}
+        def migrate(stage, action):
+            self.assertEqual(action, 'migrate')
+            value = mod.read(stage / 'config.json')
+            value['configs']['validators-001']['core']['rpc']['users']['drive_consensus']['whitelist'].append('getspecialtxes')
+            mod.write(stage / 'config.json', value)
+        with patch.object(self.r, 'baseline_record', return_value=b), patch.object(self.r, 'preserved'), \
+             patch.object(self.r, 'desired', return_value={'helper':'new'}), patch.object(self.r, 'helper', side_effect=migrate), \
+             patch.object(mod.os, 'chown'), patch.object(mod, 'run') as run:
+            with self.assertRaisesRegex(mod.Fail, 'Core RPC whitelist migration'):
+                self.r.render()
+            run.assert_not_called()
+        self.assertEqual(mod.read(self.r.home / 'config.json'), doc)
+        self.assertFalse((self.r.state / 'prepared.json').exists())
+        self.assertFalse((self.r.state / 'wipe-started.json').exists())
+
+    def test_prepared_target_drift_refused_before_destructive_commands(self):
+        mod.write(self.r.state / 'prepared.json', {'images': {'drive':'old'}, 'files':{}})
+        with patch.object(self.r, 'baseline_record', return_value={}), patch.object(self.r, 'preserved'), \
+             patch.object(self.r, 'desired', return_value={'drive':'new'}), patch.object(mod, 'run') as run:
+            with self.assertRaisesRegex(mod.Fail, 'target images changed'):
+                self.r.wipe()
+            run.assert_not_called()
 
     def test_command_errors_do_not_leak_rpc_or_compose_secrets(self):
         class Result:

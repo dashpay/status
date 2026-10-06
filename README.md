@@ -86,15 +86,23 @@ only `config.json`, rendered Platform files and `dynamic-compose.yml`, start, an
 verify READY, images, consensus, epochs (config/env/parsed), DAPI TLS and Core
 preservation. Each stage must succeed on every target before the next.
 
-For **console-created dashnet devnets**, reset keeps the installed immutable images
-and epoch settings (use Deploy for version changes). Preparation binds the exact
-validator instance IDs and addresses to the deployment plan and canaries every
-validator using its installed helper, in an isolated copy of its dashmate home.
+For **console-created dashnet devnets**, wipe/redeploy accepts target Drive, DAPI,
+Tenderdash, gateway and helper versions. The helper follows the Drive tag unless
+explicitly selected; epoch settings are preserved. Preparation resolves immutable
+architecture-specific pins, stages the target release and canaries every validator.
+Preparation binds the exact validator instance IDs and addresses to the deployment
+plan and uses the target helper in an isolated copy of each dashmate home. A target
+release requiring Core configuration changes is rejected before confirmation; its
+Core compatibility migration must be handled first (no silent Core restart).
 Confirmation removes only the owned Drive/Tenderdash chain-data volumes and
 restarts Platform through dashnet's Compose project. Core/Tor, registrations,
 node identities, TLS certificates, wallet/miner/web hosts and log volumes are
 preserved. The on-host Platform anchor/identity metadata and the console's Connect
 files follow the verified reset; historical creation plans are not rewritten.
+Native execution claims dashnet’s authoritative journal with an exact revision check
+before wiping. Failures keep the non-expiring claim for the same operation’s Resume.
+After verification, host receipts, runtime image pins, the genesis anchor and the
+console’s current version choices are committed; future Deploy uses that state.
 No reset is auto-confirmed. Failed stages retain backups and per-host receipts
 for resume. A full destructive end-to-end reset is not part of UI smoke tests.
 

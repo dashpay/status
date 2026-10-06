@@ -5,18 +5,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createReset, validateReset } from './reset.js';
 
-test('dashnet reset is devnet-only and does not bypass native image/epoch management', () => {
+test('dashnet reset is devnet-only and accepts Platform target versions but preserves Core and epoch', () => {
   const settings = { networks: [{ name: 'devnet-sakura', chainType: 'devnet', kind: 'dashnet' }, { name: 'mainnet', chainType: 'mainnet', kind: 'dashnet' }] };
   assert.equal(validateReset(settings, { network: 'devnet-sakura' }).epoch, null);
   assert.throws(() => validateReset(settings, { network: 'mainnet' }), /devnets/);
-  assert.throws(() => validateReset(settings, { network: 'devnet-sakura', images: { drive: 'dashpay/drive:new' } }), /preserves installed/);
-  assert.throws(() => validateReset(settings, { network: 'devnet-sakura', options: { epochSeconds: 1 } }), /preserves installed/);
+  assert.equal(validateReset(settings, { network: 'devnet-sakura', images: { drive: 'dashpay/drive:new' } }).images.drive, 'dashpay/drive:new');
+  assert.throws(() => validateReset(settings, { network: 'devnet-sakura', images: { core: 'dashpay/dashd:23' } }), /invalid Platform/);
+  assert.throws(() => validateReset(settings, { network: 'devnet-sakura', options: { epochSeconds: 1 } }), /preserves epoch/);
 });
 
 test('native reset binds every deployed validator, canaries all, excludes wallet, and refuses replacement hosts', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'native-reset-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const dirs = { private: join(root, 'private'), state: join(root, 'state') };
+  const dirs = { data:root, private: join(root, 'private'), state: join(root, 'state') };
   const name = 'devnet-sakura';
   const work = join(dirs.private, 'devnets', name);
   mkdirSync(work, { recursive: true }); mkdirSync(dirs.state);
@@ -32,21 +33,23 @@ test('native reset binds every deployed validator, canaries all, excludes wallet
     assert.equal(q.node, host.name);
     assert.match(script, /class Reset:/);
     assert.equal(q.epochSeconds, null);
-    assert.equal(q.images, undefined);
+    assert.deepEqual(q.images, {});
     calls.push([stage, host.name]);
     return JSON.stringify({ ok: fail !== `${stage}:${host.name}`, result: {
-      ...({ baseline: { images: { drive: 'installed@sha256:123' }, epochTime: 3600, height: 100, anchor: 10, dashmate: '5.0.0-beta.1', configFormatVersion: '5.0.0', tor: { enabled: true } }, anchor: { height: 99, hash: 'ab' }, canary: { checks: { coreSectionUnchanged: true }, rendered: [] } }[stage] || {}),
+      ...({ release: { sidecars:{} }, baseline: { images: { drive: 'installed@sha256:123' }, epochTime: 3600, height: 100, anchor: 10, dashmate: '5.0.0-beta.1', configFormatVersion: '5.0.0', tor: { enabled: true } }, anchor: { height: 99, hash: 'ab' }, canary: { checks: { coreSectionUnchanged: true }, rendered: [] } }[stage] || {}),
     } });
   } };
   const ctx = { step: () => () => {}, save: () => {}, write: () => {} };
-  const reset = createReset({ ctx, dirs, pool, getSettings: () => ({ networks: [{ name, chainType: 'devnet', coreNetwork: name, kind: 'dashnet' }] }) });
+  let begun = 0, committed = 0;
+  const journalImpl = { prepare:async (r) => { r.nativeArchitectures = Object.fromEntries(hosts.map((h)=>[h.name,'arm64'])); r.nativeImages = Object.fromEntries(hosts.map((h)=>[h.name,{}])); return { targets:hosts }; }, original:()=>({deployment:{}}), seal:()=>{}, begin:async()=>{begun++;}, complete:async()=>{committed++;} };
+  const reset = createReset({ ctx, dirs, pool, journalImpl, getSettings: () => ({ networks: [{ name, chainType: 'devnet', coreNetwork: name, kind: 'dashnet' }] }) });
   const record = () => ({ id: 'native-reset-test', network: name, request: { network: name, action: 'platform-reset' } });
   const r = record();
   await reset.prepareReset(r);
   assert.equal(r.review.native, true);
   assert.equal(r.review.epoch.next, 3600);
   assert.deepEqual(calls.filter(([s]) => s === 'canary').map(([, h]) => h), ['validators-001', 'validators-002']);
-  assert.ok(!calls.some(([s,h]) => h === 'wallet-001' || ['wipe','apply','start'].includes(s)));
+  assert.ok(!calls.some(([s]) => ['wipe','apply','start'].includes(s)));
   hosts[1].instanceId = 'i-replacement'; state();
   await assert.rejects(reset.executeReset(r), /targets changed/);
   await assert.rejects(reset.prepareReset(record()), /do not match/);
@@ -58,4 +61,6 @@ test('native reset binds every deployed validator, canaries all, excludes wallet
   await reset.executeReset(r);
   assert.equal(calls.filter(([s,h]) => s === 'wipe' && h === 'validators-001').length, 1);
   assert.ok(r.result.healthy);
+  assert.equal(begun, 2); assert.equal(committed, 1);
+  assert.ok(!calls.some(([s,h]) => h === 'wallet-001' && ['wipe','apply','start'].includes(s)));
 });
