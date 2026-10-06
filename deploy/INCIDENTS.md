@@ -47,6 +47,54 @@ container environment text, command-line arguments or build layers.
 The Go deployment binary remains pinned by `DASHNET_REF`; enabling monitoring
 must not implicitly upgrade a network or adopt a newer deployment recipe.
 
+## Platform release webhook (push, no live upgrade)
+
+GitHub repository `dashpay/platform` (numeric ID `424232911`) sends `release`
+events to `POST /api/webhooks/github/platform-release`. Subscribe to `release`
+and accept only action `published`, including published prereleases. Do not use
+the browser OAuth token; repository administration configures the webhook once.
+Its independent secret is mounted from
+`/etc/dash-status/incidents/github-release-webhook`, configured through
+`GITHUB_RELEASE_WEBHOOK_SECRET_FILE`. Never commit or log the secret or PAT.
+
+The web process verifies HMAC-SHA256 over the exact raw request body, repository
+identity and bounded release metadata. Before HTTP202 it fsyncs an immutable
+record in `data/release-inbox`; repository/release-ID dedup survives redelivery,
+restart and stable promotion. Release bodies and suggested commands are not
+retained. A conflicting reused release ID/tag is rejected for review. Ping and
+other actions do not enqueue work. GitHub does not automatically retry failed
+webhook deliveries: inspect hook delivery status and redeliver failed requests.
+The endpoint acknowledges a persisted inbox record, not completed agent work.
+
+The existing incident single writer consumes this local inbox into its durable
+authenticated outbox. This is local queue processing, not GitHub release polling.
+Each release creates one `maintenance:dash-network-go` compatibility task, not a
+health outage or six-hour recurring reminder. The task explicitly authorizes
+checking/fixing **dash-network-go code and tests**, in an isolated worktree,
+against the exact release. The agent resolves the release tag to a Platform
+commit and records the baseline/tested dash-network-go commit. It can prepare a
+reviewable commit/draft PR, but must never merge/publish, install a new live
+binary, alter deployed pins/configuration, deploy/upgrade/reset/restart a live
+network, or change Core/Platform product code because a release was published.
+No release-only Slack alert. Missing artifacts are a waiting/blocker, not proof
+of incompatibility. Newer releases are separate tasks, not silent retargeting.
+
+Compatibility admission has a separate **one task/hour, four/day** allowance;
+the existing global concurrent-slot cap, ownership, cooldown and required
+direct Astra/High/work-account route remain intact. Ordinary incident limits
+remain eight/hour and48/day. Configure the reviewed scope resource lock
+`maintenance:dash-network-go` to `repo:dashpay/dash-network-go`; isolated task
+resources only, no shared fleet mutation. Publish this authority in the local
+authorization record before enabling this new scope.
+
+In addition to the normal terminal/no-children receipt, completion requires
+`compatibility: {releaseId, platformTag, platformCommit, dashnetCommit, result,
+report, tests}`. Commits are full40-hex IDs, `result` is `compatible` or `fixed`,
+and tests are nonempty actual passing validation evidence. The board labels
+successful work **Compatibility verified**, not live network recovery. A generic
+resolved reply without this version-bound evidence cannot close the task.
+Queued/blocked work is retained; no historical release backfill is automatic.
+
 ## Receiver and worker
 
 `deploy/incident-broker/broker.py` uses Python's standard library and SQLite
@@ -65,7 +113,8 @@ not authorize infrastructure changes. An `ENABLED` file admits worker execution;
 removing it pauses new work without discarding the inbox.
 
 The worker defaults to one batch, with per-scope sessions and a 15-minute
-cooldown, capped globally at eight batches/hour and 48/day. An operator-reviewed
+cooldown, with ordinary incidents capped at eight batches/hour and 48/day
+(release compatibility has the separate bounded allowance above). An operator-reviewed
 `concurrency.json` beside the inbox may allow two disjoint batches:
 
 ```json

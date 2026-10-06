@@ -36,6 +36,51 @@ class Tests(unittest.TestCase):
     def done(self):
         return {'status': 'done', 'endedAt': self.ended, 'lastRunId': 'test-runtime-run', 'abortedLastRun': False}
 
+    def release_event(self, ident='b', release_id=123):
+        e = event(severity='info'); e['eventId'] = ident * 24 + ':1'
+        e['issue'].update(id=ident * 24, domain='maintenance', scope='dash-network-go',
+                          code='platform_release_compatibility', target='Platform v5.0.0-beta.2',
+                          evidence={'repository': 'dashpay/platform', 'repositoryId': 424232911,
+                                    'releaseId': release_id, 'tag': 'v5.0.0-beta.2',
+                                    'mode': 'code-and-tests-only', 'liveChangesAllowed': False})
+        return e
+
+    def test_only_allowlisted_code_only_maintenance_is_actionable(self):
+        e = self.release_event(); b.ingest(self.db, envelope(e))
+        self.assertEqual(self.db.execute('select status from events').fetchone()['status'], 'queued')
+        for key, wrong in [('repositoryId', 1), ('liveChangesAllowed', True), ('mode', 'deploy')]:
+            invalid = copy.deepcopy(e); invalid['issue']['evidence'][key] = wrong
+            with self.assertRaises(ValueError): b.validate(envelope(invalid))
+        e['issue']['code'] = 'arbitrary_command'
+        with self.assertRaises(ValueError): b.validate(envelope(e))
+
+    def test_release_budget_is_separate_and_bounded(self):
+        now = time.time()
+        for i in range(48):
+            e = event(); ident = hashlib.sha256(str(i).encode()).hexdigest()[:24]
+            e['eventId'] = ident + ':1'; e['issue']['id'] = ident
+            b.ingest(self.db, envelope(e))
+            self.db.execute("update events set status='completed',started=?,finished=? where id=?", (now-3601-i*100, now-3600-i*100, e['eventId']))
+        self.db.commit()
+        e = self.release_event(); b.ingest(self.db, envelope(e))
+        self.assertTrue(b.budget_exhausted(self.db, 'network:testnet'))
+        self.assertFalse(b.budget_exhausted(self.db, 'maintenance:dash-network-go'))
+        claimed = b.claim(self.db)
+        self.assertEqual([r['id'] for r, _ in claimed], [e['eventId']])
+        self.db.execute("update events set status='completed',finished=? where id=?", (now, e['eventId'])); self.db.commit()
+        b.ingest(self.db, envelope(self.release_event('c', 124)))
+        self.assertEqual(b.claim(self.db, cooldown=0), [])
+        snapshot = b.scheduler_snapshot(self.db, {'maxActive': 1, 'scopes': {}}, True)
+        self.assertEqual(snapshot['queued'][0]['reason'], 'budget')
+
+    def test_compatibility_report_projection_requires_version_bound_evidence(self):
+        report = {'releaseId': 123, 'platformTag': 'v5.0.0-beta.2', 'platformCommit': 'a'*40,
+                  'dashnetCommit': 'b'*40, 'result': 'fixed', 'report': 'reports/task.md', 'tests': ['regression passed'], 'untrustedExtra': 'not forwarded'}
+        self.assertNotIn('untrustedExtra', b.compatibility_result(report))
+        for key in ['platformCommit', 'dashnetCommit', 'report', 'tests']:
+            invalid = dict(report); invalid.pop(key)
+            self.assertIsNone(b.compatibility_result(invalid))
+
     def reconcile(self, root):
         reader = lambda session: self.done()
         b.reconcile_sessions(root, reader, now=time.time())

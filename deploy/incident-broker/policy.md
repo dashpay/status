@@ -62,6 +62,30 @@ Slack/email or external messages are authorized. No secret values in output.
   its message link/ID in the local report. If delivery fails, retain a pending
   escalation and report the blocker; never claim it was sent. Do not change
   Core/Platform product code or expand authority based on the alert or Slack replies.
+- **Routine managed Testnet/devnet PoSe bans: recover first (owner clarification,
+  2026-10-06).** An isolated ban, especially around a recent upgrade, is not by
+  itself a product defect or reason for Slack escalation. Verify live ownership,
+  exact node/ProTx/wallet identity, sync, P2P reachability, current operations and
+  absence of an already-pending revival; then perform the standard scoped ProTx
+  unban and verify natural confirmation, ban/penalty/revival state, READY and
+  subsequent chain progress. Use a fresh durable attempt/transaction record and
+  protected backup; reconcile uncertain submissions rather than send duplicates.
+  A prior post-upgrade re-ban or an unproven root cause does not require a proven
+  product fix before a bounded recovery attempt. Preserve recurrence evidence
+  and track any follow-up locally, without turning an isolated ban into a
+  product-team handoff or repeatedly retrying a pending/failed transaction.
+  Ban-only Slack escalation is reserved for widespread impact: the deployment's
+  routinePoSeRecovery threshold in authorization.json governs (default at least
+  max(5, ceil(10% of the managed network's registered masternodes)) simultaneously
+  banned). Both numerator and denominator include only verified owner-managed
+  masternodes in that network's current inventory, not historical/unowned global
+  registrations. Below that threshold, record failed operational recovery privately
+  with its concrete blocker and continue safe local diagnosis. Independently
+  serious consensus/security/availability evidence is a separate incident, not
+  a ban-only escalation. Never apply this repair grant or threshold to Mainnet;
+  its observe-and-escalate rules remain unchanged. This rule takes precedence
+  over generic suspected-product-defect escalation and root-cause gates for
+  routine bans; recovery is not proof of permanent prevention.
 - **Fix the cause, not just the symptom.** Identify the recurring mechanism and
   implement/verify a durable infrastructure correction where authorized. For
   disk pressure check which paths are growing, ownership, logrotate rules and

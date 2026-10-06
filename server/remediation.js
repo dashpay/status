@@ -20,7 +20,8 @@ export function remediationView(state, { full = false, visibleNetworks = [], now
     const response = observations.get(issue.id);
     const last = response?.lastResponse;
     let stage = 'unknown', reason = 'Waiting for remediation status';
-    if (issue.severity === 'info') { stage = 'review'; reason = 'Informational finding; no automatic cleanup'; }
+    const compatibility = issue.domain === 'maintenance' && issue.code === 'platform_release_compatibility';
+    if (issue.severity === 'info' && !compatibility) { stage = 'review'; reason = 'Informational finding; no automatic cleanup'; }
     else if (response?.active) { stage = 'working'; reason = response.workerState === 'uncertain' ? 'Existing repair retains ownership; completion is being checked' : 'Repair session in progress'; }
     else if (response?.workerState === 'queued' || state?.outbox?.some((e) => e.issue?.id === issue.id)) {
       stage = 'queued'; reason = WAIT[response?.waitReason] || 'Awaiting delivery to the repair worker';
@@ -35,12 +36,18 @@ export function remediationView(state, { full = false, visibleNetworks = [], now
       reason = stage === 'fixed' ? 'Repair completed and monitoring verified recovery' : 'Monitoring observed recovery; no autonomous fix is claimed';
     } else if (last) { stage = 'verifying'; reason = 'Response finished; monitoring has not verified recovery'; }
     const result = { id: issue.id, domain: issue.domain, network: issue.domain === 'network' ? issue.scope : null,
-      title: TITLES[issue.code] || 'Status issue', severity: issue.severity, stage, stageLabel: LABEL[stage], reason,
+      title: compatibility ? `Check and fix dash-network-go compatibility with Platform ${text(issue.evidence?.tag, 100) || 'release'}` : TITLES[issue.code] || 'Status issue', severity: issue.severity, stage, stageLabel: compatibility && stage === 'fixed' ? 'Compatibility verified' : LABEL[stage], reason,
       monitoring: issue.status, firstSeen: iso(issue.firstSeen), observedAt: iso(issue.lastSeen), resolvedAt: iso(issue.resolvedAt),
       startedAt: iso(response?.startedAt), finishedAt: iso(response?.finishedAt), retryAt: iso(response?.retryAt),
       pendingEvents: Number.isSafeInteger(response?.pendingEvents) ? response.pendingEvents : 0,
       lastOutcome: ['resolved', 'blocked', 'no_change'].includes(last?.outcome) ? last.outcome : null,
       stale: !producerFresh || !workerFresh };
+    if (compatibility) {
+      result.taskType = 'compatibility';
+      if (stage === 'fixed') result.reason = 'Compatibility checks and code/test evidence recorded; no live network changes';
+      if (stage === 'verifying') result.reason = 'Waiting for a complete version-bound compatibility report';
+      if (stage === 'working') result.reason = 'Checking and fixing deployment-tool code in isolation; no live upgrade';
+    }
     if (full) Object.assign(result, { target: text(issue.target, 512), scope: text(issue.scope, 512), code: issue.code,
       summary: text(last?.summary), blocker: text(last?.blocker), nextAction: text(last?.nextAction),
       changes: Array.isArray(last?.changes) ? last.changes.filter((x) => typeof x === 'string').slice(0, 8).map((x) => x.slice(0, 300)) : [],

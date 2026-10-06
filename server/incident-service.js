@@ -2,6 +2,7 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { createCi } from './ci.js';
+import { loadReleaseInbox, reconcileReleaseTasks } from './release-webhook.js';
 import { loadSettings, readJSON } from '../shared/settings.js';
 import { deriveIssues, reconcile, loadIncidentState, saveIncidentState, readSecret, signedHeaders, validateDestination } from './incidents.js';
 
@@ -12,6 +13,7 @@ export async function cycle({ dataDir, ci, destination, secret, fetcher = fetch,
   if (aws) aws.health = readJSON(join(dataDir, 'aws', 'health.json'));
   const derived = deriveIssues({ settings, states, ci: (ci || createCi({ dataDir })).summary({ admin: true }), aws, now });
   const state = reconcile(loadIncidentState(dataDir), derived, now);
+  reconcileReleaseTasks(state, loadReleaseInbox(dataDir), now);
   // Commit events before any attempt; lost acknowledgements replay eventId safely.
   saveIncidentState(dataDir, state);
   if (destination && secret && (!state.delivery?.nextAttemptAt || Date.parse(state.delivery.nextAttemptAt) <= now)) {
