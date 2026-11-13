@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 import urllib.request
 import urllib.error
@@ -200,17 +201,85 @@ class Tests(unittest.TestCase):
         path.write_text(json.dumps(self.concurrency()))
         self.assertEqual(b.concurrency_config(root), self.concurrency())
 
-    def test_known_uncertainty_never_enables_operator_pause(self):
+    def test_holds_never_touch_the_operator_switch(self):
         root = pathlib.Path(self.temp.name); config = self.concurrency()
         b.hold_uncertain(root, 'known', 'network:sakura', config)
         self.assertTrue((root/'HELD-known').exists())
         self.assertFalse((root/'ENABLED').exists())
         (root/'ENABLED').touch()
-        b.hold_uncertain(root, 'known', 'network:sakura', config)
-        self.assertTrue((root/'ENABLED').exists())
+        # Serial mode and unknown scopes used to rename ENABLED, which also
+        # disabled the only automatic way out of the hold.
         b.hold_uncertain(root, 'unknown', 'network:other', config)
+        b.hold_uncertain(root, 'serial', 'network:sakura', {'maxActive': 1, 'scopes': {}})
+        self.assertTrue((root/'ENABLED').exists())
+        self.assertTrue((root/'HELD-unknown').exists() and (root/'HELD-serial').exists())
+        self.assertEqual(list(root.glob('PAUSED-*')), [])
+
+    def test_serial_hold_still_blocks_admission_without_a_pause_file(self):
+        b.ingest(self.db, envelope(event())); b.claim(self.db, cooldown=0)
+        with self.db: self.db.execute("update events set status='uncertain'")
+        self.concurrent_event('b', 'other')
+        self.assertEqual(b.claim(self.db, cooldown=0), [])
+
+    def test_startup_returns_automatic_pauses_but_not_operator_pauses(self):
+        root = pathlib.Path(self.temp.name)
+        (root/'PAUSED-route-unavailable').touch()
+        self.assertEqual(b.adopt_legacy_pauses(root), 'PAUSED-route-unavailable')
+        self.assertTrue((root/'ENABLED').exists())
+        (root/'ENABLED').rename(root/'PAUSED-operator')
+        self.assertIsNone(b.adopt_legacy_pauses(root))
         self.assertFalse((root/'ENABLED').exists())
-        self.assertTrue((root/'PAUSED-unknown').exists())
+        (root/'PAUSED-operator').unlink(); (root/('PAUSED-'+'1'*24)).touch()
+        self.assertEqual(b.adopt_legacy_pauses(root), 'PAUSED-'+'1'*24)
+        self.assertTrue((root/'ENABLED').exists() and (root/('HELD-'+'1'*24)).exists())
+
+    def test_route_failure_backs_off_and_recovers_without_pausing(self):
+        root = pathlib.Path(self.temp.name); now = time.time()
+        first = b.route_failed(self.db, 'route down', 'pin', now)
+        self.assertEqual(first['retryAt'], now + 60)
+        second = b.route_failed(self.db, 'route down', 'pin', now + 60)
+        self.assertEqual((second['failures'], second['openedAt'], second['retryAt']), (2, now, now + 180))
+        for _ in range(10): last = b.route_failed(self.db, 'route down', 'pin', now)
+        self.assertEqual(last['retryAt'], now + 1800)
+        self.assertEqual([a['code'] for a in b.attention(self.db, root)], ['route_unavailable'])
+        b.route_recovered(self.db)
+        self.assertIsNone(b.route_breaker(self.db))
+        self.assertEqual(b.attention(self.db, root), [])
+
+    def test_unavailable_route_requeues_and_leaves_dispatch_enabled(self):
+        root = pathlib.Path(self.temp.name); (root/'ENABLED').touch()
+        b.ingest(self.db, envelope(event()))
+        batch = b.claim(self.db, cooldown=0)
+        args = SimpleNamespace(state_dir=str(root), container_state_dir=str(root), api_token_file=str(root/'token'))
+        with patch.object(b, 'refreshed_events', side_effect=lambda events, _: events), \
+                patch.object(b, 'pin_session_route', side_effect=ValueError('not pinned')):
+            self.assertIsNone(b.prepare(args, root, 'policy', {'maxActive': 1, 'scopes': {}}, batch, batch[0][1],
+                                        b.attempt_id([r for r, _ in batch]), threading.Event()))
+        row = self.db.execute('select * from events').fetchone()
+        self.assertEqual((row['status'], row['started'], row['invoked']), ('queued', None, None))
+        self.assertTrue((root/'ENABLED').exists())
+        self.assertEqual(list(root.glob('PAUSED-*')), [])
+        self.assertEqual(b.route_breaker(self.db)['kind'], 'pin')
+        # The same work is admitted again once the route answers.
+        with self.db: self.db.execute("delete from meta where key='route_breaker'")
+        self.assertEqual(len(b.claim(self.db, cooldown=0)), 1)
+
+    def test_withdrawn_batch_consumes_no_dispatch_budget(self):
+        root = pathlib.Path(self.temp.name)
+        b.ingest(self.db, envelope(event()))
+        batch = b.claim(self.db, cooldown=0)
+        args = SimpleNamespace(state_dir=str(root), container_state_dir=str(root), api_token_file=str(root/'token'))
+        with patch.object(b, 'refreshed_events', return_value=[]):
+            self.assertIsNone(b.prepare(args, root, 'policy', {'maxActive': 1, 'scopes': {}}, batch, batch[0][1], 'r'*24, threading.Event()))
+        row = self.db.execute('select * from events').fetchone()
+        self.assertEqual((row['status'], row['started']), ('superseded', None))
+
+    def test_new_events_wait_before_admission(self):
+        b.ingest(self.db, envelope(event()))
+        self.assertEqual(b.claim(self.db, cooldown=0, min_age=300), [])
+        self.assertEqual(b.scheduler_snapshot(self.db, {'maxActive': 1, 'scopes': {}}, True)['queued'][0]['reason'], 'settling')
+        with self.db: self.db.execute('update events set received=received-301')
+        self.assertEqual(len(b.claim(self.db, cooldown=0, min_age=300)), 1)
 
     def test_parallel_claims_respect_two_slots_atomically(self):
         config = self.concurrency()
@@ -326,9 +395,70 @@ class Tests(unittest.TestCase):
         for t in [now,now+31]:b.reconcile_sessions(root,lambda _:{**self.done(),'abortedLastRun':True},t)
         self.assertEqual(self.db.execute('select status from events').fetchone()[0],'uncertain')
 
+    def test_expired_hold_is_released_only_when_the_session_is_inactive(self):
+        root,run=self.uncertain_run(); now=time.time()
+        stale={'status':'error','endedAt':(now-3600)*1000,'lastRunId':'earlier-run'}
+        status=lambda: self.db.execute("select status from events where id=?",('a'*24+':1',)).fetchone()[0]
+        def broken(_): raise OSError('gateway unavailable')
+        # Inside the lease nothing is released, however idle the session looks.
+        for t in [now,now+31,now+62,now+93]: b.reconcile_sessions(root,lambda _:stale,t)
+        self.assertEqual(status(),'uncertain')
+        self.assertIn('hold',[a['code'] for a in b.attention(self.db,root,now+1801)])
+        late=now+b.HOLD_LEASE+1
+        # Past the lease an active, recently active or unreadable session keeps it.
+        for reader in [lambda _:{**stale,'status':'running'}, lambda _:{**stale,'lastActivityAt':late*1000}, broken]:
+            for t in [late,late+31,late+62,late+93]: b.reconcile_sessions(root,reader,t)
+            self.assertEqual(status(),'uncertain')
+        b.reconcile_sessions(root,lambda _:stale,late+200)
+        b.reconcile_sessions(root,lambda _:stale,late+231)
+        self.assertEqual(status(),'uncertain','one inactive observation is not enough')
+        b.reconcile_sessions(root,lambda _:stale,late+262)
+        self.assertEqual(status(),'abandoned')
+        self.assertTrue((root/(run+'.released.json')).exists())
+        self.assertFalse((root/('HELD-'+run)).exists())
+        self.assertTrue((root/'ENABLED').exists())
+        # The slot is free again and the abandoned events are never replayed.
+        self.concurrent_event('b','sakura')
+        self.assertEqual([r['id'] for r,_ in b.claim(self.db,config=self.concurrency(),cooldown=0)],['b'*24+':1'])
+
+    def test_fast_failure_uses_the_short_lease(self):
+        root,run=self.uncertain_run(); now=time.time()
+        with self.db: self.db.execute('update events set finished=started+5')
+        stale={'status':'done','endedAt':(now-3600)*1000,'lastRunId':'earlier-run'}
+        for t in [now+60,now+121]: b.reconcile_sessions(root,lambda _:stale,t)
+        self.assertEqual(self.db.execute('select status from events').fetchone()[0],'uncertain')
+        late=now+b.QUICK_HOLD_LEASE+1
+        for t in [late,late+61]: b.reconcile_sessions(root,lambda _:stale,t)
+        self.assertEqual(self.db.execute('select status from events').fetchone()[0],'abandoned')
+
+    def test_bookkeeping_check_is_not_spent_on_an_unavailable_route_and_retries(self):
+        root,run=self.uncertain_run(); now=time.time()
+        b.reconcile_sessions(root,lambda _:self.done(),now)
+        checks=b.reconcile_sessions(root,lambda _:self.done(),now+31)
+        args=SimpleNamespace(state_dir=str(root),container_state_dir=str(root))
+        with patch.object(b,'describe_session',return_value=self.done()), patch.object(b,'pin_session_route',side_effect=ValueError('route')), patch.object(b.subprocess,'run') as execute:
+            b.request_completion_check(args,checks[0]); execute.assert_not_called()
+        self.assertEqual(self.db.execute('select check_attempts from lifecycle').fetchone()[0],0)
+        self.assertEqual(len(b.reconcile_sessions(root,lambda _:self.done(),now+62)),1)
+        b.route_recovered(self.db)
+        with patch.object(b,'describe_session',return_value=self.done()), patch.object(b,'pin_session_route',return_value={}), patch.object(b.subprocess,'run') as execute:
+            execute.return_value.returncode=0
+            b.request_completion_check(args,checks[0]); self.assertEqual(execute.call_count,1)
+        self.assertEqual(b.reconcile_sessions(root,lambda _:self.done(),now+93),[])
+        self.assertEqual(len(b.reconcile_sessions(root,lambda _:self.done(),now+93+b.CHECK_BACKOFF[0])),1,'a later bounded retry')
+
+    def test_restart_requeues_work_that_never_reached_the_model(self):
+        root=pathlib.Path(self.temp.name)
+        self.concurrent_event('a','sakura');b.claim(self.db,config=self.concurrency())
+        b.recover_interrupted(root,None)
+        row=self.db.execute('select * from events').fetchone()
+        self.assertEqual((row['status'],row['started']),('queued',None))
+        self.assertEqual(list(root.glob('HELD-*')),[])
+
     def test_restart_recovers_running_as_hold_not_requeue(self):
         root=pathlib.Path(self.temp.name);config=self.concurrency()
         self.concurrent_event('a','sakura');b.claim(self.db,config=config)
+        with self.db: self.db.execute('update events set invoked=started')
         (root/'ENABLED').touch();b.recover_interrupted(root,config)
         row=self.db.execute('select * from events').fetchone()
         self.assertEqual(row['status'],'uncertain');self.assertTrue(row['result'])

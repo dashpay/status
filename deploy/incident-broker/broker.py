@@ -3,6 +3,12 @@
 
 Bounded workers own disjoint scopes. Ambiguous CLI completion is held, never blindly
 retried. Agent completion is not incident resolution (only fresh probes resolve).
+
+Nothing here stops dispatch until a person notices. Failures before the model is
+invoked return work to the queue; an unavailable route backs off and retries by
+itself; a hold ends by receipt or, past its lease, once the Gateway shows the
+session inactive. Only the operator removes ENABLED. What still needs a person is
+reported in the authenticated ACK so the producer can alert out of band.
 """
 import argparse
 import datetime
@@ -26,6 +32,23 @@ TRANSITIONS = {'opened', 'reopened', 'changed', 'resolved', 'reminder'}
 MODEL = 'openai/gpt-6-astra'
 AUTH_PROFILE = 'openai:work'
 THINKING = 'high'
+# A new event waits this long before admission, so the producer can recognise
+# an upgrade/restart in progress and the fresh readback can withdraw the event.
+ADMISSION_DELAY = 300
+# Route failures back off and retry by themselves; dispatch is never left paused.
+ROUTE_BACKOFF = (60, 120, 300, 600, 1800)
+# An invocation that ends this quickly without a verified result never got going.
+FAST_FAILURE = 180
+# A hold is released once its lease has expired AND the Gateway positively shows
+# the session inactive. The long lease exceeds the longest permitted run.
+HOLD_LEASE = 7200
+QUICK_HOLD_LEASE = 900
+QUIET_ACTIVITY = 900
+# Session states that prove no turn is executing. Anything else keeps the hold.
+INACTIVE_STATES = {'done', 'idle', 'error', 'failed', 'aborted', 'cancelled', 'timeout'}
+# Bookkeeping-only completion checks: bounded attempts, spaced out.
+CHECK_ATTEMPTS = 3
+CHECK_BACKOFF = (900, 3600)
 
 
 def pin_session_route(session):
@@ -63,7 +86,59 @@ def connect(path):
       run text primary key, observation text, observed real,
       check_requested real, reconciled real, note text);
     ''')
+    migrate(db)
     return db
+
+
+def migrate(db):
+    """Additive columns. Startup runs this once before any thread exists."""
+    def missing(table, column):
+        return column not in {r['name'] for r in db.execute('pragma table_info(' + table + ')')}
+    try:
+        if missing('events', 'invoked'):
+            with db:
+                db.execute('alter table events add column invoked real')
+                # Work claimed by an earlier release may already have reached the
+                # model: keep treating it as invoked, never as safely requeueable.
+                db.execute("update events set invoked=started where status in ('running','uncertain')")
+        if missing('lifecycle', 'check_attempts'):
+            with db:
+                db.execute('alter table lifecycle add column check_attempts integer not null default 0')
+                db.execute('update lifecycle set check_attempts=1 where check_requested is not null')
+        if missing('lifecycle', 'idle_since'):
+            with db:
+                db.execute('alter table lifecycle add column idle_since real')
+    except sqlite3.OperationalError:
+        # Another connection completed the same migration first.
+        if missing('events', 'invoked') or missing('lifecycle', 'check_attempts') or missing('lifecycle', 'idle_since'):
+            raise
+
+
+def route_breaker(db):
+    row = db.execute("select value from meta where key='route_breaker'").fetchone()
+    try:
+        value = json.loads(row['value']) if row else None
+    except ValueError:
+        value = None
+    return value if isinstance(value, dict) and type(value.get('retryAt')) in (int, float) else None
+
+
+def route_failed(db, reason, kind, now=None):
+    """Open (or extend) the breaker. Queued work stays queued and is retried."""
+    now = time.time() if now is None else now
+    with db:
+        db.execute('begin immediate')
+        old = route_breaker(db) or {}
+        failures = int(old.get('failures', 0)) + 1
+        state = {'kind': kind, 'reason': reason[:200], 'openedAt': old.get('openedAt', now), 'failures': failures,
+                 'lastFailureAt': now, 'retryAt': now + ROUTE_BACKOFF[min(failures, len(ROUTE_BACKOFF)) - 1]}
+        db.execute('insert or replace into meta values(?,?)', ('route_breaker', json.dumps(state)))
+    return state
+
+
+def route_recovered(db):
+    with db:
+        db.execute("delete from meta where key='route_breaker'")
 
 
 def clock_value(value, optional=False):
@@ -189,7 +264,33 @@ def health(db, root=None):
     scheduler = db.execute("select value from meta where key='scheduler'").fetchone()
     return {'status': 'ok', 'workerAt': float(worker['value']) if worker else None, 'workerMode': mode['value'] if mode else 'unknown', 'oldestQueuedAt': oldest, 'counts': {r['status']: r['n'] for r in rows}, 'lastHeartbeat': float(heartbeat['value']) if heartbeat else None,
             'scheduler': json.loads(scheduler['value']) if scheduler else None,
-            **({'remediation': remediation_snapshot(db, root)} if root else {})}
+            **({'remediation': remediation_snapshot(db, root), 'attention': attention(db, root), 'route': route_breaker(db)} if root else {})}
+
+
+def attention(db, root, now=None):
+    """Conditions that stop dispatch and need a person if they persist. Shipped in
+    the authenticated ACK so the producer can alert out of band: a stalled worker
+    cannot report its own stall through the queue it is failing to drain.
+    """
+    now = time.time() if now is None else now
+    items = []
+    breaker = route_breaker(db)
+    if breaker:
+        items.append({'code': 'route_unavailable', 'since': breaker.get('openedAt'),
+                      'detail': 'Repair model route failing (%d in a row): %s. Dispatch retries automatically.'
+                                % (breaker.get('failures', 1), str(breaker.get('reason', 'unknown'))[:200])})
+    for row in db.execute("select result run,scope,min(started) started from events where status='uncertain' group by result,scope"):
+        if row['started'] and now - row['started'] >= 1800:
+            items.append({'code': 'hold', 'since': row['started'],
+                          'detail': 'Scope %s has been held by an unfinished repair run for %d minutes' % (row['scope'][:80], (now - row['started']) // 60)})
+    oldest = db.execute("select min(received) at from events where status='queued'").fetchone()['at']
+    if oldest and now - oldest >= 3600 and (root / 'ENABLED').exists():
+        items.append({'code': 'queue_stalled', 'since': oldest, 'detail': 'Oldest queued event has waited %d minutes' % ((now - oldest) // 60)})
+    for key in ['config_error', 'worker_error', 'lifecycle_error']:
+        row = db.execute('select value from meta where key=?', (key,)).fetchone()
+        if row:
+            items.append({'code': key, 'since': None, 'detail': row['value'][:200]})
+    return items[:20]
 
 
 def make_handler(db_path, secret, allowed_peer):
@@ -332,7 +433,7 @@ def conflict(resources, occupied):
     return bool(occupied) and (resources is None or any(held is None or resources & held for held in occupied.values()))
 
 
-def claim(db, cooldown=900, config=None, admission_path=None):
+def claim(db, cooldown=900, config=None, admission_path=None, min_age=0):
     config = config or {'maxActive': 1, 'scopes': {}}
     with db:
         db.execute('begin immediate')
@@ -352,7 +453,7 @@ def claim(db, cooldown=900, config=None, admission_path=None):
                 return []
         scopes = db.execute("select scope,min(received) oldest from events where status='queued' group by scope order by oldest").fetchall()
         for scope in scopes:
-            recent = db.execute("select max(started) at from events where scope=? and status in ('completed','uncertain')", (scope['scope'],)).fetchone()['at']
+            recent = db.execute("select max(started) at from events where scope=? and status in ('completed','uncertain','abandoned')", (scope['scope'],)).fetchone()['at']
             if recent and recent > time.time() - cooldown:
                 continue
             # Do not dispatch obsolete revisions/recovered issues from a backlog.
@@ -363,6 +464,8 @@ def claim(db, cooldown=900, config=None, admission_path=None):
                 later = db.execute('select body from events where id like ?', (issue_id + ':%',)).fetchall()
                 if any(int(json.loads(x['body'])['issue']['revision']) > int(revision) for x in later):
                     db.execute("update events set status='superseded',finished=? where id=?", (time.time(), r['id']))
+                elif r['received'] > time.time() - min_age:
+                    continue  # Too new: let the producer confirm the fault persists.
                 else:
                     if not conflict(event_resources(config, r), occupied):
                         active.append(r)
@@ -378,15 +481,83 @@ def claim(db, cooldown=900, config=None, admission_path=None):
     return []
 
 
-def hold_uncertain(root, run, scope, config):
-    """Known scope keeps its reservation without freezing an independent lane."""
-    with connect(root / 'inbox.sqlite') as db:
-        locks = occupied_locks(db, config)
-    known = locks.get(scope) is not None if scope in locks else scope_resources(config, scope) is not None
-    if config['maxActive'] > 1 and known:
-        (root / ('HELD-' + run)).touch(mode=0o600)
-    elif (root / 'ENABLED').exists():
-        (root / 'ENABLED').rename(root / ('PAUSED-' + run))
+def hold_uncertain(root, run, scope=None, config=None):
+    """Visible marker only. The uncertain rows already keep their slot and locks
+    inside claim(): serial mode and unknown scopes admit nothing else, a known
+    scope leaves a reviewed disjoint lane free. ENABLED belongs to the operator
+    and is never renamed here, so reconciliation and the bookkeeping check keep
+    running and the hold can end without a person.
+    """
+    (root / ('HELD-' + run)).touch(mode=0o600)
+
+
+def adopt_legacy_pauses(root):
+    """Earlier releases paused all dispatch by renaming ENABLED to PAUSED-<run> or
+    PAUSED-route-unavailable and nothing renamed it back. Those holds now live in
+    the database, so return the switch. Any other PAUSED-* name is an operator's.
+    """
+    if (root / 'ENABLED').exists():
+        return None
+    paused = list(root.glob('PAUSED-*'))
+    if len(paused) != 1 or not re.fullmatch(r'PAUSED-(route-unavailable|[a-f0-9]{24})', paused[0].name):
+        return None
+    name = paused[0].name
+    paused[0].rename(root / 'ENABLED')
+    if name != 'PAUSED-route-unavailable':
+        (root / ('HELD-' + name[len('PAUSED-'):])).touch(mode=0o600)
+    return name
+
+
+def restore_legacy_pause(db, root, run):
+    if not db.execute("select 1 from events where status in ('running','uncertain')").fetchone():
+        pause = root / ('PAUSED-' + run)
+        if pause.exists() and not (root / 'ENABLED').exists():
+            pause.rename(root / 'ENABLED')
+
+
+def session_inactive(session, now):
+    """Positive evidence that no turn is executing in this session."""
+    if session.get('status') not in INACTIVE_STATES or session.get('permissionModePending'):
+        return False
+    last = session.get('lastActivityAt')
+    return not (type(last) in (int, float) and now * 1000 - last < QUIET_ACTIVITY * 1000)
+
+
+def lease_expired(row, now):
+    started = row['started'] or now
+    quick = row['finished'] is not None and row['finished'] - started < FAST_FAILURE
+    return now - started >= (QUICK_HOLD_LEASE if quick else HOLD_LEASE)
+
+
+def confirm_inactive(db, run, now):
+    """Two inactive observations at least a minute apart, like terminal release."""
+    old = db.execute('select idle_since from lifecycle where run=?', (run,)).fetchone()
+    if old and old['idle_since'] is not None:
+        return now - old['idle_since'] >= 60
+    with db:
+        db.execute('insert into lifecycle(run,idle_since,note) values(?,?,?) on conflict(run) do update set idle_since=excluded.idle_since,note=excluded.note',
+                   (run, now, 'hold lease expired; confirming the session is inactive before release'))
+    return False
+
+
+def release_hold(db, root, row, session, now):
+    """Bounded hold. The lease has expired and the Gateway twice showed no turn
+    executing, but no terminal receipt exists. Free the slot and locks so other
+    work proceeds. The events are closed as abandoned, never replayed: the issue
+    returns only through a new producer revision (change or periodic reminder).
+    """
+    run = row['run']
+    evidence = {'run': run, 'session': row['session_key'], 'status': session.get('status'), 'lastRunId': session.get('lastRunId'),
+                'endedAt': session.get('endedAt'), 'lastActivityAt': session.get('lastActivityAt'), 'releasedAt': now,
+                'basis': 'hold lease expired and two observations showed no active turn; no terminal receipt; events abandoned without replay; not service recovery'}
+    path = root / (run + '.released.json')
+    path.write_text(json.dumps(evidence, indent=2)); path.chmod(0o600)
+    with db:
+        db.execute("update events set status='abandoned',finished=? where status='uncertain' and result=?", (now, run))
+        db.execute('insert into lifecycle(run,reconciled,note) values(?,?,?) on conflict(run) do update set reconciled=excluded.reconciled,note=excluded.note',
+                   (run, now, 'hold released after lease: session inactive without a terminal receipt; events abandoned, not replayed'))
+    (root / ('HELD-' + run)).unlink(missing_ok=True)
+    restore_legacy_pause(db, root, run)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -484,16 +655,27 @@ def reconcile_sessions(root, session_reader=describe_session, now=None):
     now = time.time() if now is None else now
     checks = []
     with connect(root / 'inbox.sqlite') as db:
-        runs = db.execute("select result run,session_key,min(started) started from events where status='uncertain' and result is not null group by result,session_key").fetchall()
+        runs = db.execute("select result run,session_key,min(started) started,max(finished) finished from events where status='uncertain' and result is not null group by result,session_key").fetchall()
         for row in runs:
             run = row['run']
             try:
                 session = session_reader(row['session_key'])
+                # A hold is bounded: past its lease it ends once the Gateway twice
+                # shows no turn executing. An active or unreadable session keeps it.
+                inactive = session_inactive(session, now)
+                expired = lease_expired(row, now)
+                if not inactive:
+                    with db:
+                        db.execute('update lifecycle set idle_since=null where run=? and idle_since is not null', (run,))
                 ended = session.get('endedAt')
                 idle = (session.get('status') == 'done' and not session.get('permissionModePending')
                         and type(ended) in (int, float) and ended >= (row['started'] or now) * 1000
                         and isinstance(session.get('lastRunId'), str) and bool(session['lastRunId']))
                 if not idle:
+                    if expired and inactive:
+                        if confirm_inactive(db, run, now):
+                            release_hold(db, root, row, session, now)
+                        continue
                     with db:
                         db.execute('insert into lifecycle(run,note) values(?,?) on conflict(run) do update set observation=null,observed=null,note=excluded.note',
                                    (run, 'session active or terminal identity not established; reservation retained'))
@@ -522,52 +704,81 @@ def reconcile_sessions(root, session_reader=describe_session, now=None):
                         db.execute("update events set status='completed',finished=? where status='uncertain' and result=?", (now, run))
                         db.execute("update lifecycle set reconciled=?,note='response completed; service recovery remains independent' where run=?", (now, run))
                     (root / ('HELD-' + run)).unlink(missing_ok=True)
-                    if not db.execute("select 1 from events where status in ('running','uncertain')").fetchone():
-                        pause = root / ('PAUSED-' + run)
-                        if pause.exists() and not (root / 'ENABLED').exists():
-                            pause.rename(root / 'ENABLED')
-                elif old['check_requested'] is None:
+                    restore_legacy_pause(db, root, run)
+                elif expired and inactive:
+                    if confirm_inactive(db, run, now):
+                        release_hold(db, root, row, session, now)
+                elif ((old['check_attempts'] or 0) < CHECK_ATTEMPTS and (old['check_requested'] is None
+                        or now - old['check_requested'] >= CHECK_BACKOFF[min(old['check_attempts'] or 1, len(CHECK_BACKOFF)) - 1])):
                     checks.append({'run': run, 'session': row['session_key'], 'observation': observation})
                 else:
-                    lifecycle_note(db, run, 'completion check already requested; receipt absent/invalid, reservation retained; attention required')
-            except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+                    lifecycle_note(db, run, 'completion check requested; receipt absent/invalid, reservation retained until the check is retried or the hold lease expires')
+            except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError):
+                # Includes a malformed or missing session reply: unknown is not inactive.
                 lifecycle_note(db, run, 'Gateway/receipt verification unavailable; reservation retained')
     return checks
 
 
 def request_completion_check(args, check):
-    """At most once per run, only after two idle observations. No repair replay."""
+    """Bounded attempts per run, only after two idle observations. No repair replay."""
     root = pathlib.Path(args.state_dir); run = check['run']; session = check['session']
+    with connect(root / 'inbox.sqlite') as db:
+        breaker = route_breaker(db)
+    if breaker and time.time() < breaker['retryAt']:
+        return  # The route is known to be failing; do not spend an attempt on it.
     # Recheck immediately before admission; a newly active owner takes priority.
     live = describe_session(session)
     observation = json.dumps([live.get('lastRunId'), live.get('endedAt'), live.get('lastActivityAt'),
                               live.get('abortedLastRun'), receipt_data(root, run)], sort_keys=True)
     if live.get('status') != 'done' or live.get('permissionModePending') or observation != check['observation']:
         return
+    # Pin before recording the attempt: an unavailable route defers the check
+    # instead of consuming it. The pin is idempotent session metadata.
+    try:
+        route = pin_session_route(session)
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        with connect(root / 'inbox.sqlite') as db:
+            route_failed(db, 'required Astra/High work-account route unavailable', 'pin')
+            lifecycle_note(db, run, 'completion check deferred: required route unavailable; retried automatically')
+        return
     with connect(root / 'inbox.sqlite') as db:
         with db:
             db.execute('begin immediate')
             row = db.execute('select * from lifecycle where run=?', (run,)).fetchone()
-            if not row or row['check_requested'] is not None or row['observation'] != check['observation']:
+            attempts = (row['check_attempts'] or 0) if row else 0
+            if (not row or row['observation'] != check['observation'] or attempts >= CHECK_ATTEMPTS
+                    or (row['check_requested'] is not None
+                        and time.time() - row['check_requested'] < CHECK_BACKOFF[min(attempts or 1, len(CHECK_BACKOFF)) - 1])):
                 return
-            db.execute("update lifecycle set check_requested=?,note='one-shot completion bookkeeping requested' where run=?", (time.time(), run))
-    route = pin_session_route(session)
+            db.execute("update lifecycle set check_requested=?,check_attempts=?,note='completion bookkeeping requested' where run=?",
+                       (time.time(), attempts + 1, run))
     (root / (run + '.completion-check.route.json')).write_text(json.dumps(route, indent=2))
     message = root / (run + '.completion-check.md')
     message.write_text('Completion bookkeeping only for existing incident run ' + run + '. Do not repeat the investigation, rerun CI, spawn children, change infrastructure, or send external messages. Consult your latest report and relevant memory. Verify whether all previously started children/commands/mutations have actually stopped and the current owner task has reached a terminal result. If complete or concretely blocked with no pending work, write ' + args.container_state_dir + '/' + run + '.completion.json with runId, terminal:true, pendingChildren:0, outcome:resolved|blocked|no_change, finishedAt:current UTC ISO, report:existing report path. This closes only the response, not the service incident. If any work/continuation remains active, do not fabricate a terminal receipt; report the precise hold. Preserve original timeout/result files. Required route remains direct OpenAI Astra/high/openai:work on daniel@ktechmidas.net; no fallback. Give a concise final bookkeeping result.\n')
     with (root / (run + '.completion-check.result.json')).open('wb') as out:
-        subprocess.run(['docker', 'exec', 'infraclaw', 'openclaw', 'agent', '--agent', 'main',
-                        '--session-key', session, '--model', MODEL, '--thinking', THINKING,
-                        '--message-file', args.container_state_dir + '/' + message.name,
-                        '--json', '--timeout', '300'], stdout=out, stderr=subprocess.STDOUT, timeout=360, check=False)
+        proc = subprocess.run(['docker', 'exec', 'infraclaw', 'openclaw', 'agent', '--agent', 'main',
+                               '--session-key', session, '--model', MODEL, '--thinking', THINKING,
+                               '--message-file', args.container_state_dir + '/' + message.name,
+                               '--json', '--timeout', '300'], stdout=out, stderr=subprocess.STDOUT, timeout=360, check=False)
+    if proc.returncode != 0:
+        with connect(root / 'inbox.sqlite') as db:
+            route_failed(db, 'completion bookkeeping invocation failed; route or account may be unavailable', 'invoke')
 
 
 def recover_interrupted(root, config):
-    """Restart preserves ownership but does not strand rows in running forever."""
+    """Restart preserves ownership but does not strand rows in running forever.
+    A batch that was claimed but never reached the model has nothing to hold:
+    it returns to the queue. Only invoked work becomes a durable hold.
+    """
     with connect(root / 'inbox.sqlite') as db:
         groups = db.execute("select scope,session_key,started from events where status='running' group by scope,session_key,started").fetchall()
         for group in groups:
-            rows = db.execute("select id,result,started from events where status='running' and scope=? and started=? order by received", (group['scope'], group['started'])).fetchall()
+            rows = db.execute("select id,result,started,invoked from events where status='running' and scope=? and started=? order by received", (group['scope'], group['started'])).fetchall()
+            if all(r['invoked'] is None for r in rows):
+                with db:
+                    for row in rows:
+                        db.execute("update events set status='queued',started=null where id=?", (row['id'],))
+                continue
             run = next((r['result'] for r in rows if r['result']), None) or attempt_id(rows)
             with db:
                 for row in rows:
@@ -579,14 +790,17 @@ def scheduler_snapshot(db, config, enabled, now=None):
     now = time.time() if now is None else now
     occupied = occupied_locks(db, config)
     budget = any(db.execute('select count(distinct started) n from events where started>?', (now-window,)).fetchone()['n'] >= cap for window, cap in [(3600,8),(86400,48)])
+    breaker = route_breaker(db)
+    route = bool(breaker) and now < breaker['retryAt']
     queued = []
     for row in db.execute("select * from events where status='queued' order by received"):
         resources = event_resources(config, row)
         holders = [scope for scope, locks in occupied.items() if resources is None or locks is None or resources & locks]
-        recent = db.execute("select max(started) at from events where scope=? and status in ('completed','uncertain')", (row['scope'],)).fetchone()['at']
-        reason = ('paused' if not enabled else 'capacity' if len(occupied) >= config['maxActive'] else
+        recent = db.execute("select max(started) at from events where scope=? and status in ('completed','uncertain','abandoned')", (row['scope'],)).fetchone()['at']
+        reason = ('paused' if not enabled else 'route' if route else 'capacity' if len(occupied) >= config['maxActive'] else
                   'resource_conflict' if holders else 'budget' if budget else
-                  'cooldown' if recent and recent > now-900 else 'eligible')
+                  'cooldown' if recent and recent > now-900 else
+                  'settling' if now - row['received'] < ADMISSION_DELAY else 'eligible')
         queued.append({'eventId': row['id'], 'scope': row['scope'], 'reason': reason,
                        'heldBy': holders, 'waitSeconds': int(now-row['received']),
                        'retryAt': recent+900 if reason == 'cooldown' else None})
@@ -597,6 +811,74 @@ def scheduler_snapshot(db, config, enabled, now=None):
 
 def attempt_id(rows):
     return hashlib.sha256('|'.join(r['id'] + '@' + repr(r['started']) for r in rows).encode()).hexdigest()[:24]
+
+
+def requeue(root, batch):
+    """Return a claimed batch that never reached the model to the queue."""
+    with connect(root / 'inbox.sqlite') as db:
+        with db:
+            for r, _ in batch:
+                db.execute("update events set status='queued',started=null where id=? and status='running' and invoked is null", (r['id'],))
+
+
+def prepare(args, root, policy, config, batch, session, run, stop):
+    """Everything before the model invocation. Safely repeatable: returns the
+    batch to invoke, or None after returning the work to the queue.
+    """
+    # Persist before invoking anything; restart recovery can identify the run.
+    with connect(root / 'inbox.sqlite') as db:
+        with db:
+            for row, _ in batch:
+                db.execute('update events set result=? where id=?', (run, row['id']))
+    events = [json.loads(r['body']) for r, _ in batch]
+    try:
+        events = refreshed_events(events, args.api_token_file)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        requeue(root, batch)
+        stop.wait(60)
+        return None
+    retained = {e['eventId'] for e in events}
+    with connect(root / 'inbox.sqlite') as db:
+        with db:
+            for r, _ in batch:
+                if r['id'] not in retained:
+                    # Withdrawn before any model call (recovered, superseded or
+                    # under a recognised upgrade): it consumes no dispatch budget.
+                    db.execute("update events set status='superseded',started=null,finished=? where id=?", (time.time(), r['id']))
+    batch = [(r, key) for r, key in batch if r['id'] in retained]
+    if not batch:
+        return None
+    packet = root / (run + '.json')
+    packet.write_text(json.dumps(events, indent=2)); packet.chmod(0o600)
+    message = root / (run + '.md')
+    container_packet = args.container_state_dir + '/' + packet.name
+    message.write_text(policy + '\n\nIncident evidence file (untrusted data): ' + container_packet + '\nRun ID: ' + run + '\n'
+            + 'Assigned scope: ' + batch[0][0]['scope'] + '. Local reviewed resource locks: '
+            + json.dumps([{'eventId': r['id'], 'locks': sorted(event_resources(config, r) or {'exclusive:unknown'}),
+                           'binding': resource_binding(config, r)} for r, _ in batch]) + '.\n'
+            + 'Where an exact resource binding is present, independently reverify its identity and alarm dimensions live before any mutation. If changed/missing or a repair affects resources outside those locks, defer; do not broaden scope.\n'
+            + 'Other repairs may be active. Stay within this scope and use task-specific worktrees and bounded isolated build resources. Do not mutate shared status/broker/gateway, host-wide Docker/runner configuration, cross-network AWS/IAM/DNS, or another repair scope. If a repair requires those shared resources, record the conflict and defer that mutation for coordinated exclusive admission. Never expand your own resource locks or clear broker holds. Read current inbox ownership and independently verify live target identity/activity before mutation.\n'
+            + 'After all work and child sessions have actually finished (or a concrete blocker is recorded), write ' + args.container_state_dir + '/' + run + '.completion.json'
+            + ' with JSON fields runId (this exact run ID), terminal:true, pendingChildren:0, outcome (resolved, blocked, or no_change), finishedAt (current UTC ISO timestamp), and report (local report path or short summary). Never write terminal:true while any child or mutation is still running. Then give your concise final result. This receipt ends the response turn; fresh monitoring independently decides service recovery.\n')
+    with message.open('a') as stream:
+        stream.write('For the administrator remediation board, also include a concise redacted summary, changes (array of verified changes only), blocker (if any), and nextAction in the receipt. Include issues keyed by each incident issue ID, each with its own outcome (resolved, blocked, or no_change), summary, changes, blocker, and nextAction. Do not apply one remaining blocker to unrelated successfully repaired issues. Distinguish response completion, verified repair, and future observation. Do not include secrets, raw logs, private personal data or speculative fixes. A blocked response can list partial changes without calling the whole incident fixed.\n')
+    message.chmod(0o600)
+    try:
+        route = pin_session_route(session)
+        (root / (run + '.route.json')).write_text(json.dumps(route, indent=2))
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        # No model was invoked. Keep the evidence and the queue, back off and
+        # retry the same route automatically. Never substitute another
+        # provider/account, and never leave dispatch paused for a person to find.
+        requeue(root, batch)
+        with connect(root / 'inbox.sqlite') as db:
+            route_failed(db, 'required Astra/High work-account route unavailable', 'pin')
+        return None
+    with connect(root / 'inbox.sqlite') as db:
+        breaker = route_breaker(db)
+        if breaker and breaker.get('kind') == 'pin':
+            route_recovered(db)
+    return batch, message
 
 
 def worker(args, stop):
@@ -610,10 +892,16 @@ def worker(args, stop):
         except (OSError, ValueError, TypeError):
             with connect(root / 'inbox.sqlite') as db:
                 with db:
-                    db.execute('insert or replace into meta values(?,?)', ('worker_error', 'invalid local concurrency configuration; admission blocked'))
+                    db.execute('insert or replace into meta values(?,?)', ('config_error', 'invalid local concurrency configuration; admission blocked'))
             continue
         with connect(root / 'inbox.sqlite') as db:
-            batch = claim(db, config=config, admission_path=root / 'ENABLED')
+            if db.execute("select 1 from meta where key='config_error'").fetchone():
+                with db:
+                    db.execute("delete from meta where key='config_error'")
+            breaker = route_breaker(db)
+            if breaker and time.time() < breaker['retryAt']:
+                continue  # Backing off. The first claim after retryAt is the probe.
+            batch = claim(db, config=config, admission_path=root / 'ENABLED', min_age=ADMISSION_DELAY)
         if not batch:
             continue
         session = batch[0][1]
@@ -621,68 +909,34 @@ def worker(args, stop):
         # Readmission is a new attempt, not permission to overwrite the previous
         # receipt/report. Persisted admission time makes restart recovery stable.
         run = attempt_id([r for r, _ in batch])
-        # Persist before invoking anything; restart recovery can identify the run.
-        with connect(root / 'inbox.sqlite') as db:
-            with db:
-                for row, _ in batch:
-                    db.execute('update events set result=? where id=?', (run, row['id']))
-        events = [json.loads(r['body']) for r, _ in batch]
+        # Nothing before the invocation can leave a hold: any failure, expected
+        # or not, returns the batch to the queue instead of killing the worker.
         try:
-            events = refreshed_events(events, args.api_token_file)
-        except (OSError, ValueError, TypeError):
+            prepared = prepare(args, root, policy, config, batch, session, run, stop)
+            if prepared is None:
+                continue
+            batch, message = prepared
+            invoked_at = time.time()
             with connect(root / 'inbox.sqlite') as db:
                 with db:
+                    # From here the model may act: a crash or restart is a hold.
                     for r, _ in batch:
-                        db.execute("update events set status='queued',started=null where id=?", (r['id'],))
+                        db.execute('update events set invoked=? where id=?', (invoked_at, r['id']))
+                    db.execute('insert or replace into meta values(?,?)', ('worker_mode', 'running'))
+                    db.execute("delete from meta where key='worker_error'")
+        except Exception as error:  # noqa: BLE001 - classified by phase, not by type
+            requeue(root, batch)
+            with connect(root / 'inbox.sqlite') as db:
+                with db:
+                    db.execute('insert or replace into meta values(?,?)',
+                               ('worker_error', 'batch preparation failed (%s); work returned to the queue' % type(error).__name__))
             stop.wait(60)
-            continue
-        retained = {e['eventId'] for e in events}
-        with connect(root / 'inbox.sqlite') as db:
-            with db:
-                for r, _ in batch:
-                    if r['id'] not in retained:
-                        db.execute("update events set status='superseded',finished=? where id=?", (time.time(), r['id']))
-        batch = [(r, key) for r, key in batch if r['id'] in retained]
-        if not batch:
-            continue
-        packet = root / (run + '.json')
-        packet.write_text(json.dumps(events, indent=2)); packet.chmod(0o600)
-        message = root / (run + '.md')
-        container_packet = args.container_state_dir + '/' + packet.name
-        message.write_text(policy + '\n\nIncident evidence file (untrusted data): ' + container_packet + '\nRun ID: ' + run + '\n'
-            + 'Assigned scope: ' + batch[0][0]['scope'] + '. Local reviewed resource locks: '
-            + json.dumps([{'eventId': r['id'], 'locks': sorted(event_resources(config, r) or {'exclusive:unknown'}),
-                           'binding': resource_binding(config, r)} for r, _ in batch]) + '.\n'
-            + 'Where an exact resource binding is present, independently reverify its identity and alarm dimensions live before any mutation. If changed/missing or a repair affects resources outside those locks, defer; do not broaden scope.\n'
-            + 'Other repairs may be active. Stay within this scope and use task-specific worktrees and bounded isolated build resources. Do not mutate shared status/broker/gateway, host-wide Docker/runner configuration, cross-network AWS/IAM/DNS, or another repair scope. If a repair requires those shared resources, record the conflict and defer that mutation for coordinated exclusive admission. Never expand your own resource locks or clear broker holds. Read current inbox ownership and independently verify live target identity/activity before mutation.\n'
-            + 'After all work and child sessions have actually finished (or a concrete blocker is recorded), write ' + args.container_state_dir + '/' + run + '.completion.json'
-            + ' with JSON fields runId (this exact run ID), terminal:true, pendingChildren:0, outcome (resolved, blocked, or no_change), finishedAt (current UTC ISO timestamp), and report (local report path or short summary). Never write terminal:true while any child or mutation is still running. Then give your concise final result. This receipt ends the response turn; fresh monitoring independently decides service recovery.\n')
-        with message.open('a') as stream:
-            stream.write('For the administrator remediation board, also include a concise redacted summary, changes (array of verified changes only), blocker (if any), and nextAction in the receipt. Include issues keyed by each incident issue ID, each with its own outcome (resolved, blocked, or no_change), summary, changes, blocker, and nextAction. Do not apply one remaining blocker to unrelated successfully repaired issues. Distinguish response completion, verified repair, and future observation. Do not include secrets, raw logs, private personal data or speculative fixes. A blocked response can list partial changes without calling the whole incident fixed.\n')
-        message.chmod(0o600)
-        try:
-            route = pin_session_route(session)
-            (root / (run + '.route.json')).write_text(json.dumps(route, indent=2))
-        except (OSError, ValueError, TypeError, subprocess.SubprocessError):
-            # No model was invoked. Retain the evidence and queue; require repair
-            # of the route instead of silently using another provider/account.
-            with connect(root / 'inbox.sqlite') as db:
-                with db:
-                    for r, _ in batch:
-                        db.execute("update events set status='queued',started=null where id=?", (r['id'],))
-                    db.execute('insert or replace into meta values(?,?)', ('worker_error', 'required Astra/High work-account route unavailable'))
-            if (root / 'ENABLED').exists():
-                (root / 'ENABLED').rename(root / 'PAUSED-route-unavailable')
             continue
         command = ['docker', 'exec', 'infraclaw', 'openclaw', 'agent', '--agent', 'main', '--session-key', session,
                    '--model', MODEL, '--thinking', THINKING, '--message-file', args.container_state_dir + '/' + message.name, '--json', '--timeout', '3600']
         # No shell and no remote fields in argv. No --deliver: private sessions.
         result = 'uncertain'
-        with connect(root / 'inbox.sqlite') as db:
-            with db:
-                db.execute('insert or replace into meta values(?,?)', ('worker_mode', 'running'))
         try:
-            invoked_at = time.time()
             with (root / (run + '.result.json')).open('wb') as out:
                 proc = subprocess.run(command, stdout=out, stderr=subprocess.STDOUT, timeout=3660, check=False)
             if proc.returncode == 0:
@@ -695,14 +949,23 @@ def worker(args, stop):
                             and not live.get('permissionModePending') and reply.get('runId')
                             and live.get('lastRunId') == reply['runId']):
                         result = 'completed'
-        except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError):
             pass
+        finished = time.time()
         with connect(root / 'inbox.sqlite') as db:
             with db:
                 for r, _ in batch:
-                    db.execute('update events set status=?,finished=?,result=? where id=?', (result, time.time(), run, r['id']))
+                    db.execute('update events set status=?,finished=?,result=? where id=?', (result, finished, run, r['id']))
+            # A run that completed, or at least kept going, proves the route. One
+            # that ended at once without a verified result suggests the route or
+            # account is unavailable: back off before spending more scopes on it.
+            if result == 'completed' or finished - invoked_at >= FAST_FAILURE:
+                route_recovered(db)
+            else:
+                route_failed(db, 'agent invocation ended within %d seconds without a verified result' % FAST_FAILURE, 'invoke')
         # Uncertain execution may continue server-side. Preserve its slot and
         # scope locks; only reviewed disjoint scopes can use a remaining lane.
+        # The hold is bounded: reconciliation releases it by receipt or lease.
         if result == 'uncertain':
             hold_uncertain(root, run, batch[0][0]['scope'], config)
         print(json.dumps({'run': run, 'state': result, 'events': len(batch)}), flush=True)
@@ -727,13 +990,22 @@ def main():
             p.error('peer must be a literal Tailscale IPv4 address')
     os.umask(0o077)
     root = pathlib.Path(args.state_dir); root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    recover_interrupted(root, concurrency_config(root))
+    # Recovery needs no concurrency map: saved locks keep protecting held work,
+    # and a malformed map must block admission, not crash-loop the receiver.
+    recover_interrupted(root, None)
     authority = json.loads((root / 'authorization.json').read_text())
     if authority.get('enabled') is not True or authority.get('source') != 'owner-direct' or not authority.get('sourceSession'):
         p.error('local owner authorization record required')
     secret = pathlib.Path(args.secret_file).read_text().strip()
     if len(secret) < 32:
         p.error('HMAC secret must have at least 32 characters')
+    adopted = adopt_legacy_pauses(root)
+    if adopted:
+        print(json.dumps({'startup': 'ENABLED restored from an automatic pause of an earlier release', 'marker': adopted}), flush=True)
+    with connect(root / 'inbox.sqlite') as db:
+        with db:
+            # Recomputed while running; earlier releases never cleared them.
+            db.execute("delete from meta where key in ('worker_error','lifecycle_error','config_error')")
     stop = threading.Event()
     def watch_loop():
         while not stop.wait(10):
@@ -758,7 +1030,11 @@ def main():
                     # Manual/global pause forbids new model work, not read-only reconciliation.
                     if (root / 'ENABLED').exists():
                         request_completion_check(args, check)
-            except (OSError, ValueError, TypeError, KeyError, sqlite3.Error, subprocess.SubprocessError):
+                with connect(root / 'inbox.sqlite') as db:
+                    if db.execute("select 1 from meta where key='lifecycle_error'").fetchone():
+                        with db:
+                            db.execute("delete from meta where key='lifecycle_error'")
+            except (OSError, ValueError, TypeError, KeyError, AttributeError, sqlite3.Error, subprocess.SubprocessError):
                 with connect(root / 'inbox.sqlite') as db:
                     with db:
                         db.execute('insert or replace into meta values(?,?)', ('lifecycle_error', 'completion verification failed; ownership retained'))
