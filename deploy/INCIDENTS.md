@@ -284,9 +284,11 @@ Administrators have two controls on `/remediation`:
   reconciled and released. The receiver host's `ENABLED` file remains the
   master switch: dispatch needs both, and the dashboard can never enable
   dispatch that the host has disabled.
-- **Clear queue.** Marks every queued event `cleared` without repairing it.
+- **Clear queue.** Marks queued fault events `cleared` without repairing them.
   Running and held runs are untouched. An issue that is still open returns on
-  the producer's next revision (a change, or the six-hourly reminder).
+  the producer's next revision (a change, or the six-hourly reminder). Queued
+  release compatibility tasks are kept: they are delivered once and nothing
+  would raise them again.
 
 `POST /api/remediation/dispatch` (`{"enabled": true|false}`) and
 `POST /api/remediation/clear` require an administrator session and the CSRF

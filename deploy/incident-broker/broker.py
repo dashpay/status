@@ -207,7 +207,9 @@ def apply_control(db, control, now=None):
     changed = False
     if control['clearSeq'] > state['clearSeq']:
         # Only work that has not started. Running and held runs keep their owner.
-        count = db.execute("update events set status='cleared',finished=? where status='queued'", (now,)).rowcount
+        # Monitoring raises a fault again while it lasts; a release task is
+        # delivered once and would be lost for good, so those are kept.
+        count = db.execute("update events set status='cleared',finished=? where status='queued' and scope not like 'maintenance:%'", (now,)).rowcount
         state.update(clearSeq=control['clearSeq'], lastClear={'at': now, 'count': count})
         changed = True
     if control['seq'] > state['seq']:
