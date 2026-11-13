@@ -793,6 +793,13 @@ class Tests(unittest.TestCase):
         self.assertEqual(statuses()['a:2'], 'queued', 'redelivery does not clear again')
         self.assertEqual(b.claim(self.db, cooldown=0), [], 'the held scope still owns its slot')
 
+    def test_clear_keeps_release_tasks_that_are_never_raised_again(self):
+        b.ingest(self.db, envelope(event(), self.release_event()))
+        b.ingest(self.db, {**envelope(), 'control': {'seq': 1, 'dispatch': 'off', 'clearSeq': 1}})
+        self.assertEqual({r['scope']: r['status'] for r in self.db.execute('select scope,status from events')},
+                         {'network:testnet': 'cleared', 'maintenance:dash-network-go': 'queued'})
+        self.assertEqual(b.remote_control(self.db)['lastClear']['count'], 1)
+
     def test_control_vocabulary_is_closed(self):
         for bad in ['on', {'seq': 1, 'dispatch': 'on'}, {'seq': 1, 'dispatch': 'run', 'clearSeq': 0}, {'seq': True, 'dispatch': 'on', 'clearSeq': 0},
                     {'seq': 1, 'dispatch': 'on', 'clearSeq': 2}, {'seq': -1, 'dispatch': 'on', 'clearSeq': 0},

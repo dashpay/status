@@ -90,7 +90,7 @@ function Controls({ data, now, reload }) {
           ? 'Switch autonomous repair off? Repairs already in progress continue; nothing new is started.'
           : `Switch autonomous repair on? ${data.queuedEvents} queued event(s) become eligible for the repair agent.`)}>{on ? 'Switch off' : 'Switch on'}</button>
       <button className="btn btn-danger" disabled={busy || !c.supported}
-        onClick={() => run('/api/remediation/clear', undefined, `Clear the repair queue? ${data.queuedEvents} queued event(s) are removed without being repaired. Repairs in progress are not affected. Issues that are still open return on their next monitoring update.`)}>Clear queue</button>
+        onClick={() => run('/api/remediation/clear', undefined, `Clear the repair queue? ${data.queuedEvents} queued event(s) are removed without being repaired. Repairs in progress and release compatibility tasks are not affected. Issues that are still open return on their next monitoring update.`)}>Clear queue</button>
       <span className="text-dim">{!c.supported ? 'The repair worker has not announced these controls yet; they become available once it runs this release.'
         : c.pending ? 'Waiting for the repair worker to acknowledge (about a minute).' : 'Acknowledged by the repair worker.'}</span>
     </div>
