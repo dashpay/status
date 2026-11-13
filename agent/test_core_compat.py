@@ -161,7 +161,6 @@ class CoreCompat(unittest.TestCase):
         self.assertIsInstance(self.ok('quorum', 'list'), dict)
         self.assertIsInstance(self.ok('quorum', 'dkgstatus', '0'), dict)
         self.assertIsInstance(self.ok('quorum', 'dkgstatus'), dict)
-        self.assertIsInstance(self.ok('protx', 'list', 'valid'), list)
         self.assertIsInstance(self.ok('getmempoolinfo').get('size'), int)
         self.assertIsInstance(self.ok('getpeerinfo'), list)
         # These need a registered masternode or a ChainLock. They must exist and
@@ -210,6 +209,9 @@ class CoreCompat(unittest.TestCase):
                 break
         self.assertGreaterEqual(self.ok('getbalance', wallet='dashnet'), 4000, 'could not mine spendable regtest coins')
         type(self).address = address
+        # The masternode list is defined from the first block on, so this is
+        # checked here rather than at genesis.
+        self.assertIsInstance(self.ok('protx', 'list', 'valid'), list)
         out, errors = self.run_probe('miner')
         self.assertIsInstance(out.get('mining'), dict)
         self.assertEqual([w['name'] for w in out.get('wallets', [])], ['dashnet'])
