@@ -4,11 +4,14 @@
 Bounded workers own disjoint scopes. Ambiguous CLI completion is held, never blindly
 retried. Agent completion is not incident resolution (only fresh probes resolve).
 
-Nothing here stops dispatch until a person notices. Failures before the model is
-invoked return work to the queue; an unavailable route backs off and retries by
-itself; a hold ends by receipt or, past its lease, once the Gateway shows the
-session inactive. Only the operator removes ENABLED. What still needs a person is
-reported in the authenticated ACK so the producer can alert out of band.
+A blocker such as an unavailable account no longer stops dispatch until a person
+notices. Failures before the model is invoked return work to the queue; an
+unavailable route backs off and retries by itself; an attempt that provably
+never ran a model turn returns to the queue after its lease. Once a turn has
+run, only a terminal receipt declaring no pending work releases its locks: an
+idle parent session says nothing about children or remote commands underneath
+it. Only the operator removes ENABLED. What still needs a person is reported in
+the authenticated ACK so the producer can alert out of band.
 """
 import argparse
 import datetime
@@ -39,8 +42,9 @@ ADMISSION_DELAY = 300
 ROUTE_BACKOFF = (60, 120, 300, 600, 1800)
 # An invocation that ends this quickly without a verified result never got going.
 FAST_FAILURE = 180
-# A hold is released once its lease has expired AND the Gateway positively shows
-# the session inactive. The long lease exceeds the longest permitted run.
+# A hold is normally ended by a terminal receipt. Past its lease, an attempt
+# that provably never ran a model turn returns to the queue; an idle session
+# alone never releases anything. The long lease exceeds the longest permitted run.
 HOLD_LEASE = 7200
 QUICK_HOLD_LEASE = 900
 QUIET_ACTIVITY = 900
@@ -108,9 +112,12 @@ def migrate(db):
         if missing('lifecycle', 'idle_since'):
             with db:
                 db.execute('alter table lifecycle add column idle_since real')
+        if missing('lifecycle', 'baseline'):
+            with db:
+                db.execute('alter table lifecycle add column baseline text')
     except sqlite3.OperationalError:
         # Another connection completed the same migration first.
-        if missing('events', 'invoked') or missing('lifecycle', 'check_attempts') or missing('lifecycle', 'idle_since'):
+        if missing('events', 'invoked') or any(missing('lifecycle', c) for c in ('check_attempts', 'idle_since', 'baseline')):
             raise
 
 
@@ -518,7 +525,7 @@ def claim(db, cooldown=900, config=None, admission_path=None, min_age=0, switch=
                 return []
         scopes = db.execute("select scope,min(received) oldest from events where status='queued' group by scope order by oldest").fetchall()
         for scope in scopes:
-            recent = db.execute("select max(started) at from events where scope=? and status in ('completed','uncertain','abandoned')", (scope['scope'],)).fetchone()['at']
+            recent = db.execute("select max(started) at from events where scope=? and status in ('completed','uncertain')", (scope['scope'],)).fetchone()['at']
             if recent and recent > time.time() - cooldown:
                 continue
             # Do not dispatch obsolete revisions/recovered issues from a backlog.
@@ -613,26 +620,61 @@ def confirm_inactive(db, run, now):
         return now - old['idle_since'] >= 60
     with db:
         db.execute('insert into lifecycle(run,idle_since,note) values(?,?,?) on conflict(run) do update set idle_since=excluded.idle_since,note=excluded.note',
-                   (run, now, 'hold lease expired; confirming the session is inactive before release'))
+                   (run, now, 'hold lease expired and the attempt shows no trace of a turn; confirming before returning it to the queue'))
     return False
 
 
-def release_hold(db, root, row, session, now):
-    """Bounded hold. The lease has expired and the Gateway twice showed no turn
-    executing, but no terminal receipt exists. Free the slot and locks so other
-    work proceeds. The events are closed as abandoned, never replayed: the issue
-    returns only through a new producer revision (change or periodic reminder).
+SESSION_IDENTITY = ('lastRunId', 'endedAt', 'lastActivityAt')
+
+
+def session_baseline(session):
+    """What the Gateway reports for the session immediately before an attempt."""
+    return json.dumps({k: session.get(k) for k in SESSION_IDENTITY}, sort_keys=True)
+
+
+def attempt_never_started(root, run, session, baseline):
+    """Positive evidence that this attempt ran no model turn, and therefore
+    started no child session and issued no command anywhere.
+
+    An idle parent session proves nothing about work still running underneath
+    it, so idleness alone never releases a hold. Any trace of a turn keeps it:
+    session identity or activity that differs from the snapshot taken before
+    the attempt, a runtime reply in the CLI output, or a receipt file of any
+    content. A receipt that declares pending children is an explicit statement
+    that work continues. Without a snapshot (a hold from an earlier release,
+    or one recovered after a restart) nothing is known and nothing is released.
+    """
+    try:
+        before = json.loads(baseline)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(before, dict) or any(session.get(k) != before.get(k) for k in SESSION_IDENTITY):
+        return False
+    if (root / (run + '.completion.json')).exists():
+        return False
+    try:
+        reply = json.loads((root / (run + '.result.json')).read_text())
+    except (OSError, ValueError):
+        reply = None
+    return not (isinstance(reply, dict) and (reply.get('runId') or reply.get('result')))
+
+
+def release_unstarted(db, root, row, session, now):
+    """The attempt never ran a turn (for example the account was unavailable).
+    Nothing was played, so nothing is replayed: its events return to the queue
+    and the slot and locks are freed. The route breaker paces the next attempt.
     """
     run = row['run']
-    evidence = {'run': run, 'session': row['session_key'], 'status': session.get('status'), 'lastRunId': session.get('lastRunId'),
-                'endedAt': session.get('endedAt'), 'lastActivityAt': session.get('lastActivityAt'), 'releasedAt': now,
-                'basis': 'hold lease expired and two observations showed no active turn; no terminal receipt; events abandoned without replay; not service recovery'}
+    evidence = {'run': run, 'session': row['session_key'], 'status': session.get('status'), 'releasedAt': now,
+                **{k: session.get(k) for k in SESSION_IDENTITY},
+                'basis': 'hold lease expired; two observations showed the session inactive and unchanged since before the attempt, '
+                         'with no receipt and no runtime reply: no model turn ran; events returned to the queue; not service recovery'}
     path = root / (run + '.released.json')
     path.write_text(json.dumps(evidence, indent=2)); path.chmod(0o600)
     with db:
-        db.execute("update events set status='abandoned',finished=? where status='uncertain' and result=?", (now, run))
+        db.execute("update events set status='queued',started=null,finished=null,invoked=null where status='uncertain' and result=?", (run,))
         db.execute('insert into lifecycle(run,reconciled,note) values(?,?,?) on conflict(run) do update set reconciled=excluded.reconciled,note=excluded.note',
-                   (run, now, 'hold released after lease: session inactive without a terminal receipt; events abandoned, not replayed'))
+                   (run, now, 'attempt never ran a model turn; events returned to the queue'))
     (root / ('HELD-' + run)).unlink(missing_ok=True)
     restore_legacy_pause(db, root, run)
 
@@ -737,11 +779,16 @@ def reconcile_sessions(root, session_reader=describe_session, now=None):
             run = row['run']
             try:
                 session = session_reader(row['session_key'])
-                # A hold is bounded: past its lease it ends once the Gateway twice
-                # shows no turn executing. An active or unreadable session keeps it.
-                inactive = session_inactive(session, now)
-                expired = lease_expired(row, now)
-                if not inactive:
+                # A hold ends by a terminal receipt. The only other way out is
+                # positive evidence that the attempt never ran a turn at all, and
+                # so left nothing running underneath: past the lease, with the
+                # session inactive and unchanged since before the attempt, twice.
+                # An idle parent alone, a pending-children receipt, an active or
+                # unreadable session all keep the hold.
+                life = db.execute('select baseline from lifecycle where run=?', (run,)).fetchone()
+                unstarted = (lease_expired(row, now) and session_inactive(session, now)
+                             and attempt_never_started(root, run, session, life['baseline'] if life else None))
+                if not unstarted:
                     with db:
                         db.execute('update lifecycle set idle_since=null where run=? and idle_since is not null', (run,))
                 ended = session.get('endedAt')
@@ -749,9 +796,9 @@ def reconcile_sessions(root, session_reader=describe_session, now=None):
                         and type(ended) in (int, float) and ended >= (row['started'] or now) * 1000
                         and isinstance(session.get('lastRunId'), str) and bool(session['lastRunId']))
                 if not idle:
-                    if expired and inactive:
+                    if unstarted:
                         if confirm_inactive(db, run, now):
-                            release_hold(db, root, row, session, now)
+                            release_unstarted(db, root, row, session, now)
                         continue
                     with db:
                         db.execute('insert into lifecycle(run,note) values(?,?) on conflict(run) do update set observation=null,observed=null,note=excluded.note',
@@ -782,14 +829,14 @@ def reconcile_sessions(root, session_reader=describe_session, now=None):
                         db.execute("update lifecycle set reconciled=?,note='response completed; service recovery remains independent' where run=?", (now, run))
                     (root / ('HELD-' + run)).unlink(missing_ok=True)
                     restore_legacy_pause(db, root, run)
-                elif expired and inactive:
-                    if confirm_inactive(db, run, now):
-                        release_hold(db, root, row, session, now)
                 elif ((old['check_attempts'] or 0) < CHECK_ATTEMPTS and (old['check_requested'] is None
                         or now - old['check_requested'] >= CHECK_BACKOFF[min(old['check_attempts'] or 1, len(CHECK_BACKOFF)) - 1])):
                     checks.append({'run': run, 'session': row['session_key'], 'observation': observation})
                 else:
-                    lifecycle_note(db, run, 'completion check requested; receipt absent/invalid, reservation retained until the check is retried or the hold lease expires')
+                    # A turn ran and left no valid terminal receipt. Children or
+                    # remote commands may still be working, so the reservation is
+                    # never released on the parent's idleness: it needs a receipt.
+                    lifecycle_note(db, run, 'a turn ran without a valid terminal receipt; reservation retained until a receipt declares no pending work')
             except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError):
                 # Includes a malformed or missing session reply: unknown is not inactive.
                 lifecycle_note(db, run, 'Gateway/receipt verification unavailable; reservation retained')
@@ -874,7 +921,7 @@ def scheduler_snapshot(db, config, enabled, now=None):
     for row in db.execute("select * from events where status='queued' order by received"):
         resources = event_resources(config, row)
         holders = [scope for scope, locks in occupied.items() if resources is None or locks is None or resources & locks]
-        recent = db.execute("select max(started) at from events where scope=? and status in ('completed','uncertain','abandoned')", (row['scope'],)).fetchone()['at']
+        recent = db.execute("select max(started) at from events where scope=? and status in ('completed','uncertain')", (row['scope'],)).fetchone()['at']
         reason = ('paused' if not enabled else 'route' if route else 'capacity' if len(occupied) >= config['maxActive'] else
                   'resource_conflict' if holders else 'budget' if budget else
                   'cooldown' if recent and recent > now-900 else
@@ -991,12 +1038,16 @@ def worker(args, stop):
             if prepared is None:
                 continue
             batch, message = prepared
+            # Snapshot the session before the attempt. "Unchanged since this" is
+            # later the only evidence that the attempt never ran a turn.
+            baseline = session_baseline(describe_session(session))
             invoked_at = time.time()
             with connect(root / 'inbox.sqlite') as db:
                 with db:
                     # From here the model may act: a crash or restart is a hold.
                     for r, _ in batch:
                         db.execute('update events set invoked=? where id=?', (invoked_at, r['id']))
+                    db.execute('insert into lifecycle(run,baseline) values(?,?) on conflict(run) do update set baseline=excluded.baseline', (run, baseline))
                     db.execute('insert or replace into meta values(?,?)', ('worker_mode', 'running'))
                     db.execute("delete from meta where key='worker_error'")
         except Exception as error:  # noqa: BLE001 - classified by phase, not by type

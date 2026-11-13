@@ -31,6 +31,19 @@ export function hostSignals(host, now = Date.now()) {
   return signals;
 }
 
+// A container in a restart loop contradicts "planned change". Seen in a fresh
+// probe, it ends the host's hold at once, even inside the settle window that an
+// earlier clean start opened: the hold must not outlive its own evidence.
+export function hostCrashing(host, now = Date.now()) {
+  const probe = host?.probe, at = Date.parse(probe?.at);
+  if (probe?.ok !== true || probe.skipped || !object(probe.data) || !Number.isFinite(at) || at > now + 60_000 || now - at > 180_000) return false;
+  return list(probe.data.containers).some((k) => {
+    const started = Date.parse(k.startedAt);
+    // Restarting now, or restarted by its restart policy within the window.
+    return !k.oneShot && (k.restarting === true || ((k.restarts || 0) > 0 && Number.isFinite(started) && at - started < SETTLE_MS));
+  });
+}
+
 // One episode lasts while new signals keep arriving within the settle window.
 // Its total length is capped, so a recreate loop becomes actionable again.
 function episode(prev, latest, now, max) {
@@ -52,7 +65,8 @@ export function recognizeActivity({ settings, states, previous, now = Date.now()
       if (h.duplicate || (!text(h.instanceId) && !text(h.name))) continue;
       const key = activityKey(n.name, h), old = previous?.hosts?.[key];
       const signals = hostSignals(h, now);
-      const entry = episode(old, signals.length ? Math.max(...signals.map((x) => x.at)) : null, now, HOST_HOLD_MAX_MS);
+      // A crash loop drops the hold and its history; the fault is actionable now.
+      const entry = hostCrashing(h, now) ? null : episode(old, signals.length ? Math.max(...signals.map((x) => x.at)) : null, now, HOST_HOLD_MAX_MS);
       if (!entry) continue;
       result.hosts[key] = { ...entry, network: n.name, host: String(h.name || '').slice(0, 120), instanceId: h.instanceId || null,
         signals: signals.length ? signals.slice(0, 8).map(({ kind, name }) => ({ kind, name })) : list(old?.signals).slice(0, 8) };

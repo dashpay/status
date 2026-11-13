@@ -2,7 +2,8 @@
 // stalled repair worker cannot report its own stall through the repair queue.
 // Reads receiver facts only: never changes incidents, the outbox or dispatch.
 export const STALL_GRACE_MS = 15 * 60_000;
-export const STALL_REPEAT_MS = 6 * 3600_000;
+export const STALL_CLEAR_MS = 15 * 60_000;
+export const RECOVERY_RETRY_MS = 6 * 3600_000;
 
 const iso = (ms) => new Date(ms).toISOString();
 const clip = (value, size) => [...String(value ?? '')].map((c) => c < ' ' ? ' ' : c).join('').slice(0, size);
@@ -31,30 +32,38 @@ async function post(url, text, fetcher) {
   if (!response.ok) throw new Error(`alert webhook HTTP ${response.status}`);
 }
 
-// Tracks the stall in state.stall. Notifies once after the grace period, then
-// every six hours while it lasts, and once on recovery. Without a webhook the
-// stall is still recorded for the remediation board.
+// Tracks the stall in state.stall and sends at most two messages per stall:
+// one after the grace period and one when it is over. Nothing is repeated
+// while a stall lasts. A stall is over only after it has stayed clear for the
+// clear period: a brief recovery is the same stall, so it neither announces a
+// recovery nor forgets that the stall was already announced. Without a webhook
+// the stall is still recorded for the remediation board.
 export async function stallAlert(state, { url = null, fetcher = fetch, now = Date.now() } = {}) {
-  const reasons = stallReasons(state, now);
-  // A stall that begins while a recovery notice is still undelivered is a new one.
-  const old = state.stall?.recoveredAt && reasons.length ? null : state.stall || null;
-  if (!reasons.length) {
-    if (old?.notifiedAt && url) {
-      // Keep the record until the notice is delivered, so a failed post is
-      // retried on the next cycle; give up after the repeat interval.
-      const recoveredAt = Number.isFinite(Date.parse(old.recoveredAt)) ? old.recoveredAt : iso(now);
-      state.stall = { since: old.since, notifiedAt: old.notifiedAt, reasons: [], recoveredAt };
-      if (now - Date.parse(recoveredAt) < STALL_REPEAT_MS) await post(url, `Dash status: autonomous remediation has recovered (stalled since ${old.since}).`, fetcher);
-    }
-    delete state.stall;
+  const reasons = stallReasons(state, now), old = state.stall || null;
+  if (reasons.length) {
+    // Once a stall has been stably clear, what follows is a new stall.
+    const same = old && !old.recoveredAt && Number.isFinite(Date.parse(old.since));
+    const since = same ? old.since : iso(now);
+    state.stall = { since, notifiedAt: same ? old.notifiedAt || null : null, reasons };
+    if (state.stall.notifiedAt || !url || now - Date.parse(since) < STALL_GRACE_MS) return;
+    await post(url, `Dash status: autonomous remediation is stalled since ${since}.\n${reasons.slice(0, 5).map((r) => `- ${r.detail}`).join('\n')}`, fetcher);
+    state.stall.notifiedAt = iso(now);
     return;
   }
-  const since = Number.isFinite(Date.parse(old?.since)) ? old.since : iso(now);
-  state.stall = { since, notifiedAt: old?.notifiedAt || null, reasons };
-  const due = now - Date.parse(since) >= STALL_GRACE_MS && (!old?.notifiedAt || now - Date.parse(old.notifiedAt) >= STALL_REPEAT_MS);
-  if (!due || !url) return;
-  await post(url, `Dash status: autonomous remediation is stalled since ${since}.\n${reasons.slice(0, 5).map((r) => `- ${r.detail}`).join('\n')}`, fetcher);
-  state.stall.notifiedAt = iso(now);
+  if (!old) return;
+  const clearSince = Number.isFinite(Date.parse(old.clearSince)) ? old.clearSince : iso(now);
+  if (!old.recoveredAt && now - Date.parse(clearSince) < STALL_CLEAR_MS) {
+    state.stall = { since: old.since, notifiedAt: old.notifiedAt || null, reasons: [], clearSince };
+    return;
+  }
+  if (old.notifiedAt && url) {
+    // Keep the record until the notice is delivered, so a failed post is
+    // retried on the next cycle; give up after the retry period.
+    const recoveredAt = Number.isFinite(Date.parse(old.recoveredAt)) ? old.recoveredAt : iso(now);
+    state.stall = { since: old.since, notifiedAt: old.notifiedAt, reasons: [], clearSince, recoveredAt };
+    if (now - Date.parse(recoveredAt) < RECOVERY_RETRY_MS) await post(url, `Dash status: autonomous remediation has recovered (stalled since ${old.since}).`, fetcher);
+  }
+  delete state.stall;
 }
 
 export function validateAlertUrl(value) {

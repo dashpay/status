@@ -37,6 +37,27 @@ test('one upgraded host is held alone, Mainnet is never held, and the hold ends 
   assert.deepEqual(after.hosts, {});
 });
 
+test('a crash loop ends a hold at once, even inside the settle window its clean start opened', () => {
+  const started = recognise([host('services', [container('quorums', 60_000)]), host('explorer', [container('api', 60_000)])]);
+  assert.equal(started.hosts['testnet/i-services'].held, true);
+  assert.equal(started.networks.testnet.held, true, 'two hosts changing');
+  const at = now + 60_000;
+  // The next probe: the container is now being restarted by its restart policy.
+  for (const state of [{ restarts: 2, restarting: true, running: false, state: 'restarting' }, { restarts: 1 }]) {
+    const next = recognise([host('services', [container('quorums', 5_000, state, at)], {}, at), host('explorer', [container('api', 120_000, {}, at)], {}, at)], started, at);
+    assert.equal(next.hosts['testnet/i-services'], undefined, 'the earlier hold does not survive the crash loop');
+    assert.equal(next.hosts['testnet/i-explorer'].held, true, 'other hosts keep their own holds');
+    assert.notEqual(next.networks.testnet?.held, true, 'and it no longer counts towards a rolling change');
+  }
+  // A probe that cannot see the host proves nothing either way.
+  const blind = recognise([host('services', [], { probe: { ok: false, at: iso(at), error: 'timeout' } }, at)], started, at);
+  assert.equal(blind.hosts['testnet/i-services'].held, true);
+  // Recreated cleanly afterwards, it is a planned change again.
+  const crashed = recognise([host('services', [container('quorums', 5_000, { restarts: 2 }, at)], {}, at)], started, at);
+  const fixed = recognise([host('services', [container('quorums', 5_000, {}, at + 60_000)], {}, at + 60_000)], crashed, at + 60_000);
+  assert.equal(fixed.hosts['testnet/i-services'].held, true);
+});
+
 test('a rolling change across hosts holds the whole network only while it lasts', () => {
   const rolling = recognise([host('mn-1', [container('core', 60_000)]), host('mn-2', [container('core', 30_000)]), host('mn-3')]);
   assert.equal(rolling.networks.testnet.held, true);

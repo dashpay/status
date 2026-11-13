@@ -395,41 +395,83 @@ class Tests(unittest.TestCase):
         for t in [now,now+31]:b.reconcile_sessions(root,lambda _:{**self.done(),'abortedLastRun':True},t)
         self.assertEqual(self.db.execute('select status from events').fetchone()[0],'uncertain')
 
-    def test_expired_hold_is_released_only_when_the_session_is_inactive(self):
+    def unstarted_run(self):
+        """A hold whose session was snapshotted before the attempt, as the worker
+        does, and that the Gateway still reports exactly as it was."""
         root,run=self.uncertain_run(); now=time.time()
-        stale={'status':'error','endedAt':(now-3600)*1000,'lastRunId':'earlier-run'}
-        status=lambda: self.db.execute("select status from events where id=?",('a'*24+':1',)).fetchone()[0]
+        before={'status':'error','endedAt':(now-3600)*1000,'lastRunId':'earlier-run','lastActivityAt':(now-3600)*1000}
+        with self.db: self.db.execute('insert into lifecycle(run,baseline) values(?,?)',(run,b.session_baseline(before)))
+        return root,run,now,before
+
+    def held(self):
+        return self.db.execute("select status from events where id=?",('a'*24+':1',)).fetchone()[0]
+
+    def test_an_attempt_that_never_ran_returns_to_the_queue_after_its_lease(self):
+        root,run,now,before=self.unstarted_run()
         def broken(_): raise OSError('gateway unavailable')
         # Inside the lease nothing is released, however idle the session looks.
-        for t in [now,now+31,now+62,now+93]: b.reconcile_sessions(root,lambda _:stale,t)
-        self.assertEqual(status(),'uncertain')
+        for t in [now,now+31,now+62,now+93]: b.reconcile_sessions(root,lambda _:before,t)
+        self.assertEqual(self.held(),'uncertain')
         self.assertIn('hold',[a['code'] for a in b.attention(self.db,root,now+1801)])
         late=now+b.HOLD_LEASE+1
         # Past the lease an active, recently active or unreadable session keeps it.
-        for reader in [lambda _:{**stale,'status':'running'}, lambda _:{**stale,'lastActivityAt':late*1000}, broken]:
+        for reader in [lambda _:{**before,'status':'running'}, lambda _:{**before,'lastActivityAt':late*1000}, broken]:
             for t in [late,late+31,late+62,late+93]: b.reconcile_sessions(root,reader,t)
-            self.assertEqual(status(),'uncertain')
-        b.reconcile_sessions(root,lambda _:stale,late+200)
-        b.reconcile_sessions(root,lambda _:stale,late+231)
-        self.assertEqual(status(),'uncertain','one inactive observation is not enough')
-        b.reconcile_sessions(root,lambda _:stale,late+262)
-        self.assertEqual(status(),'abandoned')
+            self.assertEqual(self.held(),'uncertain')
+        b.reconcile_sessions(root,lambda _:before,late+200)
+        b.reconcile_sessions(root,lambda _:before,late+231)
+        self.assertEqual(self.held(),'uncertain','one observation is not enough')
+        b.reconcile_sessions(root,lambda _:before,late+262)
+        row=self.db.execute('select * from events').fetchone()
+        self.assertEqual((row['status'],row['started'],row['invoked']),('queued',None,None),'nothing was played, so it is simply queued again')
         self.assertTrue((root/(run+'.released.json')).exists())
         self.assertFalse((root/('HELD-'+run)).exists())
         self.assertTrue((root/'ENABLED').exists())
-        # The slot is free again and the abandoned events are never replayed.
-        self.concurrent_event('b','sakura')
-        self.assertEqual([r['id'] for r,_ in b.claim(self.db,config=self.concurrency(),cooldown=0)],['b'*24+':1'])
+        batch=b.claim(self.db,config=self.concurrency(),cooldown=0)
+        self.assertEqual([r['id'] for r,_ in batch],['a'*24+':1'])
+        self.assertNotEqual(b.attempt_id([r for r,_ in batch]),run,'a new attempt with its own artifacts')
+
+    def test_an_idle_parent_never_releases_work_that_may_still_be_running(self):
+        root,run,now,before=self.unstarted_run()
+        late=now+b.HOLD_LEASE+1
+        def settle(reader):
+            for t in [late,late+61,late+122,late+183,late+244]: b.reconcile_sessions(root,reader,t)
+            self.assertEqual(self.held(),'uncertain')
+            self.assertTrue((root/('HELD-'+run)).exists())
+            self.assertFalse((root/(run+'.released.json')).exists())
+        receipt=root/(run+'.completion.json')
+        # A receipt that says children are still pending is a statement that work continues.
+        receipt.write_text(json.dumps({'runId':run,'terminal':True,'pendingChildren':1,'outcome':'blocked',
+                                       'finishedAt':datetime.datetime.fromtimestamp(time.time()+1,datetime.timezone.utc).isoformat()}))
+        settle(lambda _:before)
+        receipt.write_text('not even json')
+        settle(lambda _:before)
+        receipt.unlink()
+        # The session changed since the snapshot: a turn ran, whatever state it is in now.
+        settle(lambda _:{**before,'lastRunId':'a-turn-ran'})
+        settle(lambda _:{**before,'lastActivityAt':(now+5)*1000})
+        settle(lambda _:self.done())
+        # The CLI printed a runtime reply.
+        result=root/(run+'.result.json'); original=result.read_text()
+        result.write_text(json.dumps({'status':'error','runId':'runtime-run'}))
+        settle(lambda _:before)
+        result.write_text(original)
+        # No snapshot: a hold from an earlier release, or recovered after a restart.
+        with self.db: self.db.execute('update lifecycle set baseline=null')
+        settle(lambda _:before)
+        # Only with every trace absent is the attempt known never to have run.
+        with self.db: self.db.execute('update lifecycle set baseline=?',(b.session_baseline(before),))
+        for t in [late+400,late+461]: b.reconcile_sessions(root,lambda _:before,t)
+        self.assertEqual(self.held(),'queued')
 
     def test_fast_failure_uses_the_short_lease(self):
-        root,run=self.uncertain_run(); now=time.time()
+        root,run,now,before=self.unstarted_run()
         with self.db: self.db.execute('update events set finished=started+5')
-        stale={'status':'done','endedAt':(now-3600)*1000,'lastRunId':'earlier-run'}
-        for t in [now+60,now+121]: b.reconcile_sessions(root,lambda _:stale,t)
-        self.assertEqual(self.db.execute('select status from events').fetchone()[0],'uncertain')
+        for t in [now+60,now+121]: b.reconcile_sessions(root,lambda _:before,t)
+        self.assertEqual(self.held(),'uncertain')
         late=now+b.QUICK_HOLD_LEASE+1
-        for t in [late,late+61]: b.reconcile_sessions(root,lambda _:stale,t)
-        self.assertEqual(self.db.execute('select status from events').fetchone()[0],'abandoned')
+        for t in [late,late+61]: b.reconcile_sessions(root,lambda _:before,t)
+        self.assertEqual(self.held(),'queued')
 
     def test_bookkeeping_check_is_not_spent_on_an_unavailable_route_and_retries(self):
         root,run=self.uncertain_run(); now=time.time()

@@ -216,10 +216,12 @@ automatic response reconciliation, preserving the original timeout output.
 For an idle session missing that receipt, it may send a small bounded number of
 bookkeeping-only requests on the pinned route. Do not repeat repairs or
 investigations during that check; if owner work or children remain pending,
-retain the hold. Never fabricate terminal completion to free capacity. A run
-that never writes a receipt is eventually released as abandoned once the Gateway
-shows the session inactive, so always write the receipt, including for a
-blocked or no-change result. The producer resolves incidents
+retain the hold. Never fabricate terminal completion to free capacity. Once a
+turn has run, the broker releases its locks only on a terminal receipt that
+declares no pending work; it never infers that from an idle session. A run
+without one keeps its scope locked until a person intervenes, so always write
+the receipt when the work and every child have actually finished, including
+for a blocked or no-change result. The producer resolves incidents
 only from fresh successful observations; never mark one fixed by rewriting status
 files. No new speculative cleanups or unrelated changes.
 
