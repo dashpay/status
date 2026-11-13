@@ -51,7 +51,6 @@ export function remediationView(state, { full = false, visibleNetworks = [], now
       stage = last?.outcome === 'resolved' ? 'fixed' : 'recovered';
       reason = stage === 'fixed' ? 'Repair completed and monitoring verified recovery' : 'Monitoring observed recovery; no autonomous fix is claimed';
     } else if (last) { stage = 'verifying'; reason = 'Response finished; monitoring has not verified recovery'; }
-    else if (response?.workerState === 'abandoned') { stage = 'blocked'; reason = 'Repair attempt ended without a result; it is retried on the next monitoring update'; }
     else if (response?.workerState === 'cleared') reason = 'Removed from the queue by an administrator; it returns on the next monitoring update';
     const result = { id: issue.id, domain: issue.domain, network: issue.domain === 'network' ? issue.scope : null,
       title: TITLES[issue.code] || 'Status issue', severity: issue.severity, stage, stageLabel: LABEL[stage], reason,

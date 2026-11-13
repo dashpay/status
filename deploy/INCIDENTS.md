@@ -130,7 +130,8 @@ systemd's restart policy can recover instead of silently losing the worker.
 
 `ENABLED` is the host operator's switch and the broker never renames or removes
 it (the dashboard switch below is a second, independent gate).
-Automatic holds live in SQLite and end by themselves:
+Automatic holds live in SQLite. Those with nothing running underneath end by
+themselves; one that may still have work running is kept and reported:
 
 - **Before the model is invoked** (fresh readback, evidence files, route pin, any
   unexpected error or a restart) nothing has run, so the batch returns to the
@@ -141,17 +142,30 @@ Automatic holds live in SQLite and end by themselves:
   `route_breaker`. Admission backs off 1, 2, 5, 10, then 30 minutes; the first
   claim after each delay is the probe and success closes the breaker. There is
   no fallback model or account.
-- **Bounded holds.** A hold ends by receipt as before, or by lease: once the hold
-  is older than its lease (15 minutes when the invocation died at once, two
-  hours otherwise) **and** two Gateway observations a minute apart show no turn
-  executing (`INACTIVE_STATES`, no pending permission, no activity for 15
-  minutes), the slot and locks are released and `<run>.released.json` records
-  the basis. The events become `abandoned` and are never replayed; the issue
-  returns through the producer's next revision (a change, or the six-hourly
-  reminder). An active session, or a Gateway that cannot be read, keeps the
-  hold. Check `INACTIVE_STATES` against what `sessions.describe` reports for a
-  failed run on the installed Gateway; an unlisted state only means the hold is
-  kept and reported.
+- **An attempt that never ran returns to the queue.** The worker snapshots the
+  session (`lastRunId`, `endedAt`, `lastActivityAt`) immediately before it
+  invokes the agent. A hold older than its lease (15 minutes when the
+  invocation ended at once, two hours otherwise) is returned to the queue when
+  two Gateway observations a minute apart show the session inactive
+  (`INACTIVE_STATES`, no pending permission, quiet for 15 minutes) **and
+  unchanged since that snapshot**, with no receipt file and no runtime reply in
+  the CLI output. That is positive evidence that no model turn ran, so no child
+  session was started and no command was issued. Nothing was played, so
+  nothing is replayed; `<run>.released.json` records the basis and the route
+  breaker paces the next attempt. This is what recovers from an unavailable
+  account.
+- **Once a turn has run, only a receipt releases its locks.** An idle parent
+  session proves nothing about children or remote commands still running
+  underneath it, so idleness never releases a hold. Any trace of a turn keeps
+  it: a session that differs from the snapshot, a runtime reply, or a receipt
+  file of any content. A receipt with `pendingChildren` above zero is an
+  explicit statement that work continues. A hold without a snapshot (from an
+  earlier release, or recovered after a restart), an active session and a
+  Gateway that cannot be read are all kept. Such a hold is ended by a terminal
+  receipt declaring no pending work (the bookkeeping check asks for one) or by
+  a person, and it is reported in `attention` after 30 minutes. Check
+  `INACTIVE_STATES` against what `sessions.describe` reports on the installed
+  Gateway; an unlisted state only means the hold is kept and reported.
 - **Bookkeeping check.** Up to three attempts per run (immediately, after 15
   minutes, after an hour). The route is pinned before an attempt is recorded,
   so an unavailable route defers the check instead of consuming it.
@@ -178,8 +192,9 @@ No receipt-based release while the session is active or identity/completion
 evidence is missing. If an idle session lacks a valid receipt, a bounded number
 of bookkeeping-only requests is allowed on the required route. They cannot redo
 the repair, spawn children, mutate infrastructure or send messages. Each attempt
-is recorded before its invocation. A run that never produces a receipt is
-released by lease as `abandoned`, never as completed.
+is recorded before its invocation. A run whose turn ran and never produces a
+valid terminal receipt keeps its reservation; it is never released on the
+parent session's idleness.
 
 `queue-state.json` and authenticated delivery health expose active scopes, queued
 events and admission reasons (paused, route, capacity, resource conflict, budget,
@@ -227,7 +242,8 @@ hold ends, a fault that is still present is emitted with fresh evidence.
 probe every cycle, so a manual `docker compose pull && up` of the quorum
 server, or a hand-run Testnet upgrade, is recognised without a dashboard
 operation. A crash loop under a restart policy increments `RestartCount` and is
-not a planned change. Failed, cancelled and interrupted operations get no
+not a planned change; seen in a fresh probe, it ends that host's hold at once,
+even inside the settle window an earlier clean start opened. Failed, cancelled and interrupted operations get no
 settle window, and a journal that records an error also ends rolling inference
 for that operation. Holds are bounded: a host is held at most 90 minutes per
 episode and a network at most three hours, so a recreate loop, or a journal
@@ -239,9 +255,12 @@ A stalled worker cannot report its own stall through the queue it is failing to
 drain. The producer therefore raises it out of band when the receiver is
 unreachable, the worker heartbeat is stale, dispatch is paused on the receiver
 host with a backlog (switching it off from the dashboard is deliberate and is
-not a stall), or the ACK's `attention` list is not empty. After 15 minutes it posts to the
-optional webhook, repeats every six hours and posts once on recovery. The
-`/remediation` board shows the same reasons (details for administrators only).
+not a stall), or the ACK's `attention` list is not empty. It posts to the
+optional webhook at most twice per stall: once after the stall has lasted 15
+minutes, and once when it is over. Nothing is repeated while a stall lasts. A
+stall is over only after staying clear for 15 minutes, so a brief recovery
+neither announces a recovery nor makes the stall look new. The `/remediation`
+board shows the current reasons (details for administrators only).
 
 Set `INCIDENT_ALERT_WEBHOOK_FILE` to a restricted file holding an `https`
 Slack-compatible incoming-webhook URL. It is a credential: never Git, command

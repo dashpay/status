@@ -70,9 +70,8 @@ test('verified monitoring correction is not an outage recovery or stale batch bl
   assert.equal(remediationView(data, options).cases[0].stage, 'blocked');
 });
 
-test('recognised upgrades, settling operations, abandoned attempts and stalls are explained, with details for administrators only', () => {
-  const data = state([issue('a', { suppressed: true, evidence: { instanceId: 'i-one' } }), issue('b', { suppressed: true, scope: 'other' }), issue('c'), issue('d', { suppressed: true, scope: 'third' })],
-    [{ issueId: 'c', workerState: 'abandoned' }]);
+test('recognised upgrades, settling operations and stalls are explained, with details for administrators only', () => {
+  const data = state([issue('a', { suppressed: true, evidence: { instanceId: 'i-one' } }), issue('b', { suppressed: true, scope: 'other' }), issue('d', { suppressed: true, scope: 'third' })], []);
   data.activity = { hosts: { 'testnet/i-one': { held: true } }, networks: { other: { held: true } } };
   data.maintenance = { third: { active: true, operations: [{ id: 'op', action: 'upgrade', status: 'settling' }] } };
   data.delivery.receiver.counts = { queued: 2 };
@@ -84,7 +83,6 @@ test('recognised upgrades, settling operations, abandoned attempts and stalls ar
   endpoint.activity = { hosts: { 'testnet/i-one': { held: true, network: 'testnet' } }, networks: {} };
   assert.match(remediationView(endpoint, options).cases[0].reason, /on a host of this network/);
   assert.match(reason('d'), /just finished/);
-  assert.equal(view.cases.find((c) => c.id === 'c').stage, 'blocked'); assert.match(reason('c'), /without a result/);
   assert.equal(view.stalled, true); assert.equal(view.attention[0].code, 'route_unavailable');
   const publicView = remediationView(data, { ...options, full: false, visibleNetworks: ['testnet', 'other', 'third'] });
   assert.equal(publicView.stalled, true); assert.equal(publicView.attention, undefined);
