@@ -574,10 +574,22 @@ def adopt_legacy_pauses(root):
 
 
 def restore_legacy_pause(db, root, run):
+    """Undo an earlier release's automatic PAUSED-<run> once its run has ended.
+    Any other PAUSED-* file is an operator's pause and keeps dispatch off.
+    """
     if not db.execute("select 1 from events where status in ('running','uncertain')").fetchone():
         pause = root / ('PAUSED-' + run)
-        if pause.exists() and not (root / 'ENABLED').exists():
+        operator = [p for p in root.glob('PAUSED-*') if p.name != pause.name]
+        if pause.exists() and not operator and not (root / 'ENABLED').exists():
             pause.rename(root / 'ENABLED')
+
+
+def pin_succeeded(root):
+    """A successful pin proves the route again: close a breaker a failed pin opened."""
+    with connect(root / 'inbox.sqlite') as db:
+        breaker = route_breaker(db)
+        if breaker and breaker.get('kind') == 'pin':
+            route_recovered(db)
 
 
 def session_inactive(session, now):
@@ -806,6 +818,7 @@ def request_completion_check(args, check):
             route_failed(db, 'required Astra/High work-account route unavailable', 'pin')
             lifecycle_note(db, run, 'completion check deferred: required route unavailable; retried automatically')
         return
+    pin_succeeded(root)
     with connect(root / 'inbox.sqlite') as db:
         with db:
             db.execute('begin immediate')
@@ -939,10 +952,7 @@ def prepare(args, root, policy, config, batch, session, run, stop):
         with connect(root / 'inbox.sqlite') as db:
             route_failed(db, 'required Astra/High work-account route unavailable', 'pin')
         return None
-    with connect(root / 'inbox.sqlite') as db:
-        breaker = route_breaker(db)
-        if breaker and breaker.get('kind') == 'pin':
-            route_recovered(db)
+    pin_succeeded(root)
     return batch, message
 
 

@@ -80,6 +80,9 @@ test('recognised upgrades, settling operations, abandoned attempts and stalls ar
   const view = remediationView(data, { ...options, visibleNetworks: ['testnet', 'other', 'third'] });
   const reason = (id) => view.cases.find((c) => c.id === id).reason;
   assert.match(reason('a'), /recognised on this host/); assert.match(reason('b'), /recognised on this network/);
+  const endpoint = state([issue('e', { suppressed: true, code: 'endpoint_failed', target: 'API' })], []);
+  endpoint.activity = { hosts: { 'testnet/i-one': { held: true, network: 'testnet' } }, networks: {} };
+  assert.match(remediationView(endpoint, options).cases[0].reason, /on a host of this network/);
   assert.match(reason('d'), /just finished/);
   assert.equal(view.cases.find((c) => c.id === 'c').stage, 'blocked'); assert.match(reason('c'), /without a result/);
   assert.equal(view.stalled, true); assert.equal(view.attention[0].code, 'route_unavailable');

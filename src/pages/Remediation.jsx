@@ -40,7 +40,9 @@ export default function Remediation() {
         {data.truncated && <p className="mt-2 lv-warn">The worker history is truncated; some response details are unavailable.</p>}
       </div>
       {session.admin && data.control && <Controls data={data} now={now} reload={reload} />}
-      {data.stalled && !stale && <div className="panel mt-3 p-3 text-[12px] border-warn/50" role="alert"><b className="lv-warn">Remediation cannot make progress</b>
+      {/* Reasons come from the incident producer, so they stay visible when the
+          worker's own status is stale: that is when they matter most. */}
+      {data.stalled && data.producerFresh && <div className="panel mt-3 p-3 text-[12px] border-warn/50" role="alert"><b className="lv-warn">Remediation cannot make progress</b>
         {data.attention?.length ? <ul className="mt-1 text-dim">{data.attention.map((a, i) => <li key={i}>{a.detail}</li>)}</ul>
           : <span className="text-dim"> · details are available to signed-in administrators.</span>}</div>}
       {!!data.maintenance?.length && <div className="panel mt-3 p-3 text-[12px]"><b>Operation maintenance</b> · {data.maintenance.map((m) => m.network).join(', ')}. Expected downtime stays visible; automatic remediation is held for these networks until operations end and fresh monitoring arrives.</div>}

@@ -228,9 +228,10 @@ probe every cycle, so a manual `docker compose pull && up` of the quorum
 server, or a hand-run Testnet upgrade, is recognised without a dashboard
 operation. A crash loop under a restart policy increments `RestartCount` and is
 not a planned change. Failed, cancelled and interrupted operations get no
-settle window. Inference is bounded: a host is held at most 90 minutes per
-episode and a network at most three hours, so a recreate loop becomes
-actionable. Mainnet and external networks are never held by inference.
+settle window, and a journal that records an error also ends rolling inference
+for that operation. Holds are bounded: a host is held at most 90 minutes per
+episode and a network at most three hours, so a recreate loop, or a journal
+claim left behind by a crashed runner, becomes actionable. Mainnet and external networks are never held by inference.
 
 ## Stall alert
 

@@ -50,6 +50,28 @@ test('notifies once after the grace period, repeats every six hours and reports 
   assert.equal(state.stall, undefined);
 });
 
+test('a failed recovery notice is retried until delivered, and a new stall meanwhile starts afresh', async () => {
+  const sent = [], ok = async (_, options) => { sent.push(JSON.parse(options.body).text); return { ok: true, status: 200 }; };
+  const down = async () => ({ ok: false, status: 500 });
+  const notified = () => { const s = healthy(); s.stall = { since: iso(now - 3_600_000), notifiedAt: iso(now - 1_800_000), reasons: [route] }; return s; };
+  const state = notified();
+  await assert.rejects(stallAlert(state, { url, fetcher: down, now }));
+  assert.equal(state.stall.recoveredAt, iso(now), 'the pending recovery notice survives the failed post');
+  await assert.rejects(stallAlert(state, { url, fetcher: down, now: now + 60_000 }));
+  await stallAlert(state, { url, fetcher: ok, now: now + 120_000 });
+  assert.equal(sent.length, 1); assert.match(sent[0], /recovered/);
+  assert.equal(state.stall, undefined);
+  const again = notified();
+  await assert.rejects(stallAlert(again, { url, fetcher: down, now }));
+  again.delivery.receiver.attention = [route];
+  await stallAlert(again, { url, fetcher: ok, now: now + 60_000 });
+  assert.deepEqual([again.stall.since, again.stall.notifiedAt], [iso(now + 60_000), null], 'not treated as the old, already-notified stall');
+  const abandoned = notified();
+  await assert.rejects(stallAlert(abandoned, { url, fetcher: down, now }));
+  await stallAlert(abandoned, { url, fetcher: down, now: now + STALL_REPEAT_MS });
+  assert.equal(abandoned.stall, undefined, 'a webhook that stays broken is not retried forever');
+});
+
 test('a failed notice is retried, and without a webhook the stall is still recorded', async () => {
   const failing = healthy(); failing.delivery.receiver.attention = [route];
   failing.stall = { since: iso(now - STALL_GRACE_MS), notifiedAt: null, reasons: [] };

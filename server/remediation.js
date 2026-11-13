@@ -16,6 +16,8 @@ function holdReason(state, issue) {
   if (Array.isArray(operations) && operations.length) return 'Network operation just finished; automatic repair is held while the network settles';
   if (state.activity?.hosts?.[`${issue.scope}/${issue.evidence?.instanceId || issue.target}`]?.held === true) return 'Upgrade or restart recognised on this host; automatic repair is held until it settles';
   if (state.activity?.networks?.[issue.scope]?.held === true) return 'Upgrade recognised on this network; automatic repair is held until it settles';
+  // Endpoint checks are held while any host of their network is changing.
+  if (Object.values(state.activity?.hosts || {}).some((v) => v?.network === issue.scope && v.held === true)) return 'Upgrade or restart recognised on a host of this network; automatic repair is held until it settles';
   return OPERATION_HOLD;
 }
 const LABEL = { maintenance: 'Maintenance', queued: 'Queued', working: 'Working', blocked: 'Blocked', followup: 'Recovered · follow-up', verifying: 'Verifying', fixed: 'Verified fixed', recovered: 'Recovered', classified: 'Monitoring corrected', review: 'Review only', unknown: 'Awaiting status' };

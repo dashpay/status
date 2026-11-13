@@ -135,12 +135,18 @@ export function deriveIssues({ settings, states, ci, aws, maintenance = {}, acti
     const s = states?.[n.name], generation = n.generation ?? s?.generation ?? n.coreNetwork ?? 'unversioned';
     const identity = [generation], key = `network:${n.name}`, max = Math.max(180_000, settings.pollSeconds * 4000);
     const suppressed = ['creating', 'services'].includes(n.lifecycle?.status) || n.lifecycle?.platform?.status === 'starting'
-      || maintenance[n.name]?.active === true || n.maintenance?.active === true || s?.maintenance?.active === true || text(s?.journal?.owner)
-      || activity?.networks?.[n.name]?.held === true;
+      || maintenance[n.name]?.active === true || n.maintenance?.active === true || s?.maintenance?.active === true
+      // A journal claim is held through the bounded activity result, so a runner
+      // that crashed without releasing it cannot silence the network forever.
+      || (activity ? activity.networks?.[n.name]?.held === true : text(s?.journal?.owner));
     suppressions[n.name] = suppressed;
     // A recognised change on one host (for example the services host carrying
     // the quorum server) also holds that network's public endpoint checks.
     const hostChanging = Object.values(activity?.hosts || {}).some((v) => v?.network === n.name && v.held === true);
+    // Collected before the freshness exits below: a collector gap must not
+    // release the EC2 status check of a host that is still held.
+    for (const v of Object.values(activity?.hosts || {})) if (v?.network === n.name && v.held === true && text(v.instanceId)) heldInstances.add(v.instanceId);
+    if (suppressed) for (const h of list(s?.hosts)) if (text(h.instanceId)) heldInstances.add(h.instanceId);
     const current = source(key, s?.generatedAt, object(s) && Array.isArray(s.hosts), max);
     source(`${key}:monitor`, iso(now), true, max);
     check('network', n.name, 'collector', 'collector_stale', key, current, identity, { suppressed });
@@ -171,7 +177,6 @@ export function deriveIssues({ settings, states, ci, aws, maintenance = {}, acti
       const valid = source(hk, h.probe?.at, discoveryOk && text(resource) && h.state === 'running'
         && h.probe?.ok === true && !h.probe.skipped && object(h.probe.data), max);
       const held = suppressed || activity?.hosts?.[activityKey(n.name, h)]?.held === true;
-      if (held && text(h.instanceId)) heldInstances.add(h.instanceId);
       const id = check('network', n.name, h.name, 'host_health', hk, valid, hi, {
         kind: 'host', suppressed: held, healthyRules: valid ? hostProofs(row, n, settings, coreTip, platformTip, now) : [],
         sampleKey: idFor('network', n.name, resource, 'explorer_sample', identity), maxLagBlocks: settings.thresholds.platformLagBlocks,

@@ -62,6 +62,13 @@ test('an external operation holds the network, settles after it releases the jou
   assert.notEqual(settled.networks.testnet?.held, true);
   const failed = recognise([host('mn-1', [], {}, now + 60_000)], claimed, now + 60_000, { owner: null, lastError: 'stage failed' });
   assert.equal(failed.networks.testnet.held, false);
+  // The failed operation recreated two hosts: they settle individually, but
+  // they must not keep every other host's faults held through rolling inference.
+  const recreated = (at) => [host('mn-1', [container('core', 30_000, {}, at)], {}, at), host('mn-2', [container('core', 30_000, {}, at)], {}, at), host('mn-3', [], {}, at)];
+  const failedRolling = recognise(recreated(now + 60_000), claimed, now + 60_000, { owner: null, lastError: 'stage failed' });
+  assert.deepEqual([failedRolling.networks.testnet.held, failedRolling.networks.testnet.reason], [false, 'failed']);
+  assert.equal(failedRolling.hosts['testnet/i-mn-1'].held, true);
+  assert.equal(recognise(recreated(now + 120_000), failedRolling, now + 120_000, { owner: null, lastError: 'stage failed' }).networks.testnet.held, false);
   let state, at = now;
   for (; at - now <= NETWORK_HOLD_MAX_MS; at += 10 * 60_000) state = recognise([host('mn-1', [], {}, at)], state, at, { owner: 'dashnet-runner' });
   assert.equal(state.networks.testnet.held, false, 'inference is bounded even while the claim remains');

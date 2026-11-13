@@ -35,10 +35,18 @@ async function post(url, text, fetcher) {
 // every six hours while it lasts, and once on recovery. Without a webhook the
 // stall is still recorded for the remediation board.
 export async function stallAlert(state, { url = null, fetcher = fetch, now = Date.now() } = {}) {
-  const reasons = stallReasons(state, now), old = state.stall || null;
+  const reasons = stallReasons(state, now);
+  // A stall that begins while a recovery notice is still undelivered is a new one.
+  const old = state.stall?.recoveredAt && reasons.length ? null : state.stall || null;
   if (!reasons.length) {
+    if (old?.notifiedAt && url) {
+      // Keep the record until the notice is delivered, so a failed post is
+      // retried on the next cycle; give up after the repeat interval.
+      const recoveredAt = Number.isFinite(Date.parse(old.recoveredAt)) ? old.recoveredAt : iso(now);
+      state.stall = { since: old.since, notifiedAt: old.notifiedAt, reasons: [], recoveredAt };
+      if (now - Date.parse(recoveredAt) < STALL_REPEAT_MS) await post(url, `Dash status: autonomous remediation has recovered (stalled since ${old.since}).`, fetcher);
+    }
     delete state.stall;
-    if (old?.notifiedAt && url) await post(url, `Dash status: autonomous remediation has recovered (stalled since ${old.since}).`, fetcher);
     return;
   }
   const since = Number.isFinite(Date.parse(old?.since)) ? old.since : iso(now);

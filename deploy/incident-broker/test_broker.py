@@ -440,10 +440,13 @@ class Tests(unittest.TestCase):
             b.request_completion_check(args,checks[0]); execute.assert_not_called()
         self.assertEqual(self.db.execute('select check_attempts from lifecycle').fetchone()[0],0)
         self.assertEqual(len(b.reconcile_sessions(root,lambda _:self.done(),now+62)),1)
-        b.route_recovered(self.db)
+        self.assertEqual(b.route_breaker(self.db)['kind'],'pin')
+        due={**b.route_breaker(self.db),'retryAt':time.time()-1}
+        with self.db: self.db.execute("update meta set value=? where key='route_breaker'",(json.dumps(due),))
         with patch.object(b,'describe_session',return_value=self.done()), patch.object(b,'pin_session_route',return_value={}), patch.object(b.subprocess,'run') as execute:
             execute.return_value.returncode=0
             b.request_completion_check(args,checks[0]); self.assertEqual(execute.call_count,1)
+        self.assertIsNone(b.route_breaker(self.db),'a successful pin closes the breaker a failed pin opened')
         self.assertEqual(b.reconcile_sessions(root,lambda _:self.done(),now+93),[])
         self.assertEqual(len(b.reconcile_sessions(root,lambda _:self.done(),now+93+b.CHECK_BACKOFF[0])),1,'a later bounded retry')
 
@@ -526,6 +529,21 @@ class Tests(unittest.TestCase):
         (root / 'ENABLED').rename(root / 'PAUSED-operator')
         self.reconcile(root)
         self.assertFalse((root / 'ENABLED').exists())
+
+    def test_ending_a_legacy_paused_run_does_not_lift_an_operator_pause(self):
+        root = pathlib.Path(self.temp.name)
+        db = b.connect(root / 'inbox.sqlite'); self.addCleanup(db.close)
+        b.ingest(db, envelope(event())); b.claim(db, cooldown=0)
+        run = '3'*24
+        with db: db.execute("update events set status='uncertain',result=?", (run,))
+        (root / (run+'.result.json')).write_text(json.dumps({'status':'ok'}))
+        (root / ('PAUSED-'+run)).touch(); (root / 'PAUSED-operator').touch()
+        (root / (run+'.completion.json')).write_text(json.dumps({'runId':run,'terminal':True,'pendingChildren':0,'outcome':'no_change','finishedAt':datetime.datetime.fromtimestamp(time.time()+1,datetime.timezone.utc).isoformat()}))
+        self.reconcile(root)
+        self.assertEqual(db.execute('select status from events').fetchone()[0], 'completed')
+        self.assertFalse((root / 'ENABLED').exists(), 'the operator pause still holds dispatch off')
+        (root / 'PAUSED-operator').unlink()
+        self.assertEqual(b.adopt_legacy_pauses(root), 'PAUSED-'+run)
 
     def test_utc_offset_receipt_unblocks_finished_batch_without_replaying_it(self):
         root = pathlib.Path(self.temp.name)

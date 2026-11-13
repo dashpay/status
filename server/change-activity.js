@@ -61,16 +61,20 @@ export function recognizeActivity({ settings, states, previous, now = Date.now()
     const old = previous?.networks?.[n.name];
     const oldSince = Date.parse(old?.since), oldLast = Date.parse(old?.lastSignalAt), oldJournal = Date.parse(old?.lastJournalAt);
     const continuing = Number.isFinite(oldSince) && Number.isFinite(oldLast) && oldSince <= oldLast && oldLast <= now + 60_000 && now - oldLast < SETTLE_MS;
-    const owner = text(s?.journal?.owner), rolling = changing >= ROLLING_HOSTS, active = owner || rolling;
+    const owner = text(s?.journal?.owner);
+    const journalAt = owner ? now : continuing && Number.isFinite(oldJournal) ? oldJournal : null;
+    // A recorded failure of the operation this episode belongs to returns the
+    // network's faults to remediation at once. The hosts it recreated must not
+    // keep the whole network held through rolling inference.
+    const failed = !owner && journalAt !== null && text(s?.journal?.lastError);
+    const rolling = changing >= ROLLING_HOSTS && !failed, active = owner || rolling;
     if (!active && !continuing) continue;
     const since = continuing ? oldSince : now, last = active ? now : oldLast;
-    const journalAt = owner ? now : continuing && Number.isFinite(oldJournal) ? oldJournal : null;
-    // The network settles after an external operation releases its journal
-    // claim. A recorded failure returns its faults to remediation immediately.
-    const settling = !active && !text(s?.journal?.lastError) && journalAt !== null && now - journalAt < SETTLE_MS;
+    // The network settles after an external operation releases its journal claim.
+    const settling = !active && !failed && journalAt !== null && now - journalAt < SETTLE_MS;
     result.networks[n.name] = { held: (active || settling) && now - since < NETWORK_HOLD_MAX_MS, since: iso(since), lastSignalAt: iso(last),
       lastJournalAt: journalAt === null ? null : iso(journalAt), until: iso(Math.min(since + NETWORK_HOLD_MAX_MS, last + SETTLE_MS)),
-      reason: owner ? 'journal' : rolling ? 'rolling' : settling ? 'settling' : 'ended', hosts: changing };
+      reason: owner ? 'journal' : rolling ? 'rolling' : settling ? 'settling' : failed ? 'failed' : 'ended', hosts: changing };
   }
   return result;
 }

@@ -193,6 +193,24 @@ test('a recognised reboot holds the host, its endpoint and its instance; a fault
   assert.equal(emitted('aws_instance_impaired', 'i-one'), 1);
 });
 
+test('a journal claim is held only through the bounded activity result, and a collector gap keeps a held instance held', () => {
+  const settings = settingsFor();
+  const claimed = { ...network(now, [host(now, {})]), journal: { owner: 'dashnet-runner' } };
+  const suppressedWith = (activity) => deriveIssues({ settings, states: { testnet: claimed }, activity, now }).suppressions.testnet;
+  assert.equal(suppressedWith(undefined), true, 'callers without recognition keep the plain claim');
+  assert.equal(suppressedWith(recognizeActivity({ settings, states: { testnet: claimed }, now })), true);
+  assert.equal(suppressedWith({ networks: { testnet: { held: false } }, hosts: {} }), false, 'a claim older than the cap no longer silences the network');
+  // The network snapshot is stale, but the host hold from the previous cycle continues.
+  const stale = network(now - 600_000, [host(now - 600_000, {})]);
+  const activity = { networks: {}, hosts: { 'testnet/i-one': { held: true, network: 'testnet', instanceId: 'i-one' } } };
+  const impaired = (id) => ({ id, region: 'us-west-2', state: 'running', instanceStatus: 'impaired', systemStatus: 'ok' });
+  const aws = { at, errors: [], volumes: [], addresses: [], health: { at, errors: [], alarms: [], instances: [impaired('i-one'), impaired('i-other')] } };
+  const s = reconcile(null, deriveIssues({ settings, states: { testnet: stale }, activity, aws, now }), now);
+  const emitted = s.outbox.filter((e) => e.issue.code === 'aws_instance_impaired').map((e) => e.issue.target);
+  assert.deepEqual(emitted, ['i-other']);
+  assert.ok(s.outbox.some((e) => e.issue.code === 'collector_stale'), 'the collector gap itself is still reported');
+});
+
 test('omitted endpoint, skipped/stopped host, or malformed nested report cannot recover', () => {
   const state = network(now, [host(now, { services: [{ service: 'indexer', ok: false }] })], [{ label: 'API', kind: 'http', ok: false }]);
   const initial = reconcile(null, deriveNetwork(now, state), now);
