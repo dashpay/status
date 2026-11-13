@@ -1,5 +1,6 @@
 // Presentation only: never changes incidents, receipts, locks or dispatch.
 import { TITLES } from './incidents.js';
+import { RELEASE_CODES } from './release-webhook.js';
 import { stallReasons } from './stall-alert.js';
 
 const fresh = (at, now) => Number.isFinite(Date.parse(at)) && Date.parse(at) <= now + 60_000 && now - Date.parse(at) <= 180_000;
@@ -34,7 +35,7 @@ export function remediationView(state, { full = false, visibleNetworks = [], now
     const response = observations.get(issue.id);
     const last = response?.lastResponse;
     let stage = 'unknown', reason = 'Waiting for remediation status';
-    const compatibility = issue.domain === 'maintenance' && issue.code === 'platform_release_compatibility';
+    const component = issue.domain === 'maintenance' && Object.hasOwn(RELEASE_CODES, issue.code) ? RELEASE_CODES[issue.code] : null, compatibility = !!component;
     if (issue.severity === 'info' && !compatibility) { stage = 'review'; reason = 'Informational finding; no automatic cleanup'; }
     else if (response?.active && response?.attentionRequired === true) { stage = 'blocked'; reason = 'Repair completion is stalled; ownership is retained pending verification'; }
     else if (response?.active) { stage = 'working'; reason = response.workerState === 'uncertain' ? 'Existing repair retains ownership; completion is being checked' : 'Repair session in progress'; }
@@ -55,7 +56,7 @@ export function remediationView(state, { full = false, visibleNetworks = [], now
     } else if (last) { stage = 'verifying'; reason = 'Response finished; monitoring has not verified recovery'; }
     else if (response?.workerState === 'cleared') reason = 'Removed from the queue by an administrator; it returns on the next monitoring update';
     const result = { id: issue.id, domain: issue.domain, network: issue.domain === 'network' ? issue.scope : null,
-      title: compatibility ? `Check and fix dash-network-go compatibility with Platform ${text(issue.evidence?.tag, 100) || 'release'}` : TITLES[issue.code] || 'Status issue', severity: issue.severity, stage, stageLabel: compatibility && stage === 'fixed' ? 'Compatibility verified' : LABEL[stage], reason,
+      title: compatibility ? `Check and fix dash-network-go compatibility with ${component} ${text(issue.evidence?.tag, 100) || 'release'}` : TITLES[issue.code] || 'Status issue', severity: issue.severity, stage, stageLabel: compatibility && stage === 'fixed' ? 'Compatibility verified' : LABEL[stage], reason,
       monitoring: issue.status, firstSeen: iso(issue.firstSeen), observedAt: iso(issue.lastSeen), resolvedAt: iso(issue.resolvedAt),
       startedAt: iso(response?.startedAt), finishedAt: iso(response?.finishedAt), retryAt: iso(response?.retryAt),
       pendingEvents: Number.isSafeInteger(response?.pendingEvents) ? response.pendingEvents : 0,
