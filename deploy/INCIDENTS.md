@@ -330,9 +330,19 @@ reach it; the status server relays:
    "Upstream release notices" section makes it a read-only compatibility
    assessment that authorizes no upgrade or deployment.
 
-A release is not re-reported by monitoring, so the sidecar itself re-sends a
-notice whose attempt the worker abandoned: up to three attempts, at least an
-hour apart. A notice an administrator cleared from the queue is not re-sent.
+Each release is announced once. Its event is a pure function of the release
+(repository, tag, pre-release flag and GitHub's publication time): the same ID
+always carries the same bytes, so a redelivered webhook, a restart or lost
+sidecar state can only ever repeat the identical event, which the receiver
+accepts as a duplicate. A webhook without a usable publication time is
+refused. The sidecar keeps two separate memories: `releaseAnnounced`, the
+delivery identity of every release whose record still exists, which is never
+trimmed for display, and `releases`, the newest hundred for the board.
+
+A release is not re-reported by monitoring, and it does not need to be: an
+attempt that never ran is queued again by the receiver itself, and once an
+assessment turn has run it ends with a receipt like any other work. A notice an
+administrator cleared from the queue stays cleared.
 `/remediation` lists recent releases with the outcome (waiting, being
 assessed, changes needed first, no issue found); the notes are for
 administrators.

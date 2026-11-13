@@ -7,7 +7,7 @@ const STAGES = { maintenance: ['Maintenance', 'text-dim'], working: ['Working', 
   classified: ['Monitoring corrected', 'text-dim'], review: ['Review only', 'text-dim'], unknown: ['Awaiting status', 'text-dim'] };
 
 const RELEASE_STAGES = { queued: ['Waiting for assessment', 'text-dim'], working: ['Being assessed', 'lv-deploying'], changes: ['Changes needed first', 'lv-warn'],
-  ready: ['No issue found', 'lv-ok'], unassessed: ['Assessment did not finish', 'lv-warn'], cleared: ['Removed from queue', 'text-dim'] };
+  ready: ['No issue found', 'lv-ok'], cleared: ['Removed from queue', 'text-dim'] };
 
 export default function Remediation() {
   const session = useSession();

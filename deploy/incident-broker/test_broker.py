@@ -658,7 +658,8 @@ class Tests(unittest.TestCase):
 
     def test_release_notices_are_queued_and_dispatched_without_the_fault_readback(self):
         root = pathlib.Path(self.temp.name)
-        b.ingest(self.db, envelope(self.release_event()))
+        notice = self.release_event()
+        b.ingest(self.db, envelope(notice))
         row = self.db.execute('select * from events').fetchone()
         self.assertEqual((row['scope'], row['status']), ('release:core', 'queued'))
         self.assertIn('release', b.health(self.db, root)['domains'])
@@ -668,10 +669,12 @@ class Tests(unittest.TestCase):
         events = [json.loads(r['body']) for r, _ in batch]
         with patch.object(b.urllib.request, 'build_opener', side_effect=AssertionError('no readback for a release notice')):
             self.assertEqual(b.refreshed_events(events, root/'missing-token'), events)
-        # A notice the worker abandoned returns as a new revision and is admitted again.
-        with self.db: self.db.execute("update events set status='abandoned'")
-        b.ingest(self.db, envelope(self.release_event(2)))
-        self.assertEqual([r['id'] for r, _ in b.claim(self.db, cooldown=0)], ['d'*24 + ':2'])
+        # The producer builds a notice from the release alone, so a repeat is the
+        # identical event and changes nothing; the same ID with other bytes is refused.
+        b.ingest(self.db, envelope(notice))
+        self.assertEqual(tuple(self.db.execute('select count(*), max(status) from events').fetchone()), (1, 'running'))
+        altered = copy.deepcopy(notice); altered['occurredAt'] = '2026-01-01T00:00:00Z'
+        with self.assertRaises(ValueError): b.ingest(self.db, envelope(altered))
         unknown = self.release_event(); unknown['issue']['domain'] = 'deploy'
         with self.assertRaises(ValueError): b.validate(envelope(unknown))
 

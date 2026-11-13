@@ -40,11 +40,14 @@ export function createReleaseHook({ dataDir, secret = null, clock = Date.now }) 
     const path = join(dir, `${id}.json`);
     // `published` and `released` arrive together for one release: record it once.
     if (existsSync(path)) return null;
+    // The notice is built from the release's own publication time, never from
+    // when it happened to arrive, so a redelivered webhook describes it identically.
     const published = Date.parse(r.published_at);
+    if (!Number.isFinite(published) || published > now + 60_000) throw new Error('release has no usable publication time');
     const record = { schemaVersion: 1, id, component, repo, tag: r.tag_name, prerelease,
       // Built here, never copied from the payload.
       url: `https://github.com/${repo}/releases/tag/${encodeURIComponent(r.tag_name)}`,
-      publishedAt: Number.isFinite(published) && published <= now + 60_000 ? iso(published) : iso(now), receivedAt: iso(now) };
+      publishedAt: iso(published), receivedAt: iso(now) };
     mkdirSync(dir, { recursive: true });
     writeAtomic(path, JSON.stringify(record));
     for (const f of readdirSync(dir)) {
@@ -61,45 +64,44 @@ export function loadReleases(dataDir) {
   if (!existsSync(dir)) return [];
   return readdirSync(dir).filter((f) => f.endsWith('.json') && ID.test(f.slice(0, -5))).map((f) => readJSON(join(dir, f)))
     .filter((r) => r && r.id && ID.test(r.id) && RELEASE_COMPONENTS[r.repo] === r.component && typeof r.tag === 'string' && TAG.test(r.tag)
-      && r.id === issueId('release', r.repo, r.tag, r.prerelease === true ? 'prerelease' : 'release') && Number.isFinite(Date.parse(r.receivedAt)))
+      && r.id === issueId('release', r.repo, r.tag, r.prerelease === true ? 'prerelease' : 'release')
+      && Number.isFinite(Date.parse(r.publishedAt)) && Number.isFinite(Date.parse(r.receivedAt)))
     .sort((a, b) => Date.parse(a.receivedAt) - Date.parse(b.receivedAt));
 }
 
-const eventFor = (r, revision, now) => ({ schemaVersion: 1, eventId: `${r.id}:${revision}`, occurredAt: iso(now), transition: revision === 1 ? 'opened' : 'reminder',
-  issue: { id: r.id, revision, domain: 'release', scope: r.component, target: `${r.repo}@${r.tag}`, code: 'release_published', sourceKey: 'github:release',
-    severity: 'warning', status: 'open', summary: 'Upstream release published', observedAt: iso(now),
+// One event per release, and a pure function of the release: the same ID
+// always carries the same bytes, whenever and however often it is built. The
+// receiver treats an identical repeat as a duplicate and a differing one as
+// corruption, so nothing here may depend on the clock or on local state.
+export const releaseEvent = (r) => ({ schemaVersion: 1, eventId: `${r.id}:1`, occurredAt: r.publishedAt, transition: 'opened',
+  issue: { id: r.id, revision: 1, domain: 'release', scope: r.component, target: `${r.repo}@${r.tag}`, code: 'release_published', sourceKey: 'github:release',
+    severity: 'warning', status: 'open', summary: 'Upstream release published', observedAt: r.publishedAt,
     evidence: { component: r.component, repo: r.repo, tag: r.tag, prerelease: r.prerelease === true, url: r.url, publishedAt: r.publishedAt } } });
 
-export const RELEASE_ATTEMPTS = 3;
-export const RELEASE_RETRY_MS = 3600_000;
 const FIRST_NOTICE_MS = 30 * 86400_000;
+export const RELEASES_SHOWN = 100;
 
-// Events the sidecar owes the worker. A release is not a fault that monitoring
-// re-reports, so nothing else would offer it again: an attempt the worker
-// abandoned without a result is re-sent here, a bounded number of times. A
-// release an administrator cleared from the queue is left alone.
+// Events the sidecar still owes the worker. Two separate memories:
+//   state.releaseAnnounced  delivery identity: every release already announced,
+//                           kept for as long as its record file exists and never
+//                           trimmed for display;
+//   state.releases          the newest few, for the board only.
+// A release is announced once. The receiver queues an attempt that never ran
+// again by itself, and a notice an administrator cleared stays cleared.
 export function releaseEvents(records, state, now = Date.now()) {
-  const known = state.releases && typeof state.releases === 'object' ? state.releases : {};
-  const cases = new Map((Array.isArray(state.delivery?.receiver?.remediation?.cases) ? state.delivery.receiver.remediation.cases : []).map((c) => [c.issueId, c]));
+  const announced = new Set(Array.isArray(state.releaseAnnounced) ? state.releaseAnnounced : []);
+  const shown = state.releases && typeof state.releases === 'object' ? { ...state.releases } : {};
   const events = [];
   for (const r of records) {
-    const k = known[r.id];
-    if (!k) {
-      // Only a recent record is announced for the first time: an old file whose
-      // memory was trimmed must never reuse an event ID the worker has seen.
-      if (now - Date.parse(r.receivedAt) > FIRST_NOTICE_MS) continue;
-      known[r.id] = { component: r.component, repo: r.repo, tag: r.tag, prerelease: r.prerelease === true, url: r.url, publishedAt: r.publishedAt, revision: 1, attempts: 1, emittedAt: iso(now) };
-      events.push(eventFor(r, 1, now));
-      continue;
-    }
-    const c = cases.get(r.id);
-    if (c?.workerState === 'abandoned' && c.eventId === `${r.id}:${k.revision}` && k.attempts < RELEASE_ATTEMPTS
-      && now - Date.parse(k.emittedAt) >= RELEASE_RETRY_MS && !(state.outbox || []).some((e) => e.issue?.id === r.id)) {
-      k.revision += 1; k.attempts += 1; k.emittedAt = iso(now);
-      events.push(eventFor(r, k.revision, now));
-    }
+    if (announced.has(r.id)) continue;
+    announced.add(r.id);
+    // An old record met with no memory of it (state was lost) is remembered
+    // without being announced again. A recent one is re-sent byte for byte.
+    if (now - Date.parse(r.receivedAt) <= FIRST_NOTICE_MS) events.push(releaseEvent(r));
+    shown[r.id] = { component: r.component, repo: r.repo, tag: r.tag, prerelease: r.prerelease === true, url: r.url, publishedAt: r.publishedAt };
   }
-  // Bounded memory: the newest notices only. Older record files are pruned by the web process.
-  state.releases = Object.fromEntries(Object.entries(known).sort(([, a], [, b]) => Date.parse(b.emittedAt) - Date.parse(a.emittedAt)).slice(0, 300));
+  const present = new Set(records.map((r) => r.id));
+  state.releaseAnnounced = [...announced].filter((id) => present.has(id));
+  state.releases = Object.fromEntries(Object.entries(shown).sort(([, a], [, b]) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt)).slice(0, RELEASES_SHOWN));
   return events;
 }

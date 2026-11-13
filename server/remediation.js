@@ -90,7 +90,7 @@ export function remediationView(state, { full = false, visibleNetworks = [], now
   const releases = Object.entries(state?.releases && typeof state.releases === 'object' ? state.releases : {}).map(([id, r]) => {
     const response = observations.get(id), last = response?.lastResponse;
     const stage = response?.active ? 'working' : last?.outcome === 'blocked' ? 'changes' : last?.outcome ? 'ready'
-      : response?.workerState === 'abandoned' ? 'unassessed' : response?.workerState === 'cleared' ? 'cleared' : 'queued';
+      : response?.workerState === 'cleared' ? 'cleared' : 'queued';
     return { id, component: text(r?.component, 20), repo: text(r?.repo, 100), tag: text(r?.tag, 100), prerelease: r?.prerelease === true, url: text(r?.url, 300),
       publishedAt: iso(r?.publishedAt), stage,
       ...(full ? { summary: text(last?.summary), blocker: text(last?.blocker), nextAction: text(last?.nextAction) } : {}) };

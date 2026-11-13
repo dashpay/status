@@ -4,7 +4,7 @@ import { createHmac } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createReleaseHook, loadReleases, releaseEvents, RELEASE_ATTEMPTS, RELEASE_RETRY_MS } from './release-hook.js';
+import { createReleaseHook, loadReleases, releaseEvents, RELEASES_SHOWN } from './release-hook.js';
 import { cycle } from './incident-service.js';
 import { loadIncidentState } from './incidents.js';
 import { DEFAULT_SETTINGS } from '../shared/settings.js';
@@ -47,7 +47,7 @@ test('only signed deliveries are accepted, and only verifiable facts of a real r
   assert.equal(loadReleases(root).length, 4);
 });
 
-test('each release is announced once, and an attempt the worker abandoned is offered again a bounded number of times', (t) => {
+test('each release is announced exactly once, as a pure function of the release', (t) => {
   const root = fixture(t), hook = createReleaseHook({ dataDir: root, secret: 's', clock: () => now });
   const record = hook.webhook('release', payload('dashpay/dash', 'v24.0.0'));
   const state = { outbox: [] };
@@ -57,23 +57,40 @@ test('each release is announced once, and an attempt the worker abandoned is off
   assert.deepEqual([first[0].eventId, first[0].transition, issue.domain, issue.scope, issue.target, issue.code, issue.severity, issue.status],
     [`${record.id}:1`, 'opened', 'release', 'core', 'dashpay/dash@v24.0.0', 'release_published', 'warning', 'open']);
   assert.match(first[0].eventId, /^[a-f0-9]{24}:1$/);
-  assert.equal(releaseEvents(loadReleases(root), state, now + 60_000).length, 0, 'not announced twice');
-  const worker = (workerState, revision = 1) => { state.delivery = { receiver: { remediation: { cases: [{ issueId: record.id, eventId: `${record.id}:${revision}`, workerState }] } } }; };
-  for (const settled of ['queued', 'running', 'completed', 'cleared']) { worker(settled); assert.equal(releaseEvents(loadReleases(root), state, now + 2 * RELEASE_RETRY_MS).length, 0, settled); }
-  worker('abandoned');
-  assert.equal(releaseEvents(loadReleases(root), state, now + RELEASE_RETRY_MS - 1).length, 0, 'not before the retry interval');
-  const again = releaseEvents(loadReleases(root), state, now + RELEASE_RETRY_MS);
-  assert.deepEqual([again[0].eventId, again[0].transition], [`${record.id}:2`, 'reminder']);
-  assert.equal(releaseEvents(loadReleases(root), state, now + 3 * RELEASE_RETRY_MS).length, 0, 'the worker has not reported on revision 2 yet');
-  worker('abandoned', 2);
-  state.outbox = [again[0]];
-  assert.equal(releaseEvents(loadReleases(root), state, now + 3 * RELEASE_RETRY_MS).length, 0, 'never while an event is still undelivered');
-  state.outbox = [];
-  assert.equal(releaseEvents(loadReleases(root), state, now + 3 * RELEASE_RETRY_MS)[0].eventId, `${record.id}:3`);
-  worker('abandoned', 3);
-  assert.equal(releaseEvents(loadReleases(root), state, now + 9 * RELEASE_RETRY_MS).length, 0, `at most ${RELEASE_ATTEMPTS} attempts`);
-  // An old record whose memory was trimmed must not reuse an event ID.
-  assert.equal(releaseEvents(loadReleases(root), { outbox: [] }, now + 31 * 86400_000).length, 0);
+  assert.deepEqual([first[0].occurredAt, issue.observedAt], [record.publishedAt, record.publishedAt], 'timed by the release, not by the clock');
+  // Never again, whatever the worker reports about it.
+  for (const workerState of ['queued', 'running', 'uncertain', 'completed', 'cleared']) {
+    state.delivery = { receiver: { remediation: { cases: [{ issueId: record.id, eventId: `${record.id}:1`, workerState }] } } };
+    assert.equal(releaseEvents(loadReleases(root), state, now + 7 * 3600_000).length, 0, workerState);
+  }
+  // With every memory lost it is rebuilt byte for byte, which the receiver accepts as a duplicate.
+  assert.deepEqual(releaseEvents(loadReleases(root), { outbox: [] }, now + 86400_000), first);
+  assert.equal(releaseEvents(loadReleases(root), { outbox: [] }, now + 31 * 86400_000).length, 0, 'an old release is remembered, not announced again');
+  // A release without a usable publication time cannot be described deterministically.
+  for (const published_at of [null, 'yesterday', iso(now + 3600_000)]) assert.throws(() => hook.webhook('release', payload('dashpay/dash', 'v25.0.0', { published_at })));
+});
+
+test('delivery identity is kept apart from the display list: hundreds of releases never repeat an ID', (t) => {
+  const root = fixture(t);
+  let clock = now;
+  const hook = createReleaseHook({ dataDir: root, secret: 's', clock: () => clock });
+  for (let n = 0; n < 301; n++) { clock = now + n * 1000; hook.webhook('release', payload('dashpay/dash', `v24.0.${n}`, { published_at: iso(clock - 500) })); }
+  const state = { outbox: [] }, bytes = (events) => new Map(events.map((e) => [e.eventId, JSON.stringify(e)]));
+  const first = releaseEvents(loadReleases(root), state, now + 400_000);
+  assert.equal(first.length, 301);
+  assert.equal(bytes(first).size, 301);
+  assert.equal(Object.keys(state.releases).length, RELEASES_SHOWN, 'the board keeps only the newest');
+  assert.ok(state.releases[first.at(-1).issue.id] && !state.releases[first[0].issue.id]);
+  assert.equal(state.releaseAnnounced.length, 301, 'delivery identity is not trimmed with the display list');
+  // Through a restart and across weeks, nothing announced is emitted again.
+  let saved = JSON.parse(JSON.stringify(state));
+  for (const later of [460_000, 86400_000, 20 * 86400_000]) { assert.equal(releaseEvents(loadReleases(root), saved, now + later).length, 0); saved = JSON.parse(JSON.stringify(saved)); }
+  // Even from no memory at all, a repeat can only be the identical event.
+  assert.deepEqual(bytes(releaseEvents(loadReleases(root), { outbox: [] }, now + 500_000)), bytes(first));
+  // Identity is forgotten only together with the record itself.
+  rmSync(join(root, 'releases', `${first[0].issue.id}.json`));
+  assert.equal(releaseEvents(loadReleases(root), saved, now + 600_000).length, 0);
+  assert.equal(saved.releaseAnnounced.length, 300);
 });
 
 test('release notices wait for a receiver that announced the domain, then ride the signed outbox', async (t) => {
