@@ -1,0 +1,42 @@
+name: Core compatibility
+# The Core-facing code (host probe, faucet wallet setup and funding) against a
+# real dashd, once per supported Core version. Every pull request runs the
+# supported set; dispatch it by hand to try any other tag before deploying it,
+# for example a release candidate:
+#   gh workflow run core-compat.yml -f images='["dashpay/dashd:24.1.0-rc.1"]'
+# To support a new major, add its floating tag to both defaults below.
+on:
+  workflow_call:
+    inputs:
+      images:
+        description: JSON list of dashpay/dashd image references
+        type: string
+        default: '["dashpay/dashd:23","dashpay/dashd:24"]'
+  workflow_dispatch:
+    inputs:
+      images:
+        description: JSON list of dashpay/dashd image references
+        type: string
+        default: '["dashpay/dashd:23","dashpay/dashd:24"]'
+permissions:
+  contents: read
+jobs:
+  core:
+    name: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(inputs.images) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Probe and faucet wallet against a real node
+        env:
+          CORE_COMPAT_IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          docker pull --quiet "$CORE_COMPAT_IMAGE"
+          python3 -m unittest discover -v -s agent -p 'test_core_compat.py'
