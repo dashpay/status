@@ -111,34 +111,78 @@ Before each invocation the worker uses `sessions.patch` to persist and verify
 `daniel@ktechmidas.net` OAuth account). User-origin model/account pins disable
 the Gateway model fallback ladder. Invocation is through
 `docker exec infraclaw openclaw agent --model openai/gpt-6-astra --thinking high`,
-without a shell or external delivery. A failed/mismatched pin pauses dispatch
-before invoking a model; never inherit the global CLIProxy default. A per-run
-`.route.json` records the verified selection without credentials.
+without a shell or external delivery. A failed/mismatched pin never invokes a
+model and never inherits the global CLIProxy default: the batch returns to the
+queue and the same route is retried with backoff (see "Self-recovery" below). A
+per-run `.route.json` records the verified selection without credentials.
 Normal completion requires explicit CLI success and a fresh run-specific
 completion receipt declaring no outstanding child sessions. Uncertain completion
-is independently reconciled from the Gateway, not inferred from elapsed time. It never
-claims service recovery from agent completion. Known-scope uncertainty retains
-its slot/locks and a `HELD-<run>` marker while a disjoint lane may continue.
-Unknown uncertainty and route failure pause admission globally. Restart converts
-abandoned `running` rows to `uncertain` with the same run and saved locks; known
-disjoint work may continue. A supervisor exits if an essential thread dies so
+is independently reconciled from the Gateway. It never
+claims service recovery from agent completion. Uncertainty retains
+its slot/locks and a `HELD-<run>` marker: a known scope leaves a reviewed
+disjoint lane free, serial mode and unknown scopes admit nothing else. Restart
+converts `running` rows that had reached the model to `uncertain` with the same
+run and saved locks; rows claimed but never invoked return to the queue. A
+supervisor exits if an essential thread dies so
 systemd's restart policy can recover instead of silently losing the worker.
+
+### Self-recovery: nothing waits for a person to notice
+
+`ENABLED` is the operator's switch and the broker never renames or removes it.
+Automatic holds live in SQLite and end by themselves:
+
+- **Before the model is invoked** (fresh readback, evidence files, route pin, any
+  unexpected error or a restart) nothing has run, so the batch returns to the
+  queue. `events.invoked` is written immediately before the agent call and is
+  the only thing that turns an interruption into a hold.
+- **Route breaker.** A failed pin, or an invocation that ends within three
+  minutes without a verified result (typically an unavailable account), opens
+  `route_breaker`. Admission backs off 1, 2, 5, 10, then 30 minutes; the first
+  claim after each delay is the probe and success closes the breaker. There is
+  no fallback model or account.
+- **Bounded holds.** A hold ends by receipt as before, or by lease: once the hold
+  is older than its lease (15 minutes when the invocation died at once, two
+  hours otherwise) **and** two Gateway observations a minute apart show no turn
+  executing (`INACTIVE_STATES`, no pending permission, no activity for 15
+  minutes), the slot and locks are released and `<run>.released.json` records
+  the basis. The events become `abandoned` and are never replayed; the issue
+  returns through the producer's next revision (a change, or the six-hourly
+  reminder). An active session, or a Gateway that cannot be read, keeps the
+  hold. Check `INACTIVE_STATES` against what `sessions.describe` reports for a
+  failed run on the installed Gateway; an unlisted state only means the hold is
+  kept and reported.
+- **Bookkeeping check.** Up to three attempts per run (immediately, after 15
+  minutes, after an hour). The route is pinned before an attempt is recorded,
+  so an unavailable route defers the check instead of consuming it.
+- **Admission delay.** A new event waits five minutes before it can be claimed,
+  so the producer can recognise an upgrade in progress (below) and the fresh
+  readback can withdraw the event. Withdrawn batches consume no dispatch budget.
+
+Whatever still needs a person is listed in `attention` in the authenticated
+ACK: an open route breaker, a hold older than 30 minutes, a queue that has
+waited over an hour, or a configuration/worker/lifecycle error. The producer
+turns that into the stall alert below.
+
+On first start this release restores `ENABLED` from a single
+`PAUSED-route-unavailable` or `PAUSED-<run>` left by an earlier release, since
+those were automatic pauses. Any other `PAUSED-*` name is treated as an
+operator's pause and left alone.
 
 Every 30 seconds, read-only lifecycle reconciliation verifies the actual session.
 Two identical terminal observations at least 30 seconds apart, a non-aborted
 terminal run, and a fresh no-children receipt after admission can release a held
 response. Original CLI output (including timeout) remains untouched; a separate
 `.reconciled.json` records the basis. This does not resolve the service incident.
-No release while the session is active or identity/completion evidence is missing.
-If an idle session lacks a valid receipt, one durable, bounded bookkeeping-only
-request is allowed on the required route. It cannot redo the repair, spawn
-children, mutate infrastructure or send messages. The once-per-run marker is
-written before invocation; ambiguous delivery is not retried. A remaining
-ambiguity is visible as attention required, not falsely completed.
+No receipt-based release while the session is active or identity/completion
+evidence is missing. If an idle session lacks a valid receipt, a bounded number
+of bookkeeping-only requests is allowed on the required route. They cannot redo
+the repair, spawn children, mutate infrastructure or send messages. Each attempt
+is recorded before its invocation. A run that never produces a receipt is
+released by lease as `abandoned`, never as completed.
 
 `queue-state.json` and authenticated delivery health expose active scopes, queued
-events and admission reasons (paused, capacity, resource conflict, budget,
-cooldown, eligible), plus lifecycle/check status. They contain no credentials.
+events and admission reasons (paused, route, capacity, resource conflict, budget,
+cooldown, settling, eligible), plus lifecycle/check status. They contain no credentials.
 Read these before assuming an idle slot means the queue is empty. Receiver-wide
 outage still needs the independent external observer described below.
 
@@ -161,6 +205,45 @@ preserved. No broad prune, destructive reset or idle-resource deletion is
 authorized merely by telemetry. Reverify target/network/wallet identity and live
 ownership before operational repairs; no duplicate active repair. See
 `incident-broker/policy.md` and the deployment-local authorization record.
+
+## Recognised change: upgrades do not enter the queue
+
+Expected downtime is held, never resolved and never hidden. A held issue stays
+open on the board as **Maintenance** with the reason, emits no event, and is
+withdrawn by the receiver's fresh readback if it was already queued. When the
+hold ends, a fault that is still present is emitted with fresh evidence.
+
+| Signal | Holds | Ends |
+| --- | --- | --- |
+| Dashboard operation confirmed/running (existing) | the network | terminal status, or lease expiry |
+| Dashboard operation **succeeded** | the network | 20 minutes after it finished |
+| dashnet journal claimed by another runner (existing) | the network | 20 minutes after release; at once if the journal records an error |
+| Container recreated (started under 20 minutes ago, `RestartCount` 0, running) | that host, the network's endpoint checks, its EC2 status check | 20 minutes after the last such start |
+| Host rebooted (uptime under 20 minutes) | same | 20 minutes after boot |
+| Two or more hosts changing at once | the network | when fewer than two are changing |
+
+`server/change-activity.js` derives the observational signals from the fresh
+probe every cycle, so a manual `docker compose pull && up` of the quorum
+server, or a hand-run Testnet upgrade, is recognised without a dashboard
+operation. A crash loop under a restart policy increments `RestartCount` and is
+not a planned change. Failed, cancelled and interrupted operations get no
+settle window. Inference is bounded: a host is held at most 90 minutes per
+episode and a network at most three hours, so a recreate loop becomes
+actionable. Mainnet and external networks are never held by inference.
+
+## Stall alert
+
+A stalled worker cannot report its own stall through the queue it is failing to
+drain. The producer therefore raises it out of band when the receiver is
+unreachable, the worker heartbeat is stale, dispatch is paused with a backlog,
+or the ACK's `attention` list is not empty. After 15 minutes it posts to the
+optional webhook, repeats every six hours and posts once on recovery. The
+`/remediation` board shows the same reasons (details for administrators only).
+
+Set `INCIDENT_ALERT_WEBHOOK_FILE` to a restricted file holding an `https`
+Slack-compatible incoming-webhook URL. It is a credential: never Git, command
+lines or container environment text. The message names scopes and blockers,
+never evidence. Without it the stall is still recorded and shown.
 
 ## Remediation board
 

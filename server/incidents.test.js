@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { deriveIssues, reconcile, publicIssues, apiAuthorized, signedHeaders, validateDestination, loadIncidentState, saveIncidentState } from './incidents.js';
 import { cycle } from './incident-service.js';
+import { recognizeActivity, SETTLE_MS } from './change-activity.js';
 import { DEFAULT_SETTINGS } from '../shared/settings.js';
 const now = Date.parse('2026-10-02T12:00:00Z'), at = new Date(now).toISOString();
 const fault = { id: 'a'.repeat(24), domain: 'network', scope: 'testnet', target: 'private-host', code: 'host_health', severity: 'critical', sourceKey: 'test-source', observedAt: at, evidence: { secret: 'must-not-be-public' } };
@@ -165,6 +166,31 @@ test('maintenance suppresses events, retains active incidents, and requires post
   assert.equal(muted.outbox.filter((e) => e.issue.domain === 'network').length, 0);
   const active = reconcile(muted, deriveNetwork(now + 60_000, network(now + 60_000, [host(now + 60_000, failing.hosts[0].probe.data)])), now + 60_000);
   assert.equal(active.outbox.filter((e) => e.issue.code === 'host_health').length, 1);
+});
+
+test('a recognised reboot holds the host, its endpoint and its instance; a fault that outlives the settle window is queued', () => {
+  const settings = settingsFor();
+  const step = (ms, bootedAt, previous) => {
+    const state = network(ms, [host(ms, { services: [{ service: 'indexer', ok: false }], system: { uptime: (ms - bootedAt) / 1000 } })], [{ label: 'API', kind: 'http', ok: false }]);
+    const activity = recognizeActivity({ settings, states: { testnet: state }, previous, now: ms });
+    const impaired = (id) => ({ id, region: 'us-west-2', state: 'running', instanceStatus: 'impaired', systemStatus: 'ok' });
+    const aws = { at: stamp(ms), errors: [], volumes: [], addresses: [], health: { at: stamp(ms), errors: [], alarms: [], instances: [impaired('i-one'), impaired('i-other')] } };
+    return { activity, derived: deriveIssues({ settings, states: { testnet: state }, activity, aws, now: ms }) };
+  };
+  const first = step(now, now - 120_000);
+  assert.equal(first.activity.hosts['testnet/i-one'].held, true);
+  let s = reconcile(null, first.derived, now);
+  const emitted = (code, target) => s.outbox.filter((e) => e.issue.code === code && (!target || e.issue.target === target)).length;
+  assert.equal(emitted('host_health'), 0); assert.equal(emitted('endpoint_failed'), 0);
+  assert.equal(emitted('aws_instance_impaired', 'i-one'), 0);
+  assert.equal(emitted('aws_instance_impaired', 'i-other'), 1, 'an unrelated instance stays actionable');
+  assert.equal(byCode(s, 'host_health')[0].suppressed, true);
+  assert.equal(byCode(s, 'host_health')[0].status, 'open', 'a held fault is never treated as recovered');
+  const later = step(now + SETTLE_MS, now - 120_000, first.activity);
+  assert.deepEqual(later.activity.hosts, {});
+  s = reconcile(s, later.derived, now + SETTLE_MS);
+  assert.equal(emitted('host_health'), 1); assert.equal(emitted('endpoint_failed'), 1);
+  assert.equal(emitted('aws_instance_impaired', 'i-one'), 1);
 });
 
 test('omitted endpoint, skipped/stopped host, or malformed nested report cannot recover', () => {

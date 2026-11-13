@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { evaluateNetwork, explorerReadiness } from '../shared/evaluate.js';
 import { readJSON, writeAtomic } from '../shared/settings.js';
 import { dynamoScaleInControl } from '../shared/aws-alarm-semantics.js';
+import { activityKey } from './change-activity.js';
 
 export const issueId = (...parts) => createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 24);
 const iso = (now) => new Date(now).toISOString();
@@ -110,8 +111,8 @@ export const TITLES = {
   idle_address: 'Unassociated public address requires ownership review',
 };
 
-export function deriveIssues({ settings, states, ci, aws, maintenance = {}, now = Date.now() }) {
-  const issues = [], sources = {}, checks = {}, samples = {}, suppressions = {};
+export function deriveIssues({ settings, states, ci, aws, maintenance = {}, activity = null, now = Date.now() }) {
+  const issues = [], sources = {}, checks = {}, samples = {}, suppressions = {}, heldInstances = new Set();
   const source = (key, at, complete, max) => {
     sources[key] = { observedAt: Number.isFinite(Date.parse(at)) ? at : null, fresh: fresh(at, now, max), complete: complete === true, maxAgeMs: max };
     return sources[key].fresh && sources[key].complete;
@@ -134,8 +135,12 @@ export function deriveIssues({ settings, states, ci, aws, maintenance = {}, now 
     const s = states?.[n.name], generation = n.generation ?? s?.generation ?? n.coreNetwork ?? 'unversioned';
     const identity = [generation], key = `network:${n.name}`, max = Math.max(180_000, settings.pollSeconds * 4000);
     const suppressed = ['creating', 'services'].includes(n.lifecycle?.status) || n.lifecycle?.platform?.status === 'starting'
-      || maintenance[n.name]?.active === true || n.maintenance?.active === true || s?.maintenance?.active === true || text(s?.journal?.owner);
+      || maintenance[n.name]?.active === true || n.maintenance?.active === true || s?.maintenance?.active === true || text(s?.journal?.owner)
+      || activity?.networks?.[n.name]?.held === true;
     suppressions[n.name] = suppressed;
+    // A recognised change on one host (for example the services host carrying
+    // the quorum server) also holds that network's public endpoint checks.
+    const hostChanging = Object.values(activity?.hosts || {}).some((v) => v?.network === n.name && v.held === true);
     const current = source(key, s?.generatedAt, object(s) && Array.isArray(s.hosts), max);
     source(`${key}:monitor`, iso(now), true, max);
     check('network', n.name, 'collector', 'collector_stale', key, current, identity, { suppressed });
@@ -165,8 +170,10 @@ export function deriveIssues({ settings, states, ci, aws, maintenance = {}, now 
       const hi = [...identity, resource || `unidentified:${h.name}`], hk = `${key}:host:${resource || h.name}`;
       const valid = source(hk, h.probe?.at, discoveryOk && text(resource) && h.state === 'running'
         && h.probe?.ok === true && !h.probe.skipped && object(h.probe.data), max);
+      const held = suppressed || activity?.hosts?.[activityKey(n.name, h)]?.held === true;
+      if (held && text(h.instanceId)) heldInstances.add(h.instanceId);
       const id = check('network', n.name, h.name, 'host_health', hk, valid, hi, {
-        kind: 'host', suppressed, healthyRules: valid ? hostProofs(row, n, settings, coreTip, platformTip, now) : [],
+        kind: 'host', suppressed: held, healthyRules: valid ? hostProofs(row, n, settings, coreTip, platformTip, now) : [],
         sampleKey: idFor('network', n.name, resource, 'explorer_sample', identity), maxLagBlocks: settings.thresholds.platformLagBlocks,
       });
       if (fresh(h.probe?.at, now, max) && text(resource)) {
@@ -174,7 +181,7 @@ export function deriveIssues({ settings, states, ci, aws, maintenance = {}, now 
         const e = row.data.explorer;
         const explorer = object(e) ? Object.fromEntries(['status', 'indexerRunning', 'indexerState', 'indexerRestarting', 'indexerHealth', 'indexerId', 'indexerRestarts', 'network', 'indexedHeight', 'chainHeight'].map((k) => [k, e[k]])) : undefined;
         samples[checks[id].sampleKey] = { scope: n.name, instanceId: h.instanceId, state: h.state,
-          probe: { ok: h.probe.ok, at: h.probe.at, data: { explorer } }, suppressed };
+          probe: { ok: h.probe.ok, at: h.probe.at, data: { explorer } }, suppressed: held };
         // A separately observed consensus tip must also be respected.
         checks[id].explorerLagOk = height(e?.indexedHeight) && Math.max(platformTip, e?.chainHeight || 0) - e.indexedHeight <= settings.thresholds.platformLagBlocks;
       }
@@ -194,7 +201,7 @@ export function deriveIssues({ settings, states, ci, aws, maintenance = {}, now 
       const ek = `${key}:endpoint:${e.label}`;
       const ei = [...identity, e.kind || 'http', list(n.endpoints).find((v) => v.label === e.label)?.url || e.url || e.label];
       const valid = source(ek, e.at ?? s.generatedAt, true, max);
-      check('network', n.name, e.label, 'endpoint_failed', ek, valid && e.ok === true, ei, { suppressed });
+      check('network', n.name, e.label, 'endpoint_failed', ek, valid && e.ok === true, ei, { suppressed: suppressed || hostChanging });
       if (valid && e.ok === false) add('network', n.name, e.label, 'endpoint_failed', 'warning', ek, { kind: e.kind, status: e.status }, sources[ek].observedAt, ei);
     }
   }
@@ -282,7 +289,9 @@ export function deriveIssues({ settings, states, ci, aws, maintenance = {}, now 
   if (!healthySource) add('aws', 'account', 'health', 'aws_health_missing', 'warning', 'aws:monitor', { errors: list(health?.errors).slice(0, 20) });
   if (fresh(health?.at, now, 10 * 60_000)) {
     for (const i of list(health.instances)) {
-      check('aws', i.region, i.id, 'aws_instance_impaired', 'aws:health', i.state === 'running' && i.instanceStatus === 'ok' && i.systemStatus === 'ok');
+      // An instance of a host or network under a recognised change is held with it.
+      check('aws', i.region, i.id, 'aws_instance_impaired', 'aws:health', i.state === 'running' && i.instanceStatus === 'ok' && i.systemStatus === 'ok',
+        [], heldInstances.has(i.id) ? { suppressed: true } : {});
       check('aws', i.region, i.id, 'aws_scheduled_event', 'aws:health', Array.isArray(i.events) && i.events.length === 0);
       if (i.instanceStatus === 'impaired' || i.systemStatus === 'impaired') add('aws', i.region, i.id, 'aws_instance_impaired', 'critical', 'aws:health', { instanceStatus: i.instanceStatus, systemStatus: i.systemStatus }, health.at);
       if (Array.isArray(i.events) && i.events.length) add('aws', i.region, i.id, 'aws_scheduled_event', 'warning', 'aws:health', { events: list(i.events).slice(0, 20) }, health.at);

@@ -70,6 +70,24 @@ test('verified monitoring correction is not an outage recovery or stale batch bl
   assert.equal(remediationView(data, options).cases[0].stage, 'blocked');
 });
 
+test('recognised upgrades, settling operations, abandoned attempts and stalls are explained, with details for administrators only', () => {
+  const data = state([issue('a', { suppressed: true, evidence: { instanceId: 'i-one' } }), issue('b', { suppressed: true, scope: 'other' }), issue('c'), issue('d', { suppressed: true, scope: 'third' })],
+    [{ issueId: 'c', workerState: 'abandoned' }]);
+  data.activity = { hosts: { 'testnet/i-one': { held: true } }, networks: { other: { held: true } } };
+  data.maintenance = { third: { active: true, operations: [{ id: 'op', action: 'upgrade', status: 'settling' }] } };
+  data.delivery.receiver.counts = { queued: 2 };
+  data.delivery.receiver.attention = [{ code: 'route_unavailable', detail: 'PRIVATE route detail' }];
+  const view = remediationView(data, { ...options, visibleNetworks: ['testnet', 'other', 'third'] });
+  const reason = (id) => view.cases.find((c) => c.id === id).reason;
+  assert.match(reason('a'), /recognised on this host/); assert.match(reason('b'), /recognised on this network/);
+  assert.match(reason('d'), /just finished/);
+  assert.equal(view.cases.find((c) => c.id === 'c').stage, 'blocked'); assert.match(reason('c'), /without a result/);
+  assert.equal(view.stalled, true); assert.equal(view.attention[0].code, 'route_unavailable');
+  const publicView = remediationView(data, { ...options, full: false, visibleNetworks: ['testnet', 'other', 'third'] });
+  assert.equal(publicView.stalled, true); assert.equal(publicView.attention, undefined);
+  assert.doesNotMatch(JSON.stringify(publicView), /PRIVATE/);
+});
+
 test('maintenance is visible without claiming recovery or hiding already-running repair ownership',()=>{
   const data=state([issue('a'),issue('b')],[{issueId:'b',active:true,workerState:'running'}]);
   data.maintenance={testnet:{active:true,operations:[{id:'op',action:'platform-reset'}]},secret:{active:true,operations:[{id:'private'}]}};

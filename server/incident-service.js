@@ -5,16 +5,23 @@ import { operationMaintenance, heldByOperation } from './operation-maintenance.j
 import { createCi } from './ci.js';
 import { loadSettings, readJSON } from '../shared/settings.js';
 import { deriveIssues, reconcile, loadIncidentState, saveIncidentState, readSecret, signedHeaders, validateDestination } from './incidents.js';
+import { recognizeActivity } from './change-activity.js';
+import { stallAlert, validateAlertUrl } from './stall-alert.js';
 
-export async function cycle({ dataDir, ci, destination, secret, fetcher = fetch, now = Date.now() }) {
+export async function cycle({ dataDir, ci, destination, secret, alertUrl = null, fetcher = fetch, now = Date.now() }) {
   const settings = loadSettings(join(dataDir, 'settings.json'));
   const states = Object.fromEntries(settings.networks.map((n) => [n.name, readJSON(join(dataDir, 'state', `${n.name}.json`))]));
   const aws = readJSON(join(dataDir, 'aws', 'inventory.json'));
   if (aws) aws.health = readJSON(join(dataDir, 'aws', 'health.json'));
   const maintenance = operationMaintenance(dataDir, settings, now);
-  const derived = deriveIssues({ settings, states, maintenance, ci: (ci || createCi({ dataDir })).summary({ admin: true }), aws, now });
-  const state = reconcile(loadIncidentState(dataDir), derived, now);
+  const previous = loadIncidentState(dataDir);
+  // Upgrades, redeploys and reboots seen in live observations are held like
+  // dashboard operations, so their expected downtime never reaches the queue.
+  const activity = recognizeActivity({ settings, states, previous: previous?.activity, now });
+  const derived = deriveIssues({ settings, states, maintenance, activity, ci: (ci || createCi({ dataDir })).summary({ admin: true }), aws, now });
+  const state = reconcile(previous, derived, now);
   state.maintenance = maintenance;
+  state.activity = activity;
   // Commit events before any attempt; lost acknowledgements replay eventId safely.
   saveIncidentState(dataDir, state);
   if (destination && secret && (!state.delivery?.nextAttemptAt || Date.parse(state.delivery.nextAttemptAt) <= now)) {
@@ -57,6 +64,9 @@ export async function cycle({ dataDir, ci, destination, secret, fetcher = fetch,
         nextAttemptAt: new Date(now + Math.min(15 * 60_000, 60_000 * 2 ** Math.min(attempts - 1, 4))).toISOString(), lastAttemptAt: new Date(now).toISOString(), error: e.name === 'TimeoutError' ? 'receiver timeout' : e.message.slice(0, 150) };
     }
   } else if (!destination || !secret) state.delivery = { configured: false, error: 'receiver not configured' };
+  // A failed notice is retried on the next cycle; it never blocks this one.
+  try { await stallAlert(state, { url: alertUrl, fetcher, now }); }
+  catch (e) { console.error('stall alert failed:', e.name === 'TimeoutError' ? 'timeout' : e.message.slice(0, 150)); }
   saveIncidentState(dataDir, state);
   return { active: state.issues.filter((i) => i.status === 'open').length, pending: state.outbox.length, delivered: state.delivery?.lastAckAt || null };
 }
@@ -67,9 +77,11 @@ export function startIncidents() {
   const destination = process.env.INCIDENT_WEBHOOK_URL;
   if (destination) validateDestination(destination);
   const secret = readSecret(process.env.INCIDENT_HMAC_FILE);
+  // Optional. A Slack-compatible incoming webhook URL kept in a restricted file.
+  const alertUrl = process.env.INCIDENT_ALERT_WEBHOOK_FILE ? validateAlertUrl(readSecret(process.env.INCIDENT_ALERT_WEBHOOK_FILE)) : null;
   let stopped = false;
   const loop = async () => {
-    try { console.log(new Date().toISOString(), 'incidents', await cycle({ dataDir, destination, secret })); }
+    try { console.log(new Date().toISOString(), 'incidents', await cycle({ dataDir, destination, secret, alertUrl })); }
     catch (e) { console.error('incident cycle failed:', e.message); }
     if (!stopped) setTimeout(loop, 60_000);
   };
