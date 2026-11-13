@@ -10,6 +10,20 @@ const state = (issues, cases) => ({ generatedAt: at, issues, outbox: [], deliver
 } } });
 const options = { full: true, visibleNetworks: ['testnet'], now };
 
+test('fresh delivery does not hide stalled execution or imply released ownership', () => {
+  const data = state([issue('a')], [{ issueId: 'a', active: true, workerState: 'uncertain', attentionRequired: true,
+    lifecycle: 'PRIVATE-STATE', pendingEvents: 2 }]);
+  data.delivery.receiver.remediation.progress = { attentionRequired: true, stalledRuns: 1, privateDetail: 'PRIVATE-DETAIL' };
+  const view = remediationView(data, { ...options, full: false });
+  assert.equal(view.execution, 'stalled'); assert.equal(view.stale, false); assert.equal(view.dispatch, 'enabled');
+  assert.equal(view.stalledRuns, 1); assert.equal(view.counts.blocked, 1); assert.equal(view.counts.working, 0);
+  assert.match(view.cases[0].reason, /ownership is retained/);
+  assert.doesNotMatch(JSON.stringify(view), /PRIVATE/);
+  data.delivery.receiver.workerAt = (now - 200_000) / 1000;
+  assert.equal(remediationView(data, options).execution, 'unknown');
+  assert.equal(remediationView(data, options).stalledRuns, null);
+});
+
 test('remediation separates completed response from verified repair and preserves root-cause blockers', () => {
   const data = state([issue('a'), issue('b', { status: 'resolved' }), issue('c', { status: 'resolved' }), issue('d', { status: 'resolved' })], [
     { issueId: 'a', workerState: 'completed', lastResponse: { outcome: 'resolved' } },

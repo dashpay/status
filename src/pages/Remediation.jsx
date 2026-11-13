@@ -25,10 +25,10 @@ export default function Remediation() {
     </div>
     <div className="mt-4"><Err error={error} /></div>
     {!data ? <Empty>Loading remediation status…</Empty> : <>
-      <div className={`panel mt-3 px-3 py-3 text-[12px] ${stale ? 'border-warn/50' : ''}`} role="status">
+      <div className={`panel mt-3 px-3 py-3 text-[12px] ${stale || data.execution === 'stalled' ? 'border-warn/50' : ''}`} role="status">
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
-          <span className={`font-semibold ${stale ? 'lv-warn' : data.dispatch === 'enabled' ? 'lv-ok' : 'lv-warn'}`}>
-            {stale ? 'Remediation status is stale or unavailable' : data.dispatch === 'enabled' ? 'Autonomous dispatch enabled'
+          <span className={`font-semibold ${stale || data.execution === 'stalled' ? 'lv-warn' : data.dispatch === 'enabled' ? 'lv-ok' : 'lv-warn'}`}>
+            {stale ? 'Remediation status is stale or unavailable' : data.execution === 'stalled' ? 'Repair progress needs attention' : data.dispatch === 'enabled' ? 'Autonomous dispatch enabled'
               : data.control?.applied === 'off' ? 'Autonomous dispatch switched off' : 'New dispatch paused'}
           </span>
           {data.maxActive != null && <span className="text-dim">Up to {data.maxActive} independent repair sessions</span>}
@@ -36,6 +36,7 @@ export default function Remediation() {
           <span className={data.delivery.failed ? 'lv-warn' : 'text-dim'}>{data.delivery.failed ? 'Alert delivery needs attention' : `Last alert delivery ${ago(data.delivery.lastAckAt, now)} ago`}</span>
         </div>
         {stale && <p className="mt-2 text-dim">These are last-known observations, not proof of current activity or recovery. The page will reconnect automatically.</p>}
+        {!stale && data.execution === 'stalled' && <p className="mt-2 lv-warn">{data.stalledRuns} repair {data.stalledRuns === 1 ? 'session is' : 'sessions are'} holding capacity while completion is verified. Monitoring and alert delivery can remain healthy during a repair stall.</p>}
         {data.public && <p className="mt-2 text-dim">Public view · target names and repair notes are available to signed-in administrators.</p>}
         {data.truncated && <p className="mt-2 lv-warn">The worker history is truncated; some response details are unavailable.</p>}
       </div>

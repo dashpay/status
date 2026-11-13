@@ -37,6 +37,51 @@ class Tests(unittest.TestCase):
     def done(self):
         return {'status': 'done', 'endedAt': self.ended, 'lastRunId': 'test-runtime-run', 'abortedLastRun': False}
 
+    def release_event(self, ident='b', release_id=123):
+        e = event(severity='info'); e['eventId'] = ident * 24 + ':1'
+        e['issue'].update(id=ident * 24, domain='maintenance', scope='dash-network-go',
+                          code='platform_release_compatibility', target='Platform v5.0.0-beta.2',
+                          evidence={'repository': 'dashpay/platform', 'repositoryId': 424232911,
+                                    'releaseId': release_id, 'tag': 'v5.0.0-beta.2',
+                                    'mode': 'code-and-tests-only', 'liveChangesAllowed': False})
+        return e
+
+    def test_only_allowlisted_code_only_maintenance_is_actionable(self):
+        e = self.release_event(); b.ingest(self.db, envelope(e))
+        self.assertEqual(self.db.execute('select status from events').fetchone()['status'], 'queued')
+        for key, wrong in [('repositoryId', 1), ('liveChangesAllowed', True), ('mode', 'deploy')]:
+            invalid = copy.deepcopy(e); invalid['issue']['evidence'][key] = wrong
+            with self.assertRaises(ValueError): b.validate(envelope(invalid))
+        e['issue']['code'] = 'arbitrary_command'
+        with self.assertRaises(ValueError): b.validate(envelope(e))
+
+    def test_release_budget_is_separate_and_bounded(self):
+        now = time.time()
+        for i in range(48):
+            e = event(); ident = hashlib.sha256(str(i).encode()).hexdigest()[:24]
+            e['eventId'] = ident + ':1'; e['issue']['id'] = ident
+            b.ingest(self.db, envelope(e))
+            self.db.execute("update events set status='completed',started=?,finished=? where id=?", (now-3601-i*100, now-3600-i*100, e['eventId']))
+        self.db.commit()
+        e = self.release_event(); b.ingest(self.db, envelope(e))
+        self.assertTrue(b.budget_exhausted(self.db, 'network:testnet'))
+        self.assertFalse(b.budget_exhausted(self.db, 'maintenance:dash-network-go'))
+        claimed = b.claim(self.db)
+        self.assertEqual([r['id'] for r, _ in claimed], [e['eventId']])
+        self.db.execute("update events set status='completed',finished=? where id=?", (now, e['eventId'])); self.db.commit()
+        b.ingest(self.db, envelope(self.release_event('c', 124)))
+        self.assertEqual(b.claim(self.db, cooldown=0), [])
+        snapshot = b.scheduler_snapshot(self.db, {'maxActive': 1, 'scopes': {}}, True)
+        self.assertEqual(snapshot['queued'][0]['reason'], 'budget')
+
+    def test_compatibility_report_projection_requires_version_bound_evidence(self):
+        report = {'releaseId': 123, 'platformTag': 'v5.0.0-beta.2', 'platformCommit': 'a'*40,
+                  'dashnetCommit': 'b'*40, 'result': 'fixed', 'report': 'reports/task.md', 'tests': ['regression passed'], 'untrustedExtra': 'not forwarded'}
+        self.assertNotIn('untrustedExtra', b.compatibility_result(report))
+        for key in ['platformCommit', 'dashnetCommit', 'report', 'tests']:
+            invalid = dict(report); invalid.pop(key)
+            self.assertIsNone(b.compatibility_result(invalid))
+
     def reconcile(self, root):
         reader = lambda session: self.done()
         b.reconcile_sessions(root, reader, now=time.time())
@@ -178,6 +223,20 @@ class Tests(unittest.TestCase):
         self.assertEqual(b.claim(self.db, config=config), [])  # two occupied slots
         self.assertEqual(self.db.execute("select status from events where id=?", ('a'*24+':1',)).fetchone()[0], 'uncertain')
 
+    def test_three_disjoint_scopes_keep_shared_and_uncertain_locks(self):
+        config = self.concurrency(); config['maxActive'] = 3
+        for letter, scope, domain in [('a','sakura','network'),('b','testnet','network'),('c','brian','ci')]:
+            self.concurrent_event(letter, scope, domain)
+            self.assertEqual(len(b.claim(self.db, config=config)), 1)
+        with self.db: self.db.execute("update events set status='uncertain' where scope='network:sakura'")
+        self.concurrent_event('d','builder','ci')
+        self.assertEqual(b.claim(self.db, config=config), [])
+        with self.db: self.db.execute("update events set status='completed' where scope='ci:brian'")
+        self.assertEqual(b.claim(self.db, config=config), [])  # shared build-host remains locked
+        root = pathlib.Path(self.temp.name)
+        (root/'concurrency.json').write_text(json.dumps(config))
+        self.assertEqual(b.concurrency_config(root)['maxActive'], 3)
+
     def test_unknown_scope_is_exclusive_even_with_free_slot(self):
         config = self.concurrency()
         self.concurrent_event('a', 'unknown')
@@ -193,7 +252,7 @@ class Tests(unittest.TestCase):
         root = pathlib.Path(self.temp.name)
         self.assertEqual(b.concurrency_config(root)['maxActive'], 1)
         path = root / 'concurrency.json'
-        for invalid in [{}, {'schemaVersion': 1, 'maxActive': 3, 'scopes': {}},
+        for invalid in [{}, {'schemaVersion': 1, 'maxActive': 4, 'scopes': {}},
                         {**self.concurrency(), 'scopes': {'network:sakura': []}},
                         {**self.concurrency(), 'maxActive': True}]:
             path.write_text(json.dumps(invalid))
@@ -385,6 +444,71 @@ class Tests(unittest.TestCase):
             with patch.object(b,'describe_session',return_value=live), patch.object(b,'pin_session_route') as pin:
                 b.request_completion_check(args,checks[0]);pin.assert_not_called()
 
+    def test_killed_session_gets_bookkeeping_but_never_automatic_success(self):
+        root,run=self.uncertain_run(); self.write_receipt(root,run); now=time.time()
+        killed={**self.done(),'status':'killed','abortedLastRun':True}
+        b.reconcile_sessions(root,lambda _:killed,now)
+        checks=b.reconcile_sessions(root,lambda _:killed,now+31)
+        self.assertEqual(len(checks),1)
+        self.assertEqual(self.db.execute('select status from events').fetchone()[0],'uncertain')
+        from types import SimpleNamespace
+        args=SimpleNamespace(state_dir=str(root),container_state_dir=str(root))
+        with patch.object(b,'describe_session',return_value=killed), patch.object(b,'pin_session_route',return_value={}), patch.object(b.subprocess,'run') as execute:
+            b.request_completion_check(args,checks[0])
+            self.assertEqual(execute.call_count,1)
+
+    def test_legacy_background_hold_gets_bounded_followups_preserving_evidence(self):
+        root,run=self.uncertain_run(); now=time.time()
+        b.reconcile_sessions(root,lambda _:self.done(),now)
+        b.reconcile_sessions(root,lambda _:self.done(),now+31)
+        with self.db:
+            self.db.execute('update lifecycle set check_requested=? where run=?',(now-1000,run))
+        original=root/(run+'.completion-check.result.json'); original.write_text('original nonterminal result')
+        checks=b.reconcile_sessions(root,lambda _:self.done(),now+62)
+        self.assertEqual(len(checks),1)
+        from types import SimpleNamespace
+        args=SimpleNamespace(state_dir=str(root),container_state_dir=str(root))
+        with patch.object(b,'describe_session',return_value=self.done()), patch.object(b,'pin_session_route',return_value={}), patch.object(b.subprocess,'run') as execute:
+            b.request_completion_check(args,checks[0]);b.request_completion_check(args,checks[0])
+            self.assertEqual(execute.call_count,1)
+        self.assertEqual(original.read_text(),'original nonterminal result')
+        self.assertTrue((root/(run+'.completion-check-2.result.json')).exists())
+        # A restart retains counts/backoff; a third check cannot repeat forever.
+        self.assertEqual(b.completion_schedule(self.db,run,now+120)['due'],False)
+        self.assertEqual(b.completion_schedule(self.db,run,now+3700)['attempt'],3)
+        with self.db:self.db.execute('insert into completion_checks values(?,?,?,?)',(run,3,now+3700,'last'))
+        self.assertTrue(b.completion_schedule(self.db,run,now+86400)['exhausted'])
+        self.assertEqual(b.reconcile_sessions(root,lambda _:self.done(),now+86400),[])
+        self.assertEqual(self.db.execute('select status from events').fetchone()[0],'uncertain')
+
+    def test_completion_check_rechecks_persisted_ownership(self):
+        root,run=self.uncertain_run();now=time.time()
+        b.reconcile_sessions(root,lambda _:self.done(),now)
+        checks=b.reconcile_sessions(root,lambda _:self.done(),now+31)
+        with self.db:self.db.execute("update events set status='completed'")
+        from types import SimpleNamespace
+        args=SimpleNamespace(state_dir=str(root),container_state_dir=str(root))
+        with patch.object(b,'describe_session',return_value=self.done()),patch.object(b,'pin_session_route') as pin:
+            b.request_completion_check(args,checks[0]);pin.assert_not_called()
+
+    def test_fresh_heartbeat_does_not_hide_stalled_capacity(self):
+        root,run=self.uncertain_run();now=time.time()
+        with self.db:
+            self.db.execute('update events set started=?,finished=?',(now-2000,now-1800))
+            self.db.execute('insert or replace into meta values(?,?)',('worker_heartbeat',str(now)))
+        self.assertEqual(b.health(self.db,root)['status'],'degraded')
+        self.assertEqual(b.progress_health(self.db,now)['stalledRuns'],1)
+        self.assertTrue(b.remediation_snapshot(self.db,root)['cases'][0]['attentionRequired'])
+        with self.db:self.db.execute("update events set status='completed'")
+        self.assertEqual(b.health(self.db,root)['status'],'ok')
+
+    def test_active_or_undated_session_never_gets_bookkeeping(self):
+        root,run=self.uncertain_run();now=time.time()
+        for changes in [{'status':'running'},{'status':'unknown'},{'permissionModePending':True},{'endedAt':None},{'lastRunId':None}]:
+            live={**self.done(),**changes}
+            self.assertEqual(b.reconcile_sessions(root,lambda _:live,now),[])
+            self.assertEqual(b.reconcile_sessions(root,lambda _:live,now+31),[])
+
     def test_stale_aborted_and_children_receipts_never_release(self):
         root,run=self.uncertain_run(); receipt=self.write_receipt(root,run)
         p=root/(run+'.completion.json')
@@ -505,7 +629,7 @@ class Tests(unittest.TestCase):
         args=SimpleNamespace(state_dir=str(root),container_state_dir=str(root))
         with patch.object(b,'describe_session',return_value=self.done()), patch.object(b,'pin_session_route',side_effect=ValueError('route')), patch.object(b.subprocess,'run') as execute:
             b.request_completion_check(args,checks[0]); execute.assert_not_called()
-        self.assertEqual(self.db.execute('select check_attempts from lifecycle').fetchone()[0],0)
+        self.assertEqual(self.db.execute('select count(*) from completion_checks').fetchone()[0],0,'a deferred check consumes no attempt')
         self.assertEqual(len(b.reconcile_sessions(root,lambda _:self.done(),now+62)),1)
         self.assertEqual(b.route_breaker(self.db)['kind'],'pin')
         due={**b.route_breaker(self.db),'retryAt':time.time()-1}
@@ -515,7 +639,7 @@ class Tests(unittest.TestCase):
             b.request_completion_check(args,checks[0]); self.assertEqual(execute.call_count,1)
         self.assertIsNone(b.route_breaker(self.db),'a successful pin closes the breaker a failed pin opened')
         self.assertEqual(b.reconcile_sessions(root,lambda _:self.done(),now+93),[])
-        self.assertEqual(len(b.reconcile_sessions(root,lambda _:self.done(),now+93+b.CHECK_BACKOFF[0])),1,'a later bounded retry')
+        self.assertEqual(len(b.reconcile_sessions(root,lambda _:self.done(),now+93+b.COMPLETION_DELAYS[1])),1,'a later bounded retry')
 
     def test_restart_requeues_work_that_never_reached_the_model(self):
         root=pathlib.Path(self.temp.name)

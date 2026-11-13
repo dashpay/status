@@ -66,7 +66,8 @@ removing it pauses new work without discarding the inbox.
 
 The worker defaults to one batch, with per-scope sessions and a 15-minute
 cooldown, capped globally at eight batches/hour and 48/day. An operator-reviewed
-`concurrency.json` beside the inbox may allow two disjoint batches:
+`concurrency.json` beside the inbox may allow up to three disjoint batches
+(the example allows two):
 
 ```json
 {
@@ -382,3 +383,54 @@ record. Verify no active network operation before replacing the agent. Rollback
 restores the prior image/compose while preserving incident inbox/outbox and all
 network/CI/user data. Pause the worker by removing `ENABLED`; do not delete its
 database or rerun uncertain records. Stop the producer before editing its code.
+
+
+## Known CI blockers before admission
+
+The broker correlates queued `ci/job_failed` events **before** concurrency,
+cooldown or hourly/daily budget admission. A match requires identical immutable
+job evidence (repository, run, attempt, runner, job, completion time, complete
+evidence object, target/source identity, severity and last-fault time), plus a
+completed, terminal, no-children receipt with that exact issue's explicit
+`blocked` outcome and nonempty blocker. Batch-level blockers, presentation text,
+missing/uncertain receipts and similar error/runner labels are not proof.
+
+A matching occurrence is retained as `deduplicated`, with a durable
+`event_correlations` link to the original response. It starts no worker, obtains
+no locks and has no admission timestamp, so spends no allowance. The board keeps
+the original blocker/owner/next action; neither receipt nor monitoring recovery
+is forged. Duplicate deliveries/restarts retain the same correlation.
+
+Changed failure evidence, severity, job/attempt/run, intervening resolution,
+reopened incidents and an explicit local operator recheck are admitted normally.
+Network incidents (including routine PoSe recovery), capacity/runner-health
+signals and release compatibility tasks are deliberately outside this exact-job
+gate. Different runs can share a root cause, but current producer evidence does
+not contain a proven cross-run test/error + relevant-source fingerprint. Those
+must still be compared by a worker, not silently merged on their job name.
+A new job containing an actual fix is therefore not hidden by an old blocker.
+
+For an explicitly authorized recheck of unchanged evidence, an operator can put
+an exact issue-ID key and reason in local `ci-dedup-recheck.json` before its next
+reminder. Remove that entry after the requested recheck. Workers must not write
+this shared control file or release their own blockers.
+
+### Audited allowance reset
+
+A local operator may, **only with explicit owner authority**, record
+`meta['budget_reset:ordinary']` as JSON with numeric UTC epoch `at` and a nonempty
+`reason`. Ordinary hourly and daily counts use admissions after the later of
+that epoch and their normal rolling cutoff. This resets accounting, not event
+history: old starts, receipts, locks, pending work, active sessions and configured
+8/hour/48/day limits remain intact. Compatibility uses a separate
+`budget_reset:maintenance` key; an ordinary reset never changes its 1/hour/4/day
+allowance. Invalid/future resets never bypass the existing limits.
+
+Pause new admissions and wait for running/uncertain work to finish before a
+receiver rollout or reset; preserve a consistent SQLite backup and an authority
+receipt. Verify the new gate first, then record the reset, confirm zero usage
+while paused, restore ENABLED and verify fresh dispatch/heartbeat. Once work
+resumes the usage counter will naturally increment again. Queue-state exposes
+both budget windows and the reset epoch. Do not delete queue rows to reset usage.
+
+Validation: `python3 -m unittest discover -s deploy/incident-broker -p 'test*.py'`.

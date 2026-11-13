@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { operationMaintenance, heldByOperation } from './operation-maintenance.js';
 import { createCi } from './ci.js';
+import { loadReleaseInbox, reconcileReleaseTasks } from './release-webhook.js';
 import { loadSettings, readJSON } from '../shared/settings.js';
 import { deriveIssues, reconcile, loadIncidentState, saveIncidentState, readSecret, signedHeaders, validateDestination } from './incidents.js';
 import { recognizeActivity } from './change-activity.js';
@@ -23,6 +24,7 @@ export async function cycle({ dataDir, ci, destination, secret, alertUrl = null,
   const state = reconcile(previous, derived, now);
   state.maintenance = maintenance;
   state.activity = activity;
+  reconcileReleaseTasks(state, loadReleaseInbox(dataDir), now);
   // Commit events before any attempt; lost acknowledgements replay eventId safely.
   saveIncidentState(dataDir, state);
   if (destination && secret && (!state.delivery?.nextAttemptAt || Date.parse(state.delivery.nextAttemptAt) <= now)) {
