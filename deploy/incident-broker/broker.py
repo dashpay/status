@@ -27,7 +27,10 @@ import urllib.request
 
 MAX_BODY = 512 * 1024
 ID = re.compile(r'^[a-f0-9]{24}:[1-9][0-9]{0,8}$')
-DOMAIN = {'network', 'ci', 'aws'}
+DOMAIN = {'network', 'ci', 'aws', 'release'}
+# Facts in their own right, not faults the producer keeps re-observing: they are
+# dispatched without the fresh issue readback.
+SPECIAL_CODES = {'pipeline_self_test', 'producer_heartbeat_lost', 'release_published'}
 TRANSITIONS = {'opened', 'reopened', 'changed', 'resolved', 'reminder'}
 MODEL = 'openai/gpt-6-astra'
 AUTH_PROFILE = 'openai:work'
@@ -322,6 +325,8 @@ def health(db, root=None):
     scheduler = db.execute("select value from meta where key='scheduler'").fetchone()
     return {'status': 'ok', 'workerAt': float(worker['value']) if worker else None, 'workerMode': mode['value'] if mode else 'unknown', 'oldestQueuedAt': oldest, 'counts': {r['status']: r['n'] for r in rows}, 'lastHeartbeat': float(heartbeat['value']) if heartbeat else None,
             'scheduler': json.loads(scheduler['value']) if scheduler else None,
+            # Announced so the producer never sends a domain an older receiver rejects.
+            'domains': sorted(DOMAIN),
             **({'remediation': remediation_snapshot(db, root), 'attention': attention(db, root), 'route': route_breaker(db),
                 # What was applied, so the board can show a requested change as pending.
                 'control': {**{k: remote_control(db).get(k) for k in ('seq', 'dispatch', 'clearSeq', 'lastClear')},
@@ -643,7 +648,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def refreshed_events(events, token_file):
-    special = {'pipeline_self_test', 'producer_heartbeat_lost'}
+    special = SPECIAL_CODES
     if all(e['issue']['code'] in special for e in events):
         return events
     token = pathlib.Path(token_file).read_text().strip()

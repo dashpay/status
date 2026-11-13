@@ -86,7 +86,17 @@ export function remediationView(state, { full = false, visibleNetworks = [], now
     localEnabled: acknowledged ? acknowledged.localEnabled === true : null,
     lastClear: Number.isFinite(acknowledged?.lastClear?.at) ? { at: iso(acknowledged.lastClear.at * 1000), count: Number.isSafeInteger(acknowledged.lastClear.count) ? acknowledged.lastClear.count : null } : null,
     ...(full ? { changedAt: iso(requested?.updatedAt), changedBy: text(requested?.updatedBy, 39), clearedAt: iso(requested?.clearedAt), clearedBy: text(requested?.clearedBy, 39) } : {}) };
-  return { schemaVersion: 1, public: !full, generatedAt: iso(state?.generatedAt), workerAt, control,
+  // Upstream release notices and what the worker concluded. Repository and tag
+  // are public facts; the assessment notes are for administrators.
+  const releases = Object.entries(state?.releases && typeof state.releases === 'object' ? state.releases : {}).map(([id, r]) => {
+    const response = observations.get(id), last = response?.lastResponse;
+    const stage = response?.active ? 'working' : last?.outcome === 'blocked' ? 'changes' : last?.outcome ? 'ready'
+      : response?.workerState === 'abandoned' ? 'unassessed' : response?.workerState === 'cleared' ? 'cleared' : 'queued';
+    return { id, component: text(r?.component, 20), repo: text(r?.repo, 100), tag: text(r?.tag, 100), prerelease: r?.prerelease === true, url: text(r?.url, 300),
+      publishedAt: iso(r?.publishedAt), stage,
+      ...(full ? { summary: text(last?.summary), blocker: text(last?.blocker), nextAction: text(last?.nextAction) } : {}) };
+  }).sort((a, b) => (b.publishedAt || '').localeCompare(a.publishedAt || '')).slice(0, 30);
+  return { schemaVersion: 1, public: !full, generatedAt: iso(state?.generatedAt), workerAt, control, releases,
     stalled: attention.length > 0, attention: full ? attention : undefined, stalledSince: full ? iso(state?.stall?.since) : undefined,
     stale: !producerFresh || !workerFresh, producerFresh, workerFresh, truncated: feed?.truncated === true,
     dispatch: !workerFresh ? 'unknown' : feed.enabled ? 'enabled' : 'paused',

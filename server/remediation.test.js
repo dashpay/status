@@ -108,6 +108,19 @@ test('the switch shows what was requested and what the worker acknowledged; clea
   assert.deepEqual([remediationView(older, options).control.supported, remediationView(older, options).control.requested, remediationView(older, options).control.applied], [false, 'off', null]);
 });
 
+test('upstream releases show what the worker concluded; notes are for administrators', () => {
+  const data = state([], [{ issueId: 'r1', workerState: 'completed', lastResponse: { outcome: 'blocked', blocker: 'PRIVATE spork key export fails' } },
+    { issueId: 'r2', active: true, workerState: 'running' }, { issueId: 'r3', workerState: 'completed', lastResponse: { outcome: 'no_change' } }, { issueId: 'r4', workerState: 'abandoned' }]);
+  const release = (component, tag, minutes, extra = {}) => ({ component, repo: `dashpay/${component}`, tag, prerelease: false, url: `https://github.com/dashpay/${component}/releases/tag/${tag}`, publishedAt: new Date(now - minutes * 60_000).toISOString(), ...extra });
+  data.releases = { r1: release('dash', 'v24.0.0', 1), r2: release('platform', 'v5.1.0-rc.1', 2, { prerelease: true }), r3: release('tenderdash', 'v1.9.0', 3), r4: release('dash', 'v24.0.1', 4), r5: release('dash', 'v24.0.2', 5) };
+  const view = remediationView(data, options);
+  assert.deepEqual(view.releases.map((r) => [r.tag, r.stage]), [['v24.0.0', 'changes'], ['v5.1.0-rc.1', 'working'], ['v1.9.0', 'ready'], ['v24.0.1', 'unassessed'], ['v24.0.2', 'queued']]);
+  assert.match(view.releases[0].blocker, /spork key/); assert.equal(view.releases[1].prerelease, true);
+  const publicView = remediationView(data, { ...options, full: false });
+  assert.equal(publicView.releases[0].stage, 'changes'); assert.doesNotMatch(JSON.stringify(publicView), /PRIVATE/);
+  assert.deepEqual(remediationView(state([], []), options).releases, []);
+});
+
 test('maintenance is visible without claiming recovery or hiding already-running repair ownership',()=>{
   const data=state([issue('a'),issue('b')],[{issueId:'b',active:true,workerState:'running'}]);
   data.maintenance={testnet:{active:true,operations:[{id:'op',action:'platform-reset'}]},secret:{active:true,operations:[{id:'private'}]}};

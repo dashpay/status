@@ -258,7 +258,8 @@ Administrators have two controls on `/remediation`:
   reconciled and released. The receiver host's `ENABLED` file remains the
   master switch: dispatch needs both, and the dashboard can never enable
   dispatch that the host has disabled.
-- **Clear queue.** Marks every queued event `cleared` without repairing it.
+- **Clear queue.** Marks every queued event `cleared` without repairing it,
+  including queued release notices, which are then not re-sent.
   Running and held runs are untouched. An issue that is still open returns on
   the producer's next revision (a change, or the six-hourly reminder).
 
@@ -278,6 +279,49 @@ targets, models, sessions or credentials.
 Controls are sent only after the receiver has announced them in an ACK, so an
 older receiver never sees an unknown envelope field. Deploy the receiver first;
 until then the buttons are disabled.
+
+## Upstream release notices
+
+Core, Platform and Tenderdash are deployed as a set, and a new version of any
+of them can break the deployment tooling. The repair worker is therefore told
+about every upstream release and pre-release when it is published, before
+anyone deploys it. The worker host has no public ingress, so GitHub cannot
+reach it; the status server relays:
+
+1. `dashpay/dash`, `dashpay/platform` and `dashpay/tenderdash` each have a
+   repository webhook for **Releases** events only, content type
+   `application/json`, posting to
+   `https://<status host>/api/releases/github-webhook` with a shared secret.
+2. The web process verifies `X-Hub-Signature-256` over the raw body with
+   `RELEASE_WEBHOOK_SECRET` (web container environment, beside
+   `CI_WEBHOOK_SECRET`). Unset, the endpoint answers 404. It accepts
+   `published`, `released` and `prereleased` for those three repositories and
+   writes one record per release to `data/releases/`: repository, tag,
+   pre-release flag, publish time and a release URL it builds itself. **Titles
+   and release notes are never stored or forwarded**; they are upstream free
+   text and must not reach an agent as instructions. Drafts, edits, other
+   repositories and other events are acknowledged and ignored.
+3. The incident sidecar turns each record into a `release_published` event
+   (domain `release`, scope `core`, `platform` or `tenderdash`) in the same
+   signed, durable outbox as incidents. It sends them only to a receiver that
+   announces the `release` domain in its ACK.
+4. The receiver queues it like any other event (subject to the dispatch switch,
+   budget and cooldown) and dispatches it without the fault readback, since a
+   release is a fact rather than a fault the producer re-observes. The policy's
+   "Upstream release notices" section makes it a read-only compatibility
+   assessment that authorizes no upgrade or deployment.
+
+A release is not re-reported by monitoring, so the sidecar itself re-sends a
+notice whose attempt the worker abandoned: up to three attempts, at least an
+hour apart. A notice an administrator cleared from the queue is not re-sent.
+`/remediation` lists recent releases with the outcome (waiting, being
+assessed, changes needed first, no issue found); the notes are for
+administrators.
+
+This does not replace the existing `platform-release` webhook on
+`dashpay/platform`, which drives the CI release-builder pool and is unrelated.
+It also does not cover images that have no GitHub release (nightlies, forks,
+patched tags).
 
 ## Remediation board
 

@@ -14,6 +14,7 @@ import { operationMaintenance } from './operation-maintenance.js';
 import { loadIncidentState, publicIssues, apiAuthorized, readSecret } from './incidents.js';
 import { remediationView } from './remediation.js';
 import { loadControl, requestClear, setDispatch } from './remediation-control.js';
+import { createReleaseHook } from './release-hook.js';
 import { publicInventory } from './aws-public.js';
 import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, loadSettings, memberOf, operatorFor, readJSON, saveSettings, validateSettings, writeAtomic } from '../shared/settings.js';
 import { expectations } from '../shared/monitoring.js';
@@ -26,7 +27,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 
 const LIFECYCLE_ACTIONS = ['create-devnet', 'delete-devnet', 'devnet-services', 'devnet-platform', 'platform-reset'];
 
-export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, clock = Date.now, ciGithub = null, ciQueue = {}, mainnetReportToken = process.env.MAINNET_REPORT_TOKEN } = {}) {
+export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, clock = Date.now, ciGithub = null, ciQueue = {}, releaseWebhook = {}, mainnetReportToken = process.env.MAINNET_REPORT_TOKEN } = {}) {
   const settingsPath = join(dataDir, 'settings.json');
   const dirs = { state: join(dataDir, 'state'), requests: join(dataDir, 'requests'), ops: join(dataDir, 'ops') };
   for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
@@ -41,6 +42,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   const orgQueue = createOrgQueue({ dataDir, fetcher, clock, github: ciGithub, pools: ci.poolCapacity, ...ciQueue, log: (...a) => console.log(new Date(clock()).toISOString(), ...a) });
   const awsDir = join(dataDir, 'aws');
   mkdirSync(awsDir, { recursive: true });
+  const releaseHook = createReleaseHook({ dataDir, clock, ...releaseWebhook });
 
   // nginx on the host reaches the container through the Docker bridge gateway.
   app.set('trust proxy', ['loopback', 'uniquelocal']);
@@ -58,6 +60,20 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
       const scope = orgQueue.webhook(event, JSON.parse(req.body.toString('utf8')));
       pushQueue(scope);
       res.status(scope ? 200 : 202).json({ ok: true });
+    } catch (e) { res.status(400).json({ error: e.message }); }
+  });
+  // GitHub release webhooks for Core, Platform and Tenderdash, relayed to the
+  // repair worker by the incident sidecar. Same raw-body HMAC gate as above;
+  // releases are rare, so the limit is low. Release notes make large payloads.
+  app.post('/api/releases/github-webhook', rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: true, legacyHeaders: false }), (req, res, next) => (releaseHook.configured() ? next() : res.status(404).json({ error: 'Release webhook is not configured' })),
+    express.raw({ type: () => true, limit: '5mb' }), (req, res) => {
+    if (!releaseHook.verify(req.body, req.get('x-hub-signature-256'))) return res.status(401).json({ error: 'bad signature' });
+    const event = req.get('x-github-event');
+    if (event === 'ping') return res.json({ ok: true });
+    try {
+      const record = releaseHook.webhook(event, JSON.parse(req.body.toString('utf8')));
+      if (record) console.log(new Date(clock()).toISOString(), 'release recorded', record.repo, record.tag);
+      res.status(202).json({ ok: true, recorded: !!record });
     } catch (e) { res.status(400).json({ error: e.message }); }
   });
   app.use('/api', rateLimit({ windowMs: 60_000, limit: 600, standardHeaders: true, legacyHeaders: false }));
@@ -469,7 +485,10 @@ export function startWeb() {
   // Actions queue: org webhook secret; an optional read-only token (Actions: read on
   // every repository) lets the sweep check private repositories as well.
   const ciQueue = { org: process.env.CI_QUEUE_ORG || 'dashpay', secret: process.env.CI_WEBHOOK_SECRET || null, token: process.env.CI_QUEUE_GITHUB_TOKEN || null };
-  const app = createWeb({ dataDir, origin, ciGithub: id && secret ? { id, secret } : null, ciQueue, mainnetReportToken: process.env.MAINNET_REPORT_TOKEN });
+  // Release notices: the secret shared with the release webhooks on dashpay/dash,
+  // dashpay/platform and dashpay/tenderdash. Unset, the endpoint answers 404.
+  const releaseWebhook = { secret: process.env.RELEASE_WEBHOOK_SECRET || null };
+  const app = createWeb({ dataDir, origin, ciGithub: id && secret ? { id, secret } : null, ciQueue, releaseWebhook, mainnetReportToken: process.env.MAINNET_REPORT_TOKEN });
   const ciTimer = setInterval(() => { app.ci.tick(); app.tickQueue(); }, 60_000);
   ciTimer.unref();
   const server = app.listen(Number(process.env.PORT) || 3001, process.env.BIND_ADDRESS || '127.0.0.1', () => console.log(`dash-status web on ${process.env.PORT || 3001}`));

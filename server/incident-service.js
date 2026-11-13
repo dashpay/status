@@ -8,6 +8,7 @@ import { deriveIssues, reconcile, loadIncidentState, saveIncidentState, readSecr
 import { recognizeActivity } from './change-activity.js';
 import { stallAlert, validateAlertUrl } from './stall-alert.js';
 import { loadControl, wireControl } from './remediation-control.js';
+import { loadReleases, releaseEvents } from './release-hook.js';
 
 export async function cycle({ dataDir, ci, destination, secret, alertUrl = null, fetcher = fetch, now = Date.now() }) {
   const settings = loadSettings(join(dataDir, 'settings.json'));
@@ -23,6 +24,11 @@ export async function cycle({ dataDir, ci, destination, secret, alertUrl = null,
   const state = reconcile(previous, derived, now);
   state.maintenance = maintenance;
   state.activity = activity;
+  // Upstream release notices recorded by the web process join the same durable
+  // outbox, so they share its signing, retry and acknowledgement. They wait for
+  // a receiver that has announced the `release` domain: an older one rejects
+  // it, and a rejected event would be quarantined instead of delivered.
+  if (Array.isArray(state.delivery?.receiver?.domains) && state.delivery.receiver.domains.includes('release')) state.outbox.push(...releaseEvents(loadReleases(dataDir), state, now));
   // Commit events before any attempt; lost acknowledgements replay eventId safely.
   saveIncidentState(dataDir, state);
   if (destination && secret && (!state.delivery?.nextAttemptAt || Date.parse(state.delivery.nextAttemptAt) <= now)) {

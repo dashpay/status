@@ -609,6 +609,30 @@ class Tests(unittest.TestCase):
             with self.assertRaises(ValueError): b.validate({**envelope(), 'control': bad})
         self.assertEqual(b.validate({**envelope(), 'control': {'seq': 1, 'dispatch': 'on', 'clearSeq': 1}}), [])
 
+    def release_event(self, rev=1, component='core', tag='v24.0.0'):
+        e = event(rev, transition='opened' if rev == 1 else 'reminder'); e['eventId'] = 'd'*24 + ':' + str(rev)
+        e['issue'].update(id='d'*24, domain='release', scope=component, target='dashpay/dash@' + tag, code='release_published', sourceKey='github:release')
+        return e
+
+    def test_release_notices_are_queued_and_dispatched_without_the_fault_readback(self):
+        root = pathlib.Path(self.temp.name)
+        b.ingest(self.db, envelope(self.release_event()))
+        row = self.db.execute('select * from events').fetchone()
+        self.assertEqual((row['scope'], row['status']), ('release:core', 'queued'))
+        self.assertIn('release', b.health(self.db, root)['domains'])
+        batch = b.claim(self.db, cooldown=0)
+        self.assertEqual(len(batch), 1)
+        # Nothing to re-observe: the release is a fact, so no issue snapshot is fetched.
+        events = [json.loads(r['body']) for r, _ in batch]
+        with patch.object(b.urllib.request, 'build_opener', side_effect=AssertionError('no readback for a release notice')):
+            self.assertEqual(b.refreshed_events(events, root/'missing-token'), events)
+        # A notice the worker abandoned returns as a new revision and is admitted again.
+        with self.db: self.db.execute("update events set status='abandoned'")
+        b.ingest(self.db, envelope(self.release_event(2)))
+        self.assertEqual([r['id'] for r, _ in b.claim(self.db, cooldown=0)], ['d'*24 + ':2'])
+        unknown = self.release_event(); unknown['issue']['domain'] = 'deploy'
+        with self.assertRaises(ValueError): b.validate(envelope(unknown))
+
     def test_hmac_replay_window_and_ack(self):
         secret = 'test-secret-123'
         srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), b.make_handler(pathlib.Path(self.temp.name)/'http.sqlite', secret, '127.0.0.1'))

@@ -339,6 +339,32 @@ test('remediation switch and queue clear are administrator-only, CSRF-protected 
   } finally { member.close(); }
 });
 
+test('release webhook: unconfigured is 404, unsigned is 401, a signed release is recorded once', async () => {
+  const off = await start();
+  try { assert.equal((await off.req('/api/releases/github-webhook', { method: 'POST', body: '{}' })).status, 404); } finally { off.close(); }
+  const w = await start(9920871, [], { releaseWebhook: { secret: 'release-secret' } });
+  try {
+    const send = (event, body, secret = 'release-secret') => {
+      const raw = JSON.stringify(body);
+      return w.req('/api/releases/github-webhook', { method: 'POST', body: raw, headers: { 'content-type': 'application/json', 'x-github-event': event,
+        'x-hub-signature-256': `sha256=${createHmac('sha256', secret).update(raw).digest('hex')}` } });
+    };
+    const release = { action: 'published', repository: { full_name: 'dashpay/dash' }, release: { tag_name: 'v24.0.0', draft: false, prerelease: false, published_at: new Date().toISOString(), body: 'x'.repeat(200_000) } };
+    assert.equal((await send('release', release, 'wrong')).status, 401);
+    assert.deepEqual(await (await send('ping', { zen: 'x' })).json(), { ok: true });
+    const first = await send('release', release);
+    assert.equal(first.status, 202); assert.equal((await first.json()).recorded, true);
+    assert.equal((await (await send('release', { ...release, action: 'released' })).json()).recorded, false);
+    assert.equal((await (await send('release', { ...release, repository: { full_name: 'dashpay/status' } })).json()).recorded, false);
+    assert.equal((await send('release', { ...release, release: { ...release.release, tag_name: 'bad tag' } })).status, 400);
+    const files = readdirSync(join(w.dataDir, 'releases'));
+    assert.equal(files.length, 1);
+    const stored = JSON.parse(readFileSync(join(w.dataDir, 'releases', files[0]), 'utf8'));
+    assert.deepEqual([stored.component, stored.repo, stored.tag], ['core', 'dashpay/dash', 'v24.0.0']);
+    assert.equal(stored.body, undefined);
+  } finally { w.close(); }
+});
+
 test('Actions queue: signed org webhook in, public and member views out', async () => {
   const w = await start(9920871, [], { ciQueue: { secret: 'hook-secret' } });
   try {
