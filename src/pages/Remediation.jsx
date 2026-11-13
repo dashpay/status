@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ago, clock, useNow, useResource, useSession } from '../lib.js';
+import { ago, api, clock, useNow, useResource, useSession } from '../lib.js';
 import { Empty, Err, Section } from '../ui.jsx';
 
 const STAGES = { maintenance: ['Maintenance', 'text-dim'], working: ['Working', 'lv-deploying'], queued: ['Queued', 'text-dim'], blocked: ['Blocked', 'lv-warn'],
@@ -28,7 +28,8 @@ export default function Remediation() {
       <div className={`panel mt-3 px-3 py-3 text-[12px] ${stale ? 'border-warn/50' : ''}`} role="status">
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
           <span className={`font-semibold ${stale ? 'lv-warn' : data.dispatch === 'enabled' ? 'lv-ok' : 'lv-warn'}`}>
-            {stale ? 'Remediation status is stale or unavailable' : data.dispatch === 'enabled' ? 'Autonomous dispatch enabled' : 'New dispatch paused'}
+            {stale ? 'Remediation status is stale or unavailable' : data.dispatch === 'enabled' ? 'Autonomous dispatch enabled'
+              : data.control?.applied === 'off' ? 'Autonomous dispatch switched off' : 'New dispatch paused'}
           </span>
           {data.maxActive != null && <span className="text-dim">Up to {data.maxActive} independent repair sessions</span>}
           <span className="text-dim" title={clock(data.workerAt)}>Updated {ago(data.workerAt, now)} ago</span>
@@ -38,6 +39,7 @@ export default function Remediation() {
         {data.public && <p className="mt-2 text-dim">Public view · target names and repair notes are available to signed-in administrators.</p>}
         {data.truncated && <p className="mt-2 lv-warn">The worker history is truncated; some response details are unavailable.</p>}
       </div>
+      {session.admin && data.control && <Controls data={data} now={now} reload={reload} />}
       {data.stalled && !stale && <div className="panel mt-3 p-3 text-[12px] border-warn/50" role="alert"><b className="lv-warn">Remediation cannot make progress</b>
         {data.attention?.length ? <ul className="mt-1 text-dim">{data.attention.map((a, i) => <li key={i}>{a.detail}</li>)}</ul>
           : <span className="text-dim"> · details are available to signed-in administrators.</span>}</div>}
@@ -63,6 +65,38 @@ export default function Remediation() {
       </Section>
       <p className="text-dim text-[11px] mt-4">Verified fixed requires a completed repair and independent monitoring recovery. Recovered means monitoring improved without an attributed repair. Recovered · follow-up keeps unresolved root-cause work visible without counting it as an ongoing blocked outage.</p>
     </>}
+  </div>;
+}
+
+// Administrator controls. A request is recorded at once and reaches the repair
+// worker on the next signed heartbeat, so it is shown as pending until then.
+function Controls({ data, now, reload }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const c = data.control, on = c.requested === 'on';
+  const run = async (path, body, question) => {
+    if (!window.confirm(question)) return;
+    setBusy(true); setError(null);
+    try { await api(path, { method: 'POST', body }); reload(); } catch (e) { setError(e); } finally { setBusy(false); }
+  };
+  return <div className="panel mt-3 p-3 text-[12px]" data-remediation-controls>
+    <div className="flex flex-wrap items-center gap-3">
+      <span className="font-semibold">Repair dispatch: <span className={on ? 'lv-ok' : 'lv-warn'}>{on ? 'switched on' : 'switched off'}</span></span>
+      <button className={`btn ${on ? 'btn-danger' : 'btn-primary'}`} disabled={busy || !c.supported}
+        onClick={() => run('/api/remediation/dispatch', { enabled: !on }, on
+          ? 'Switch autonomous repair off? Repairs already in progress continue; nothing new is started.'
+          : `Switch autonomous repair on? ${data.queuedEvents} queued event(s) become eligible for the repair agent.`)}>{on ? 'Switch off' : 'Switch on'}</button>
+      <button className="btn btn-danger" disabled={busy || !c.supported}
+        onClick={() => run('/api/remediation/clear', undefined, `Clear the repair queue? ${data.queuedEvents} queued event(s) are removed without being repaired. Repairs in progress are not affected. Issues that are still open return on their next monitoring update.`)}>Clear queue</button>
+      <span className="text-dim">{!c.supported ? 'The repair worker has not announced these controls yet; they become available once it runs this release.'
+        : c.pending ? 'Waiting for the repair worker to acknowledge (about a minute).' : 'Acknowledged by the repair worker.'}</span>
+    </div>
+    <Err error={error} />
+    {c.localEnabled === false && <p className="mt-2 lv-warn">Dispatch is also disabled on the worker host itself (its ENABLED file is absent). This switch cannot override that.</p>}
+    {(c.changedBy || c.lastClear) && <p className="mt-2 text-dim">
+      {c.changedBy && <span title={clock(c.changedAt)}>Switch last changed by {c.changedBy} {ago(c.changedAt, now)} ago. </span>}
+      {c.lastClear && <span title={clock(c.lastClear.at)}>Last clear removed {c.lastClear.count ?? 'an unknown number of'} event(s) {ago(c.lastClear.at, now)} ago{c.clearedBy ? ` (requested by ${c.clearedBy})` : ''}.</span>}
+    </p>}
   </div>;
 }
 

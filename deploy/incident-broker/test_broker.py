@@ -550,6 +550,47 @@ class Tests(unittest.TestCase):
         self.assertEqual(db.execute("select status from events where id=?", ('a'*24+':1',)).fetchone()[0], 'completed')
         self.assertEqual(db.execute("select status from events where id=?", ('a'*24+':2',)).fetchone()[0], 'queued')
 
+    def test_administrator_switch_defaults_off_and_cannot_override_the_local_file(self):
+        root = pathlib.Path(self.temp.name); gate = root/'ENABLED'; gate.touch()
+        control = lambda seq, dispatch: {**envelope(), 'control': {'seq': seq, 'dispatch': dispatch, 'clearSeq': 0}}
+        b.ingest(self.db, envelope(event()))
+        self.assertEqual(b.claim(self.db, cooldown=0, admission_path=gate, switch=True), [], 'off until an administrator switches it on')
+        self.assertFalse(b.remediation_snapshot(self.db, root)['enabled'])
+        b.ingest(self.db, control(1, 'on'))
+        self.assertEqual(b.health(self.db, root)['control'], {'seq': 1, 'dispatch': 'on', 'clearSeq': 0, 'lastClear': None, 'localEnabled': True})
+        b.ingest(self.db, control(0, 'off'))
+        self.assertTrue(b.dispatch_on(self.db), 'a replayed older envelope changes nothing')
+        gate.unlink()
+        self.assertEqual(b.claim(self.db, cooldown=0, admission_path=gate, switch=True), [], 'the local file stays the master switch')
+        self.assertFalse(b.remediation_snapshot(self.db, root)['enabled'])
+        gate.touch()
+        self.assertEqual(len(b.claim(self.db, cooldown=0, admission_path=gate, switch=True)), 1)
+        b.ingest(self.db, control(2, 'off'))
+        self.assertFalse(b.dispatch_on(self.db))
+        self.assertEqual(self.db.execute('select status from events').fetchone()[0], 'running', 'switching off never interrupts work in progress')
+
+    def test_clear_empties_only_queued_work_and_only_once(self):
+        b.ingest(self.db, envelope(event()))
+        self.concurrent_event('b', 'sakura'); self.concurrent_event('c', 'other')
+        with self.db:
+            self.db.execute("update events set status='uncertain' where id like 'b%'")
+            self.db.execute("update events set status='running' where id like 'c%'")
+        clearing = {**envelope(event(2)), 'control': {'seq': 1, 'dispatch': 'off', 'clearSeq': 1}}
+        statuses = lambda: {r['id'][0] + r['id'][-2:]: r['status'] for r in self.db.execute('select id,status from events')}
+        b.ingest(self.db, clearing)
+        self.assertEqual(statuses(), {'a:1': 'cleared', 'a:2': 'queued', 'b:1': 'uncertain', 'c:1': 'running'})
+        self.assertEqual(b.remote_control(self.db)['lastClear']['count'], 1)
+        b.ingest(self.db, clearing)
+        self.assertEqual(statuses()['a:2'], 'queued', 'redelivery does not clear again')
+        self.assertEqual(b.claim(self.db, cooldown=0), [], 'the held scope still owns its slot')
+
+    def test_control_vocabulary_is_closed(self):
+        for bad in ['on', {'seq': 1, 'dispatch': 'on'}, {'seq': 1, 'dispatch': 'run', 'clearSeq': 0}, {'seq': True, 'dispatch': 'on', 'clearSeq': 0},
+                    {'seq': 1, 'dispatch': 'on', 'clearSeq': 2}, {'seq': -1, 'dispatch': 'on', 'clearSeq': 0},
+                    {'seq': 1, 'dispatch': 'on', 'clearSeq': 0, 'command': 'run this'}]:
+            with self.assertRaises(ValueError): b.validate({**envelope(), 'control': bad})
+        self.assertEqual(b.validate({**envelope(), 'control': {'seq': 1, 'dispatch': 'on', 'clearSeq': 1}}), [])
+
     def test_hmac_replay_window_and_ack(self):
         secret = 'test-secret-123'
         srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), b.make_handler(pathlib.Path(self.temp.name)/'http.sqlite', secret, '127.0.0.1'))

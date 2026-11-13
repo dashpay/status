@@ -50,6 +50,7 @@ export function remediationView(state, { full = false, visibleNetworks = [], now
       reason = stage === 'fixed' ? 'Repair completed and monitoring verified recovery' : 'Monitoring observed recovery; no autonomous fix is claimed';
     } else if (last) { stage = 'verifying'; reason = 'Response finished; monitoring has not verified recovery'; }
     else if (response?.workerState === 'abandoned') { stage = 'blocked'; reason = 'Repair attempt ended without a result; it is retried on the next monitoring update'; }
+    else if (response?.workerState === 'cleared') reason = 'Removed from the queue by an administrator; it returns on the next monitoring update';
     const result = { id: issue.id, domain: issue.domain, network: issue.domain === 'network' ? issue.scope : null,
       title: TITLES[issue.code] || 'Status issue', severity: issue.severity, stage, stageLabel: LABEL[stage], reason,
       monitoring: issue.status, firstSeen: iso(issue.firstSeen), observedAt: iso(issue.lastSeen), resolvedAt: iso(issue.resolvedAt),
@@ -74,7 +75,16 @@ export function remediationView(state, { full = false, visibleNetworks = [], now
   const counts = Object.fromEntries(order.map((stage) => [stage, cases.filter((c) => c.stage === stage).length]));
   // Why dispatch cannot make progress. Details may name scopes: administrators only.
   const attention = stallReasons(state, now);
-  return { schemaVersion: 1, public: !full, generatedAt: iso(state?.generatedAt), workerAt,
+  // Administrator switch: what was requested here, and what the receiver has
+  // acknowledged. Who and when stay with administrators.
+  const requested = state?.control || null, acknowledged = workerFresh ? state?.delivery?.receiver?.control || null : null;
+  const control = { supported: !!state?.delivery?.receiver?.control, requested: requested?.dispatch === 'on' ? 'on' : 'off',
+    applied: acknowledged ? (acknowledged.dispatch === 'on' ? 'on' : 'off') : null,
+    pending: !!acknowledged && Number.isSafeInteger(requested?.seq) && Number.isSafeInteger(acknowledged.seq) && acknowledged.seq < requested.seq,
+    localEnabled: acknowledged ? acknowledged.localEnabled === true : null,
+    lastClear: Number.isFinite(acknowledged?.lastClear?.at) ? { at: iso(acknowledged.lastClear.at * 1000), count: Number.isSafeInteger(acknowledged.lastClear.count) ? acknowledged.lastClear.count : null } : null,
+    ...(full ? { changedAt: iso(requested?.updatedAt), changedBy: text(requested?.updatedBy, 39), clearedAt: iso(requested?.clearedAt), clearedBy: text(requested?.clearedBy, 39) } : {}) };
+  return { schemaVersion: 1, public: !full, generatedAt: iso(state?.generatedAt), workerAt, control,
     stalled: attention.length > 0, attention: full ? attention : undefined, stalledSince: full ? iso(state?.stall?.since) : undefined,
     stale: !producerFresh || !workerFresh, producerFresh, workerFresh, truncated: feed?.truncated === true,
     dispatch: !workerFresh ? 'unknown' : feed.enabled ? 'enabled' : 'paused',

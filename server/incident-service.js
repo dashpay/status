@@ -7,6 +7,7 @@ import { loadSettings, readJSON } from '../shared/settings.js';
 import { deriveIssues, reconcile, loadIncidentState, saveIncidentState, readSecret, signedHeaders, validateDestination } from './incidents.js';
 import { recognizeActivity } from './change-activity.js';
 import { stallAlert, validateAlertUrl } from './stall-alert.js';
+import { loadControl, wireControl } from './remediation-control.js';
 
 export async function cycle({ dataDir, ci, destination, secret, alertUrl = null, fetcher = fetch, now = Date.now() }) {
   const settings = loadSettings(join(dataDir, 'settings.json'));
@@ -41,12 +42,18 @@ export async function cycle({ dataDir, ci, destination, secret, alertUrl = null,
       if (bytes + size > 400_000) break;
       events.push(event); bytes += size;
     }
-    const body = JSON.stringify({ schemaVersion: 1, producer: 'dash-status', sentAt: new Date(now).toISOString(), events });
+    // The administrator switch and queue clear ride the signed heartbeat. They
+    // are sent only to a receiver that has advertised support: an older one
+    // rejects unknown envelope fields, which must never quarantine events.
+    const control = state.delivery?.receiver?.control ? wireControl(loadControl(dataDir)) : null;
+    const body = JSON.stringify({ schemaVersion: 1, producer: 'dash-status', sentAt: new Date(now).toISOString(), events, ...(control ? { control } : {}) });
     try {
       const response = await fetcher(validateDestination(destination), { method: 'POST', headers: signedHeaders(body, secret, now), body, redirect: 'error', signal: AbortSignal.timeout(15_000) });
       if (!response.ok) {
         const error = new Error(`receiver HTTP ${response.status}`);
-        error.permanentPayload = [400, 413, 422].includes(response.status);
+        error.permanentPayload = [400, 413, 422].includes(response.status) && !control;
+        // A receiver rolled back to a release without controls: stop sending them.
+        if (control && response.status === 400) state.delivery = { ...state.delivery, receiver: { ...state.delivery.receiver, control: undefined } };
         throw error;
       }
       const ack = await response.json();

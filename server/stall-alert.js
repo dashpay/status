@@ -15,8 +15,10 @@ export function stallReasons(state, now = Date.now()) {
   // Receiver facts describe the present only while acknowledgements are fresh.
   if (!receiver || delivery.error || !(now - Date.parse(delivery.lastAckAt) < 180_000)) return reasons;
   if (Number.isFinite(receiver.workerAt) && now / 1000 - receiver.workerAt > 300) reasons.push({ code: 'worker_heartbeat_stale', detail: 'Repair worker heartbeat is older than five minutes' });
-  if (receiver.remediation?.enabled === false && (receiver.counts?.queued || 0) > 0)
-    reasons.push({ code: 'dispatch_paused', detail: `Dispatch is paused with ${receiver.counts.queued} queued event(s)` });
+  // Switched off from the dashboard is a deliberate, visible state, not a stall.
+  // A pause on the receiver host itself (or an older receiver) is still reported.
+  if (receiver.remediation?.enabled === false && (receiver.counts?.queued || 0) > 0 && receiver.control?.dispatch !== 'off')
+    reasons.push({ code: 'dispatch_paused', detail: `Dispatch is paused on the receiver host with ${receiver.counts.queued} queued event(s)` });
   for (const item of Array.isArray(receiver.attention) ? receiver.attention.slice(0, 10) : []) {
     if (typeof item?.code === 'string' && item.code) reasons.push({ code: clip(item.code, 60), detail: clip(item.detail || item.code, 300) });
   }

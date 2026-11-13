@@ -290,7 +290,7 @@ test('issue API is additive, fails visibly when stale, and limits private detail
   } finally { w.close(); }
 });
 
-test('remediation board is read-only and its notes require administrator access', async () => {
+test('remediation board notes require administrator access', async () => {
   const w = await start();
   try {
     const at = new Date().toISOString();
@@ -307,6 +307,36 @@ test('remediation board is read-only and its notes require administrator access'
     assert.equal(full.public, false); assert.equal(full.cases[0].summary, 'PRIVATE-NOTE');
     assert.equal(full.cases[0].stage, 'blocked');
   } finally { w.close(); }
+});
+
+test('remediation switch and queue clear are administrator-only, CSRF-protected and default to off', async () => {
+  const post = (w, path, body, csrf) => w.req(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body),
+    headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(csrf ? { 'x-csrf-token': csrf } : {}) } });
+  const stored = (w) => JSON.parse(readFileSync(join(w.dataDir, 'remediation-control.json'), 'utf8'));
+  const w = await start();
+  try {
+    assert.equal((await post(w, '/api/remediation/dispatch', { enabled: true })).status, 401);
+    assert.equal((await post(w, '/api/remediation/clear')).status, 401);
+    const csrf = await w.login();
+    assert.equal((await (await w.req('/api/remediation')).json()).control.requested, 'off');
+    assert.equal((await post(w, '/api/remediation/dispatch', { enabled: true })).status, 403, 'a session without the CSRF token is refused');
+    assert.equal((await post(w, '/api/remediation/dispatch', { enabled: 'yes' }, csrf)).status, 400);
+    assert.equal((await post(w, '/api/remediation/dispatch', { enabled: true }, csrf)).status, 200);
+    assert.deepEqual([stored(w).seq, stored(w).dispatch, stored(w).updatedBy], [1, 'on', 'someone']);
+    assert.equal((await post(w, '/api/remediation/clear', undefined, csrf)).status, 200);
+    assert.deepEqual([stored(w).seq, stored(w).clearSeq, stored(w).dispatch], [2, 2, 'on']);
+    const view = await (await w.req('/api/remediation')).json();
+    assert.deepEqual([view.control.requested, view.control.applied, view.control.changedBy], ['on', null, 'someone']);
+    assert.equal((await post(w, '/api/remediation/dispatch', { enabled: false }, csrf)).status, 200);
+    assert.equal(stored(w).dispatch, 'off');
+  } finally { w.close(); }
+  const member = await start(42);
+  try {
+    const csrf = await member.login();
+    assert.equal((await post(member, '/api/remediation/dispatch', { enabled: true }, csrf)).status, 403);
+    assert.equal((await post(member, '/api/remediation/clear', undefined, csrf)).status, 403);
+    assert.equal((await (await member.req('/api/remediation')).json()).control.changedBy, undefined);
+  } finally { member.close(); }
 });
 
 test('Actions queue: signed org webhook in, public and member views out', async () => {

@@ -17,6 +17,10 @@ test('a healthy or unconfigured pipeline is not stalled; each blocker is named',
   assert.deepEqual(codes(unreachable), ['receiver_unreachable']);
   const paused = healthy(); paused.delivery.receiver.remediation.enabled = false; paused.delivery.receiver.counts.queued = 4;
   assert.deepEqual(codes(paused), ['dispatch_paused']);
+  paused.delivery.receiver.control = { seq: 3, dispatch: 'off', clearSeq: 0, localEnabled: true };
+  assert.deepEqual(codes(paused), [], 'switched off from the dashboard is deliberate, not a stall');
+  paused.delivery.receiver.control.dispatch = 'on';
+  assert.deepEqual(codes(paused), ['dispatch_paused'], 'a pause on the receiver host is still reported');
   paused.delivery.receiver.counts.queued = 0;
   assert.deepEqual(codes(paused), [], 'an empty paused queue needs nobody');
   const blocked = healthy(); blocked.delivery.receiver.attention = [route, { nonsense: true }, null];

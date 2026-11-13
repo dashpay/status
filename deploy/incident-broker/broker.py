@@ -155,11 +155,65 @@ def clock_value(value, optional=False):
     return result
 
 
+def remote_control(db):
+    """Administrator switch delivered by the producer. Defaults to OFF: a new or
+    upgraded receiver dispatches nothing until an administrator switches it on.
+    """
+    row = db.execute("select value from meta where key='remote_control'").fetchone()
+    try:
+        value = json.loads(row['value']) if row else None
+    except ValueError:
+        value = None
+    if not isinstance(value, dict) or value.get('dispatch') not in {'on', 'off'} or type(value.get('seq')) is not int or type(value.get('clearSeq')) is not int:
+        return {'seq': -1, 'dispatch': 'off', 'clearSeq': 0, 'lastClear': None}
+    return value
+
+
+def dispatch_on(db):
+    return remote_control(db)['dispatch'] == 'on'
+
+
+def validate_control(control):
+    """A fixed, tiny vocabulary: a switch and a clear counter. It can stop
+    dispatch or empty the queue, and it can only enable dispatch that the local
+    ENABLED file already allows. It never selects commands, targets or models.
+    """
+    if (not isinstance(control, dict) or set(control) != {'seq', 'dispatch', 'clearSeq'}
+            or type(control['seq']) is not int or not 0 <= control['seq'] <= 2 ** 53
+            or control['dispatch'] not in {'on', 'off'}
+            or type(control['clearSeq']) is not int or not 0 <= control['clearSeq'] <= control['seq']):
+        raise ValueError('invalid control')
+    return control
+
+
+def apply_control(db, control, now=None):
+    """Caller holds the transaction. Monotonic counters make redelivery and a
+    replayed older envelope harmless.
+    """
+    now = time.time() if now is None else now
+    state = remote_control(db)
+    changed = False
+    if control['clearSeq'] > state['clearSeq']:
+        # Only work that has not started. Running and held runs keep their owner.
+        count = db.execute("update events set status='cleared',finished=? where status='queued'", (now,)).rowcount
+        state.update(clearSeq=control['clearSeq'], lastClear={'at': now, 'count': count})
+        changed = True
+    if control['seq'] > state['seq']:
+        state.update(seq=control['seq'], dispatch=control['dispatch'], at=now)
+        changed = True
+    if changed:
+        db.execute('insert or replace into meta values(?,?)', ('remote_control', json.dumps(state)))
+    return state
+
+
 def validate(payload):
-    if not isinstance(payload, dict) or set(payload) != {'schemaVersion', 'producer', 'sentAt', 'events'} or payload['schemaVersion'] != 1 or payload['producer'] != 'dash-status':
+    if (not isinstance(payload, dict) or set(payload) - {'control'} != {'schemaVersion', 'producer', 'sentAt', 'events'}
+            or payload['schemaVersion'] != 1 or payload['producer'] != 'dash-status'):
         raise ValueError('invalid envelope')
     if not isinstance(payload['events'], list) or len(payload['events']) > 50:
         raise ValueError('invalid event list')
+    if 'control' in payload:
+        validate_control(payload['control'])
     clock_value(payload['sentAt'])
     for event in payload['events']:
         if not isinstance(event, dict) or event.get('schemaVersion') != 1 or not ID.fullmatch(str(event.get('eventId', ''))) or event.get('transition') not in TRANSITIONS:
@@ -184,6 +238,10 @@ def validate(payload):
 def ingest(db, payload):
     events = validate(payload)
     with db:
+        # A clear empties what was queued before this envelope; the events it
+        # carries arrive after the administrator's request and stay queued.
+        if 'control' in payload:
+            apply_control(db, payload['control'])
         # Check the whole batch before committing. Same id with different bytes
         # is corruption, not a successful duplicate acknowledgement.
         for event in events:
@@ -251,7 +309,7 @@ def remediation_snapshot(db, root):
                                        'nextAction': bounded(detail.get('nextAction')),
                                        'changes': [bounded(x, 300) for x in detail.get('changes', [])[:8] if isinstance(x, str)] if isinstance(detail.get('changes'), list) else []}
                                       if receipt else None})
-    return {'schemaVersion': 1, 'generatedAt': stamp(time.time()), 'enabled': (root / 'ENABLED').exists(),
+    return {'schemaVersion': 1, 'generatedAt': stamp(time.time()), 'enabled': (root / 'ENABLED').exists() and dispatch_on(db),
             'maxActive': scheduler.get('maxActive'), 'cases': cases[-1000:], 'truncated': len(cases) > 1000}
 
 
@@ -264,7 +322,10 @@ def health(db, root=None):
     scheduler = db.execute("select value from meta where key='scheduler'").fetchone()
     return {'status': 'ok', 'workerAt': float(worker['value']) if worker else None, 'workerMode': mode['value'] if mode else 'unknown', 'oldestQueuedAt': oldest, 'counts': {r['status']: r['n'] for r in rows}, 'lastHeartbeat': float(heartbeat['value']) if heartbeat else None,
             'scheduler': json.loads(scheduler['value']) if scheduler else None,
-            **({'remediation': remediation_snapshot(db, root), 'attention': attention(db, root), 'route': route_breaker(db)} if root else {})}
+            **({'remediation': remediation_snapshot(db, root), 'attention': attention(db, root), 'route': route_breaker(db),
+                # What was applied, so the board can show a requested change as pending.
+                'control': {**{k: remote_control(db).get(k) for k in ('seq', 'dispatch', 'clearSeq', 'lastClear')},
+                            'localEnabled': (root / 'ENABLED').exists()}} if root else {})}
 
 
 def attention(db, root, now=None):
@@ -284,7 +345,7 @@ def attention(db, root, now=None):
             items.append({'code': 'hold', 'since': row['started'],
                           'detail': 'Scope %s has been held by an unfinished repair run for %d minutes' % (row['scope'][:80], (now - row['started']) // 60)})
     oldest = db.execute("select min(received) at from events where status='queued'").fetchone()['at']
-    if oldest and now - oldest >= 3600 and (root / 'ENABLED').exists():
+    if oldest and now - oldest >= 3600 and (root / 'ENABLED').exists() and dispatch_on(db):
         items.append({'code': 'queue_stalled', 'since': oldest, 'detail': 'Oldest queued event has waited %d minutes' % ((now - oldest) // 60)})
     for key in ['config_error', 'worker_error', 'lifecycle_error']:
         row = db.execute('select value from meta where key=?', (key,)).fetchone()
@@ -433,11 +494,15 @@ def conflict(resources, occupied):
     return bool(occupied) and (resources is None or any(held is None or resources & held for held in occupied.values()))
 
 
-def claim(db, cooldown=900, config=None, admission_path=None, min_age=0):
+def claim(db, cooldown=900, config=None, admission_path=None, min_age=0, switch=False):
     config = config or {'maxActive': 1, 'scopes': {}}
     with db:
         db.execute('begin immediate')
         if admission_path is not None and not admission_path.exists():
+            return []
+        # The administrator switch is read inside the admission transaction, so a
+        # switch-off that has been acknowledged admits nothing afterwards.
+        if switch and not dispatch_on(db):
             return []
         # Uncertain runs retain a slot and all locks: timeout is not completion.
         occupied = occupied_locks(db, config)
@@ -901,7 +966,7 @@ def worker(args, stop):
             breaker = route_breaker(db)
             if breaker and time.time() < breaker['retryAt']:
                 continue  # Backing off. The first claim after retryAt is the probe.
-            batch = claim(db, config=config, admission_path=root / 'ENABLED', min_age=ADMISSION_DELAY)
+            batch = claim(db, config=config, admission_path=root / 'ENABLED', min_age=ADMISSION_DELAY, switch=True)
         if not batch:
             continue
         session = batch[0][1]
@@ -1011,13 +1076,14 @@ def main():
         while not stop.wait(10):
             with connect(root / 'inbox.sqlite') as db:
                 watchdog(db)
+                enabled = (root / 'ENABLED').exists() and dispatch_on(db)
                 try:
-                    snapshot = scheduler_snapshot(db, concurrency_config(root), (root / 'ENABLED').exists())
+                    snapshot = scheduler_snapshot(db, concurrency_config(root), enabled)
                 except (OSError, ValueError, TypeError):
                     snapshot = {'error': 'invalid local concurrency configuration; admission blocked'}
                 with db:
                     active = db.execute("select 1 from events where status in ('running','uncertain')").fetchone()
-                    mode = 'paused' if not (root / 'ENABLED').exists() else 'active' if active else 'enabled'
+                    mode = 'paused' if not enabled else 'active' if active else 'enabled'
                     db.execute('insert or replace into meta values(?,?)', ('worker_heartbeat', str(time.time())))
                     db.execute('insert or replace into meta values(?,?)', ('worker_mode', mode))
                     db.execute('insert or replace into meta values(?,?)', ('scheduler', json.dumps(snapshot)))
@@ -1027,8 +1093,11 @@ def main():
         while not stop.wait(30):
             try:
                 for check in reconcile_sessions(root):
-                    # Manual/global pause forbids new model work, not read-only reconciliation.
-                    if (root / 'ENABLED').exists():
+                    # A pause (local file or administrator switch) forbids new model
+                    # work, not read-only reconciliation or lease release.
+                    with connect(root / 'inbox.sqlite') as db:
+                        switched_on = dispatch_on(db)
+                    if (root / 'ENABLED').exists() and switched_on:
                         request_completion_check(args, check)
                 with connect(root / 'inbox.sqlite') as db:
                     if db.execute("select 1 from meta where key='lifecycle_error'").fetchone():

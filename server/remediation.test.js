@@ -88,6 +88,23 @@ test('recognised upgrades, settling operations, abandoned attempts and stalls ar
   assert.doesNotMatch(JSON.stringify(publicView), /PRIVATE/);
 });
 
+test('the switch shows what was requested and what the worker acknowledged; cleared issues say so', () => {
+  const data = state([issue('a')], [{ issueId: 'a', workerState: 'cleared' }]);
+  data.delivery.receiver.remediation.enabled = false;
+  data.control = { seq: 4, dispatch: 'on', clearSeq: 3, updatedAt: at, updatedBy: 'PRIVATE-ADMIN', clearedAt: at, clearedBy: 'PRIVATE-ADMIN' };
+  data.delivery.receiver.control = { seq: 3, dispatch: 'off', clearSeq: 3, localEnabled: true, lastClear: { at: now / 1000, count: 250 } };
+  const view = remediationView(data, options);
+  assert.deepEqual([view.dispatch, view.control.requested, view.control.applied, view.control.pending, view.control.supported], ['paused', 'on', 'off', true, true]);
+  assert.deepEqual([view.control.lastClear.count, view.control.localEnabled, view.control.changedBy], [250, true, 'PRIVATE-ADMIN']);
+  assert.match(view.cases[0].reason, /Removed from the queue/);
+  data.delivery.receiver.control.seq = 4; data.delivery.receiver.control.dispatch = 'on';
+  assert.equal(remediationView(data, options).control.pending, false);
+  const publicView = remediationView(data, { ...options, full: false });
+  assert.equal(publicView.control.applied, 'on'); assert.doesNotMatch(JSON.stringify(publicView), /PRIVATE/);
+  const older = state([issue('a')], []);
+  assert.deepEqual([remediationView(older, options).control.supported, remediationView(older, options).control.requested, remediationView(older, options).control.applied], [false, 'off', null]);
+});
+
 test('maintenance is visible without claiming recovery or hiding already-running repair ownership',()=>{
   const data=state([issue('a'),issue('b')],[{issueId:'b',active:true,workerState:'running'}]);
   data.maintenance={testnet:{active:true,operations:[{id:'op',action:'platform-reset'}]},secret:{active:true,operations:[{id:'private'}]}};

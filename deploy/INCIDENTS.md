@@ -128,7 +128,8 @@ systemd's restart policy can recover instead of silently losing the worker.
 
 ### Self-recovery: nothing waits for a person to notice
 
-`ENABLED` is the operator's switch and the broker never renames or removes it.
+`ENABLED` is the host operator's switch and the broker never renames or removes
+it (the dashboard switch below is a second, independent gate).
 Automatic holds live in SQLite and end by themselves:
 
 - **Before the model is invoked** (fresh readback, evidence files, route pin, any
@@ -235,8 +236,9 @@ actionable. Mainnet and external networks are never held by inference.
 
 A stalled worker cannot report its own stall through the queue it is failing to
 drain. The producer therefore raises it out of band when the receiver is
-unreachable, the worker heartbeat is stale, dispatch is paused with a backlog,
-or the ACK's `attention` list is not empty. After 15 minutes it posts to the
+unreachable, the worker heartbeat is stale, dispatch is paused on the receiver
+host with a backlog (switching it off from the dashboard is deliberate and is
+not a stall), or the ACK's `attention` list is not empty. After 15 minutes it posts to the
 optional webhook, repeats every six hours and posts once on recovery. The
 `/remediation` board shows the same reasons (details for administrators only).
 
@@ -245,18 +247,50 @@ Slack-compatible incoming-webhook URL. It is a credential: never Git, command
 lines or container environment text. The message names scopes and blockers,
 never evidence. Without it the stall is still recorded and shown.
 
+## Dispatch switch and queue clear
+
+Administrators have two controls on `/remediation`:
+
+- **Switch off / Switch on.** The switch is **off by default**: a new or upgraded
+  receiver dispatches nothing until an administrator switches it on. Switching
+  off starts nothing new; repairs in progress continue, and holds are still
+  reconciled and released. The receiver host's `ENABLED` file remains the
+  master switch: dispatch needs both, and the dashboard can never enable
+  dispatch that the host has disabled.
+- **Clear queue.** Marks every queued event `cleared` without repairing it.
+  Running and held runs are untouched. An issue that is still open returns on
+  the producer's next revision (a change, or the six-hourly reminder).
+
+`POST /api/remediation/dispatch` (`{"enabled": true|false}`) and
+`POST /api/remediation/clear` require an administrator session and the CSRF
+token; the read-only incident bearer token cannot use them. The web process
+records the request, with who and when, in `data/remediation-control.json`.
+The incident sidecar, which has that file read-only, forwards three fields on
+its next signed heartbeat: `seq`, `dispatch` (`on`/`off`) and `clearSeq`. The
+receiver validates that closed vocabulary, applies it inside the ingest
+transaction and reports what it applied in the ACK, so the board shows a
+request as pending until it is acknowledged (normally within a minute; longer
+while delivery is failing). The counters only move forward, so redelivery and
+a replayed older envelope change nothing. Payloads still never choose commands,
+targets, models, sessions or credentials.
+
+Controls are sent only after the receiver has announced them in an ACK, so an
+older receiver never sees an unknown envelope field. Deploy the receiver first;
+until then the buttons are disabled.
+
 ## Remediation board
 
 `/remediation` shows unique issues, queued event revisions, active work, waiting
-reasons, blockers and recovery. `/api/remediation` is read-only; the existing
+reasons, blockers and recovery. `GET /api/remediation` is read-only; the existing
 incident API bearer token or administrator session enables curated repair notes.
 Public responses omit target identities, session keys, resource locks and notes,
 and exclude non-visible networks from both cases and counts. SSE invalidation
 contains only a timestamp; 15-second polling provides a reconnect fallback.
 
 The receiver adds a bounded remediation snapshot to its authenticated delivery
-ACK, which the producer already persists. No separate public receiver, inbound
-control endpoint, session enumeration or executable report parsing is added.
+ACK, which the producer already persists. No separate public receiver, new
+inbound endpoint on the receiver, session enumeration or executable report
+parsing is added; the administrator controls above reuse the signed heartbeat.
 Missing/stale data is explicit, never an apparently healthy empty queue.
 
 Terminal receipts include `summary`, `changes` (verified changes only),
@@ -276,7 +310,8 @@ ongoing blocked outage. A resolved
 response is only shown as verified fixed when independent monitoring also records
 recovery; otherwise it awaits verification. Monitoring-only recovery is labelled
 recovered, without attributing an autonomous fix. Completed investigations are
-not automatically successful repairs, and no dashboard action mutates the queue.
+not automatically successful repairs. The only dashboard actions that change the
+queue are the administrator switch and clear above; neither starts a repair.
 
 DynamoDB scale-in controls are informational only when fresh complete collection
 proves the exact alarm, action and target-tracking policy/resource association.
