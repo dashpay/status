@@ -6,11 +6,11 @@ retried. Agent completion is not incident resolution (only fresh probes resolve)
 
 A blocker such as an unavailable account no longer stops dispatch until a person
 notices. Failures before the model is invoked return work to the queue; an
-unavailable route backs off and retries by itself; an attempt that provably
-never ran a model turn returns to the queue after its lease. Once a turn has
-run, only a terminal receipt declaring no pending work releases its locks: an
-idle parent session says nothing about children or remote commands underneath
-it. Only the operator removes ENABLED. What still needs a person is reported in
+unavailable route backs off and retries by itself; an attempt for which the
+Gateway shows no activity, no active run and no child session returns to the
+queue after its lease. Once a turn has done anything, only a terminal receipt
+declaring no pending work releases its locks: an idle parent session says
+nothing about children or remote commands underneath it. Only the operator removes ENABLED. What still needs a person is reported in
 the authenticated ACK so the producer can alert out of band.
 """
 import argparse
@@ -43,13 +43,15 @@ ROUTE_BACKOFF = (60, 120, 300, 600, 1800)
 # An invocation that ends this quickly without a verified result never got going.
 FAST_FAILURE = 180
 # A hold is normally ended by a terminal receipt. Past its lease, an attempt
-# that provably never ran a model turn returns to the queue; an idle session
-# alone never releases anything. The long lease exceeds the longest permitted run.
+# that provably did no work returns to the queue; an idle session alone never
+# releases anything. The long lease exceeds the longest permitted run.
 HOLD_LEASE = 7200
 QUICK_HOLD_LEASE = 900
 QUIET_ACTIVITY = 900
-# Session states that prove no turn is executing. Anything else keeps the hold.
-INACTIVE_STATES = {'done', 'idle', 'error', 'failed', 'aborted', 'cancelled', 'timeout'}
+# Session states with no turn executing. `done` and `failed` are what the
+# installed Gateway reports; the rest are accepted if a version uses them.
+# Anything else keeps the hold.
+INACTIVE_STATES = {'done', 'failed', 'killed', 'error', 'idle', 'aborted', 'cancelled', 'timeout'}
 # Bookkeeping-only completion checks: bounded attempts, spaced out.
 CHECK_ATTEMPTS = 3
 CHECK_BACKOFF = (900, 3600)
@@ -603,6 +605,9 @@ def session_inactive(session, now):
     """Positive evidence that no turn is executing in this session."""
     if session.get('status') not in INACTIVE_STATES or session.get('permissionModePending'):
         return False
+    # Where the Gateway states it outright, believe that over the status word.
+    if session.get('hasActiveRun') or session.get('activeRunIds'):
+        return False
     last = session.get('lastActivityAt')
     return not (type(last) in (int, float) and now * 1000 - last < QUIET_ACTIVITY * 1000)
 
@@ -632,49 +637,71 @@ def session_baseline(session):
     return json.dumps({k: session.get(k) for k in SESSION_IDENTITY}, sort_keys=True)
 
 
-def attempt_never_started(root, run, session, baseline):
-    """Positive evidence that this attempt ran no model turn, and therefore
-    started no child session and issued no command anywhere.
-
-    An idle parent session proves nothing about work still running underneath
-    it, so idleness alone never releases a hold. Any trace of a turn keeps it:
-    session identity or activity that differs from the snapshot taken before
-    the attempt, a runtime reply in the CLI output, or a receipt file of any
-    content. A receipt that declares pending children is an explicit statement
-    that work continues. Without a snapshot (a hold from an earlier release,
-    or one recovered after a restart) nothing is known and nothing is released.
-    """
+def cli_reported_a_turn(root, run):
+    """Whether the agent CLI's own output says a turn ran. A failed invocation
+    prints a JSON error object followed by plain text, so the leading object is
+    read on its own."""
     try:
-        before = json.loads(baseline)
-    except (TypeError, ValueError):
+        text = (root / (run + '.result.json')).read_text(errors='replace').lstrip()
+        reply, _ = json.JSONDecoder().raw_decode(text)
+    except (OSError, ValueError):
         return False
-    if not isinstance(before, dict) or any(session.get(k) != before.get(k) for k in SESSION_IDENTITY):
+    return isinstance(reply, dict) and (reply.get('ok') is True or reply.get('status') == 'ok' or bool(reply.get('result')))
+
+
+def attempt_did_no_work(root, run, session, baseline, started):
+    """Positive evidence that this attempt did nothing: no activity, no run
+    still executing and no child session, so nothing can be running underneath.
+
+    An idle parent session proves nothing by itself about children or remote
+    commands, so idleness alone never releases a hold. This asks the Gateway
+    for facts instead, as observed for an unavailable account: the invocation
+    registers a run that fails in milliseconds (so `lastRunId`, `endedAt` and
+    `status` do change) while `lastActivityAt` stays where it was, with no
+    active run and no child sessions. Every condition must hold:
+
+    - the Gateway states `hasActiveRun` false, `activeRunIds` empty and
+      `childOwnerSessionKeys` empty; a Gateway that does not report them
+      releases nothing;
+    - the session shows no activity since the attempt was claimed, and where a
+      snapshot was taken before the invocation, exactly the same last activity;
+    - no receipt file of any content: one that declares pending children is an
+      explicit statement that work continues;
+    - the CLI output does not report a turn.
+    """
+    if session.get('hasActiveRun') is not False or session.get('activeRunIds') != [] or session.get('childOwnerSessionKeys') != []:
         return False
+    last = session.get('lastActivityAt')
+    if started is None or (last is not None and (type(last) not in (int, float) or last >= started * 1000)):
+        return False
+    if baseline is not None:
+        try:
+            before = json.loads(baseline)
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(before, dict) or before.get('lastActivityAt') != last:
+            return False
     if (root / (run + '.completion.json')).exists():
         return False
-    try:
-        reply = json.loads((root / (run + '.result.json')).read_text())
-    except (OSError, ValueError):
-        reply = None
-    return not (isinstance(reply, dict) and (reply.get('runId') or reply.get('result')))
+    return not cli_reported_a_turn(root, run)
 
 
 def release_unstarted(db, root, row, session, now):
-    """The attempt never ran a turn (for example the account was unavailable).
+    """The attempt did no work (for example the account was unavailable).
     Nothing was played, so nothing is replayed: its events return to the queue
     and the slot and locks are freed. The route breaker paces the next attempt.
     """
     run = row['run']
     evidence = {'run': run, 'session': row['session_key'], 'status': session.get('status'), 'releasedAt': now,
-                **{k: session.get(k) for k in SESSION_IDENTITY},
-                'basis': 'hold lease expired; two observations showed the session inactive and unchanged since before the attempt, '
-                         'with no receipt and no runtime reply: no model turn ran; events returned to the queue; not service recovery'}
+                **{k: session.get(k) for k in SESSION_IDENTITY + ('hasActiveRun', 'activeRunIds', 'childOwnerSessionKeys', 'runtimeMs')},
+                'basis': 'hold lease expired; two observations showed no active run, no child session and no session activity since the attempt '
+                         'was claimed, with no receipt and no turn reported by the CLI; events returned to the queue; not service recovery'}
     path = root / (run + '.released.json')
     path.write_text(json.dumps(evidence, indent=2)); path.chmod(0o600)
     with db:
         db.execute("update events set status='queued',started=null,finished=null,invoked=null where status='uncertain' and result=?", (run,))
         db.execute('insert into lifecycle(run,reconciled,note) values(?,?,?) on conflict(run) do update set reconciled=excluded.reconciled,note=excluded.note',
-                   (run, now, 'attempt never ran a model turn; events returned to the queue'))
+                   (run, now, 'attempt did no work (no activity, active run or child session); events returned to the queue'))
     (root / ('HELD-' + run)).unlink(missing_ok=True)
     restore_legacy_pause(db, root, run)
 
@@ -780,14 +807,13 @@ def reconcile_sessions(root, session_reader=describe_session, now=None):
             try:
                 session = session_reader(row['session_key'])
                 # A hold ends by a terminal receipt. The only other way out is
-                # positive evidence that the attempt never ran a turn at all, and
-                # so left nothing running underneath: past the lease, with the
-                # session inactive and unchanged since before the attempt, twice.
-                # An idle parent alone, a pending-children receipt, an active or
-                # unreadable session all keep the hold.
+                # positive Gateway evidence that the attempt did no work and so
+                # left nothing running underneath: past the lease, twice. An idle
+                # parent alone, a child session, a pending-children receipt, an
+                # active or unreadable session all keep the hold.
                 life = db.execute('select baseline from lifecycle where run=?', (run,)).fetchone()
                 unstarted = (lease_expired(row, now) and session_inactive(session, now)
-                             and attempt_never_started(root, run, session, life['baseline'] if life else None))
+                             and attempt_did_no_work(root, run, session, life['baseline'] if life else None, row['started']))
                 if not unstarted:
                     with db:
                         db.execute('update lifecycle set idle_since=null where run=? and idle_since is not null', (run,))
@@ -1038,8 +1064,8 @@ def worker(args, stop):
             if prepared is None:
                 continue
             batch, message = prepared
-            # Snapshot the session before the attempt. "Unchanged since this" is
-            # later the only evidence that the attempt never ran a turn.
+            # Snapshot the session before the attempt. Its last activity must be
+            # exactly this afterwards for the attempt to count as having done nothing.
             baseline = session_baseline(describe_session(session))
             invoked_at = time.time()
             with connect(root / 'inbox.sqlite') as db:

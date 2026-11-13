@@ -395,33 +395,44 @@ class Tests(unittest.TestCase):
         for t in [now,now+31]:b.reconcile_sessions(root,lambda _:{**self.done(),'abortedLastRun':True},t)
         self.assertEqual(self.db.execute('select status from events').fetchone()[0],'uncertain')
 
+    # What the installed Gateway (OpenClaw 2026.11.3) printed and reported when
+    # the account was unavailable: a JSON error object followed by plain text.
+    CLI_FAILURE = json.dumps({'ok': False, 'runId': 'this-attempt', 'origin': 'gateway', 'error': {
+        'type': 'cli_error', 'message': 'Auth profile "openai:work" is temporarily unavailable for openai/gpt-6-astra.'}}, indent=2) \
+        + '\n[openclaw] The CLI command failed.\n[openclaw] Reason: Auth profile "openai:work" is temporarily unavailable.\n'
+
     def unstarted_run(self):
-        """A hold whose session was snapshotted before the attempt, as the worker
-        does, and that the Gateway still reports exactly as it was."""
+        """A hold as that Gateway shows one for an unavailable account. The
+        worker snapshots the session before invoking. The invocation then
+        registers a run that fails in milliseconds: a new run id, end time and
+        status, but no activity, no active run and no child session."""
         root,run=self.uncertain_run(); now=time.time()
-        before={'status':'error','endedAt':(now-3600)*1000,'lastRunId':'earlier-run','lastActivityAt':(now-3600)*1000}
+        before={'status':'done','endedAt':(now-3600)*1000,'lastRunId':'earlier-run','lastActivityAt':(now-3600)*1000,
+                'hasActiveRun':False,'activeRunIds':[],'childOwnerSessionKeys':[]}
+        failed={**before,'status':'failed','lastRunId':'this-attempt','endedAt':(now+0.05)*1000,'runtimeMs':48}
+        (root/(run+'.result.json')).write_text(self.CLI_FAILURE)
         with self.db: self.db.execute('insert into lifecycle(run,baseline) values(?,?)',(run,b.session_baseline(before)))
-        return root,run,now,before
+        return root,run,now,failed
 
     def held(self):
         return self.db.execute("select status from events where id=?",('a'*24+':1',)).fetchone()[0]
 
-    def test_an_attempt_that_never_ran_returns_to_the_queue_after_its_lease(self):
-        root,run,now,before=self.unstarted_run()
+    def test_an_attempt_that_did_no_work_returns_to_the_queue_after_its_lease(self):
+        root,run,now,failed=self.unstarted_run()
         def broken(_): raise OSError('gateway unavailable')
         # Inside the lease nothing is released, however idle the session looks.
-        for t in [now,now+31,now+62,now+93]: b.reconcile_sessions(root,lambda _:before,t)
+        for t in [now,now+31,now+62,now+93]: b.reconcile_sessions(root,lambda _:failed,t)
         self.assertEqual(self.held(),'uncertain')
         self.assertIn('hold',[a['code'] for a in b.attention(self.db,root,now+1801)])
         late=now+b.HOLD_LEASE+1
         # Past the lease an active, recently active or unreadable session keeps it.
-        for reader in [lambda _:{**before,'status':'running'}, lambda _:{**before,'lastActivityAt':late*1000}, broken]:
+        for reader in [lambda _:{**failed,'status':'running','hasActiveRun':True,'activeRunIds':['r']}, lambda _:{**failed,'lastActivityAt':late*1000}, broken]:
             for t in [late,late+31,late+62,late+93]: b.reconcile_sessions(root,reader,t)
             self.assertEqual(self.held(),'uncertain')
-        b.reconcile_sessions(root,lambda _:before,late+200)
-        b.reconcile_sessions(root,lambda _:before,late+231)
+        b.reconcile_sessions(root,lambda _:failed,late+200)
+        b.reconcile_sessions(root,lambda _:failed,late+231)
         self.assertEqual(self.held(),'uncertain','one observation is not enough')
-        b.reconcile_sessions(root,lambda _:before,late+262)
+        b.reconcile_sessions(root,lambda _:failed,late+262)
         row=self.db.execute('select * from events').fetchone()
         self.assertEqual((row['status'],row['started'],row['invoked']),('queued',None,None),'nothing was played, so it is simply queued again')
         self.assertTrue((root/(run+'.released.json')).exists())
@@ -432,7 +443,7 @@ class Tests(unittest.TestCase):
         self.assertNotEqual(b.attempt_id([r for r,_ in batch]),run,'a new attempt with its own artifacts')
 
     def test_an_idle_parent_never_releases_work_that_may_still_be_running(self):
-        root,run,now,before=self.unstarted_run()
+        root,run,now,failed=self.unstarted_run()
         late=now+b.HOLD_LEASE+1
         def settle(reader):
             for t in [late,late+61,late+122,late+183,late+244]: b.reconcile_sessions(root,reader,t)
@@ -443,34 +454,48 @@ class Tests(unittest.TestCase):
         # A receipt that says children are still pending is a statement that work continues.
         receipt.write_text(json.dumps({'runId':run,'terminal':True,'pendingChildren':1,'outcome':'blocked',
                                        'finishedAt':datetime.datetime.fromtimestamp(time.time()+1,datetime.timezone.utc).isoformat()}))
-        settle(lambda _:before)
+        settle(lambda _:failed)
         receipt.write_text('not even json')
-        settle(lambda _:before)
+        settle(lambda _:failed)
         receipt.unlink()
-        # The session changed since the snapshot: a turn ran, whatever state it is in now.
-        settle(lambda _:{**before,'lastRunId':'a-turn-ran'})
-        settle(lambda _:{**before,'lastActivityAt':(now+5)*1000})
+        # The Gateway reports a child session, or a run still executing.
+        settle(lambda _:{**failed,'childOwnerSessionKeys':['agent:main:subagent:1']})
+        settle(lambda _:{**failed,'hasActiveRun':True})
+        settle(lambda _:{**failed,'activeRunIds':['still-running']})
+        # A Gateway that does not report those facts gives no evidence at all.
+        settle(lambda _:{k:v for k,v in failed.items() if k not in ('hasActiveRun','activeRunIds','childOwnerSessionKeys')})
+        # Activity after the attempt was claimed: a turn did something.
+        settle(lambda _:{**failed,'lastActivityAt':(now+5)*1000})
+        settle(lambda _:{**failed,'status':'done','lastActivityAt':(now+2)*1000,'endedAt':(now+2)*1000})
         settle(lambda _:self.done())
-        # The CLI printed a runtime reply.
-        result=root/(run+'.result.json'); original=result.read_text()
-        result.write_text(json.dumps({'status':'error','runId':'runtime-run'}))
-        settle(lambda _:before)
-        result.write_text(original)
-        # No snapshot: a hold from an earlier release, or recovered after a restart.
+        # Activity that differs from the snapshot, even though it predates the claim.
+        settle(lambda _:{**failed,'lastActivityAt':(now-60)*1000})
+        # The CLI itself reports a turn.
+        result=root/(run+'.result.json')
+        for output in [json.dumps({'ok':True,'runId':'x'})+'\ntrailing text', json.dumps({'status':'ok','result':{'meta':{}}})]:
+            result.write_text(output)
+            settle(lambda _:failed)
+        result.write_text(self.CLI_FAILURE)
+        # Only with every condition met is the attempt known to have done nothing.
+        for t in [late+400,late+461]: b.reconcile_sessions(root,lambda _:failed,t)
+        self.assertEqual(self.held(),'queued')
+
+    def test_a_hold_from_before_snapshots_is_judged_on_the_same_gateway_facts(self):
+        root,run,now,failed=self.unstarted_run()
         with self.db: self.db.execute('update lifecycle set baseline=null')
-        settle(lambda _:before)
-        # Only with every trace absent is the attempt known never to have run.
-        with self.db: self.db.execute('update lifecycle set baseline=?',(b.session_baseline(before),))
-        for t in [late+400,late+461]: b.reconcile_sessions(root,lambda _:before,t)
+        late=now+b.HOLD_LEASE+1
+        for t in [late,late+61]: b.reconcile_sessions(root,lambda _:{**failed,'lastActivityAt':(now+5)*1000},t)
+        self.assertEqual(self.held(),'uncertain','activity after the claim keeps it, snapshot or not')
+        for t in [late+100,late+161]: b.reconcile_sessions(root,lambda _:failed,t)
         self.assertEqual(self.held(),'queued')
 
     def test_fast_failure_uses_the_short_lease(self):
-        root,run,now,before=self.unstarted_run()
+        root,run,now,failed=self.unstarted_run()
         with self.db: self.db.execute('update events set finished=started+5')
-        for t in [now+60,now+121]: b.reconcile_sessions(root,lambda _:before,t)
+        for t in [now+60,now+121]: b.reconcile_sessions(root,lambda _:failed,t)
         self.assertEqual(self.held(),'uncertain')
         late=now+b.QUICK_HOLD_LEASE+1
-        for t in [late,late+61]: b.reconcile_sessions(root,lambda _:before,t)
+        for t in [late,late+61]: b.reconcile_sessions(root,lambda _:failed,t)
         self.assertEqual(self.held(),'queued')
 
     def test_bookkeeping_check_is_not_spent_on_an_unavailable_route_and_retries(self):

@@ -142,30 +142,36 @@ themselves; one that may still have work running is kept and reported:
   `route_breaker`. Admission backs off 1, 2, 5, 10, then 30 minutes; the first
   claim after each delay is the probe and success closes the breaker. There is
   no fallback model or account.
-- **An attempt that never ran returns to the queue.** The worker snapshots the
-  session (`lastRunId`, `endedAt`, `lastActivityAt`) immediately before it
-  invokes the agent. A hold older than its lease (15 minutes when the
-  invocation ended at once, two hours otherwise) is returned to the queue when
-  two Gateway observations a minute apart show the session inactive
-  (`INACTIVE_STATES`, no pending permission, quiet for 15 minutes) **and
-  unchanged since that snapshot**, with no receipt file and no runtime reply in
-  the CLI output. That is positive evidence that no model turn ran, so no child
-  session was started and no command was issued. Nothing was played, so
-  nothing is replayed; `<run>.released.json` records the basis and the route
-  breaker paces the next attempt. This is what recovers from an unavailable
-  account.
-- **Once a turn has run, only a receipt releases its locks.** An idle parent
-  session proves nothing about children or remote commands still running
-  underneath it, so idleness never releases a hold. Any trace of a turn keeps
-  it: a session that differs from the snapshot, a runtime reply, or a receipt
-  file of any content. A receipt with `pendingChildren` above zero is an
-  explicit statement that work continues. A hold without a snapshot (from an
-  earlier release, or recovered after a restart), an active session and a
-  Gateway that cannot be read are all kept. Such a hold is ended by a terminal
-  receipt declaring no pending work (the bookkeeping check asks for one) or by
-  a person, and it is reported in `attention` after 30 minutes. Check
-  `INACTIVE_STATES` against what `sessions.describe` reports on the installed
-  Gateway; an unlisted state only means the hold is kept and reported.
+- **An attempt that did no work returns to the queue.** A hold older than its
+  lease (15 minutes when the invocation ended at once, two hours otherwise) is
+  returned to the queue when two Gateway observations a minute apart give
+  positive evidence that nothing can be running underneath it:
+  - `hasActiveRun` is false, `activeRunIds` is empty and
+    `childOwnerSessionKeys` is empty, stated by the Gateway (one that does not
+    report them releases nothing);
+  - `lastActivityAt` shows no activity since the attempt was claimed, and is
+    exactly what the worker snapshotted immediately before invoking the agent,
+    where that snapshot exists;
+  - the session is inactive (`INACTIVE_STATES`, no pending permission, quiet
+    for 15 minutes);
+  - there is no receipt file and the CLI output reports no turn.
+
+  This is how OpenClaw 2026.11.3 reports an unavailable account: the CLI
+  prints `ok: false` with a `cli_error`, and the session shows a new
+  `lastRunId` with `status: failed` and a runtime of about 50 ms, while
+  `lastActivityAt` stays where it was. Nothing was played, so nothing is
+  replayed; `<run>.released.json` records the basis and the route breaker
+  paces the next attempt.
+- **Once a turn has done anything, only a receipt releases its locks.** An idle
+  parent session proves nothing about children or remote commands still
+  running underneath it, so idleness never releases a hold. Activity after the
+  claim, a child session, a run still executing, a turn reported by the CLI
+  and a receipt file of any content all keep it. A receipt with
+  `pendingChildren` above zero is an explicit statement that work continues.
+  An active session and a Gateway that cannot be read keep it too. Such a hold
+  is ended by a terminal receipt declaring no pending work (the bookkeeping
+  check asks for one) or by a person, and it is reported in `attention` after
+  30 minutes.
 - **Bookkeeping check.** Up to three attempts per run (immediately, after 15
   minutes, after an hour). The route is pinned before an attempt is recorded,
   so an unavailable route defers the check instead of consuming it.
