@@ -165,7 +165,7 @@ class CoreCompat(unittest.TestCase):
         self.assertIsInstance(self.ok('getpeerinfo'), list)
         # These need a registered masternode or a ChainLock. They must exist and
         # fail for that reason, not as an unknown method or a rejected argument.
-        for args, reason in [(('masternode', 'status'), r'(?i)not a masternode'), (('getbestchainlock',), r'(?i)chainlock')]:
+        for args, reason in [(('masternode', 'status'), r'(?i)active masternode|not a masternode'), (('getbestchainlock',), r'(?i)chainlock')]:
             value, error = self.cli(*args)
             if error is not None:
                 self.assertRegex(error, reason, '%s on %s' % (' '.join(args), IMAGE))
