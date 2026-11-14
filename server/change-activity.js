@@ -55,7 +55,7 @@ function episode(prev, latest, now, max) {
 }
 
 export function recognizeActivity({ settings, states, previous, now = Date.now() }) {
-  const result = { schemaVersion: 1, at: iso(now), networks: {}, hosts: {} };
+  const result = { schemaVersion: 1, at: iso(now), networks: {}, hosts: {}, crashing: [] };
   for (const n of list(settings?.networks)) {
     // Mainnet and externally operated networks are never held by inference.
     if (!text(n.name) || n.chainType === 'mainnet' || n.kind === 'external') continue;
@@ -66,7 +66,11 @@ export function recognizeActivity({ settings, states, previous, now = Date.now()
       const key = activityKey(n.name, h), old = previous?.hosts?.[key];
       const signals = hostSignals(h, now);
       // A crash loop drops the hold and its history; the fault is actionable now.
-      const entry = hostCrashing(h, now) ? null : episode(old, signals.length ? Math.max(...signals.map((x) => x.at)) : null, now, HOST_HOLD_MAX_MS);
+      // It is also named, so a rolling change inferred from other hosts of the
+      // network cannot hold this host's fault with theirs.
+      const crashing = hostCrashing(h, now);
+      if (crashing) result.crashing.push(key);
+      const entry = crashing ? null : episode(old, signals.length ? Math.max(...signals.map((x) => x.at)) : null, now, HOST_HOLD_MAX_MS);
       if (!entry) continue;
       result.hosts[key] = { ...entry, network: n.name, host: String(h.name || '').slice(0, 120), instanceId: h.instanceId || null,
         signals: signals.length ? signals.slice(0, 8).map(({ kind, name }) => ({ kind, name })) : list(old?.signals).slice(0, 8) };

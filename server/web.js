@@ -14,7 +14,7 @@ import { operationMaintenance } from './operation-maintenance.js';
 import { loadIncidentState, publicIssues, apiAuthorized, readSecret } from './incidents.js';
 import { remediationView } from './remediation.js';
 import { receiveRelease } from './release-webhook.js';
-import { loadControl, requestClear, setDispatch } from './remediation-control.js';
+import { againstReceiver, loadControl, requestClear, setDispatch } from './remediation-control.js';
 import { publicInventory } from './aws-public.js';
 import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, loadSettings, memberOf, operatorFor, readJSON, saveSettings, validateSettings, writeAtomic } from '../shared/settings.js';
 import { expectations } from '../shared/monitoring.js';
@@ -139,7 +139,8 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   app.get('/api/remediation', (req, res) => {
     reloadSettings();
     const full = isAdmin(req) || apiAuthorized(req.get('authorization'), readSecret(process.env.INCIDENT_API_TOKEN_FILE));
-    res.json(remediationView({ ...loadIncidentState(dataDir), maintenance:operationMaintenance(dataDir, settings, clock()), control: loadControl(dataDir) }, { full, visibleNetworks: visible(req).map((n) => n.name), now: clock() }));
+    const incidents = loadIncidentState(dataDir);
+    res.json(remediationView({ ...incidents, maintenance:operationMaintenance(dataDir, settings, clock()), control: againstReceiver(loadControl(dataDir), incidents?.delivery?.receiver?.control) }, { full, visibleNetworks: visible(req).map((n) => n.name), now: clock() }));
   });
   app.get('/api/me', (req, res) => {
     const u = user(req);
@@ -376,13 +377,15 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
 
   // Remediation controls: administrators only. They record the request; the
   // incident sidecar forwards it on its next signed heartbeat and the board
-  // shows it as pending until the receiver acknowledges it.
+  // shows it as pending until the receiver acknowledges it. A command is
+  // numbered above what the receiver last acknowledged, so it is never stale.
+  const acknowledged = () => loadIncidentState(dataDir)?.delivery?.receiver?.control;
   const controlled = (res, control) => { push('remediation', { at: new Date(clock()).toISOString() }); res.json({ control }); };
   app.post('/api/remediation/dispatch', ...adminWrite, (req, res) => {
     if (typeof req.body?.enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be true or false' });
-    controlled(res, setDispatch(dataDir, req.body.enabled, req.session.user.login, clock()));
+    controlled(res, setDispatch(dataDir, req.body.enabled, req.session.user.login, clock(), acknowledged()));
   });
-  app.post('/api/remediation/clear', ...adminWrite, (req, res) => controlled(res, requestClear(dataDir, req.session.user.login, clock())));
+  app.post('/api/remediation/clear', ...adminWrite, (req, res) => controlled(res, requestClear(dataDir, req.session.user.login, clock(), acknowledged())));
 
   // Infrastructure pages: full detail for any account with access; before
   // sign-in a sanitized view (statistics and spend, nothing identifying).

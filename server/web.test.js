@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createWeb } from './web.js';
@@ -329,6 +329,19 @@ test('remediation switch and queue clear are administrator-only, CSRF-protected 
     assert.deepEqual([view.control.requested, view.control.applied, view.control.changedBy], ['on', null, 'someone']);
     assert.equal((await post(w, '/api/remediation/dispatch', { enabled: false }, csrf)).status, 200);
     assert.equal(stored(w).dispatch, 'off');
+    // The file is lost while the worker is on at a sequence the new file is far below.
+    mkdirSync(join(w.dataDir, 'incidents'), { recursive: true });
+    writeFileSync(join(w.dataDir, 'incidents', 'state.json'), JSON.stringify({ generatedAt: new Date().toISOString(), issues: [], sources: {}, outbox: [],
+      delivery: { lastAckAt: new Date().toISOString(), receiver: { control: { seq: 9, dispatch: 'on', clearSeq: 4, localEnabled: true } } } }));
+    rmSync(join(w.dataDir, 'remediation-control.json'));
+    const lost = (await (await w.req('/api/remediation')).json()).control;
+    assert.deepEqual([lost.requested, lost.reset], ['off', true], 'the board shows OFF and says the setting was lost');
+    assert.equal((await post(w, '/api/remediation/dispatch', { enabled: false }, csrf)).status, 200);
+    assert.deepEqual([stored(w).seq, stored(w).dispatch, stored(w).clearSeq], [11, 'off', 4], 'the command is numbered above the worker, and no clear rides along');
+    rmSync(join(w.dataDir, 'remediation-control.json'));
+    assert.equal((await post(w, '/api/remediation/clear', undefined, csrf)).status, 200);
+    assert.deepEqual([stored(w).seq, stored(w).dispatch, stored(w).clearSeq], [11, 'off', 11], 'a clear after the loss is not stale either, and does not switch on');
+    assert.equal((await (await w.req('/api/remediation')).json()).control.reset, false);
   } finally { w.close(); }
   const member = await start(42);
   try {

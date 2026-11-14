@@ -94,3 +94,11 @@ test('an external operation holds the network, settles after it releases the jou
   for (; at - now <= NETWORK_HOLD_MAX_MS; at += 10 * 60_000) state = recognise([host('mn-1', [], {}, at)], state, at, { owner: 'dashnet-runner' });
   assert.equal(state.networks.testnet.held, false, 'inference is bounded even while the claim remains');
 });
+
+test('a crash loop is named while other hosts roll, so the network hold cannot cover it', () => {
+  const state = recognise([host('mn-1', [container('core', 60_000)]), host('mn-2', [container('core', 30_000)]), host('mn-3', [container('core', 5_000, { restarts: 4 })]), host('mn-4')]);
+  assert.deepEqual([state.networks.testnet.held, state.networks.testnet.reason], [true, 'rolling']);
+  assert.deepEqual(state.crashing, ['testnet/i-mn-3']);
+  assert.equal(state.hosts['testnet/i-mn-3'], undefined);
+  assert.deepEqual(recognise([host('mn-1', [container('core', 60_000)]), host('mn-2')]).crashing, []);
+});

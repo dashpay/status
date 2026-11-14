@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { remediationView } from './remediation.js';
+import { againstReceiver } from './remediation-control.js';
 
 const now = Date.now(), at = new Date(now).toISOString();
 const issue = (id, extra = {}) => ({ id, domain: 'network', scope: 'testnet', target: 'PRIVATE-HOST', code: 'host_health', severity: 'critical', status: 'open', firstSeen: at, lastSeen: at, ...extra });
@@ -116,6 +117,12 @@ test('the switch shows what was requested and what the worker acknowledged; clea
   assert.equal(remediationView(data, options).control.pending, false);
   const publicView = remediationView(data, { ...options, full: false });
   assert.equal(publicView.control.applied, 'on'); assert.doesNotMatch(JSON.stringify(publicView), /PRIVATE/);
+  assert.equal(remediationView(data, options).control.reset, false);
+  // The control file was lost while the worker was on: the board says OFF and why.
+  data.control = againstReceiver({ schemaVersion: 1, seq: 0, dispatch: 'off', clearSeq: 0 }, data.delivery.receiver.control);
+  const lost = remediationView(data, options).control;
+  assert.deepEqual([lost.requested, lost.applied, lost.pending, lost.reset, lost.changedBy], ['off', 'on', true, true, null]);
+  assert.equal(remediationView(data, { ...options, full: false }).control.reset, undefined);
   const older = state([issue('a')], []);
   assert.deepEqual([remediationView(older, options).control.supported, remediationView(older, options).control.requested, remediationView(older, options).control.applied], [false, 'off', null]);
 });

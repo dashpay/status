@@ -8,7 +8,7 @@ import { loadSettings, readJSON } from '../shared/settings.js';
 import { deriveIssues, reconcile, loadIncidentState, saveIncidentState, readSecret, signedHeaders, validateDestination } from './incidents.js';
 import { recognizeActivity } from './change-activity.js';
 import { stallAlert, validateAlertUrl } from './stall-alert.js';
-import { loadControl, wireControl } from './remediation-control.js';
+import { againstReceiver, loadControl, wireControl } from './remediation-control.js';
 
 export async function cycle({ dataDir, ci, destination, secret, alertUrl = null, fetcher = fetch, now = Date.now() }) {
   const settings = loadSettings(join(dataDir, 'settings.json'));
@@ -47,7 +47,10 @@ export async function cycle({ dataDir, ci, destination, secret, alertUrl = null,
     // The administrator switch and queue clear ride the signed heartbeat. They
     // are sent only to a receiver that has advertised support: an older one
     // rejects unknown envelope fields, which must never quarantine events.
-    const control = state.delivery?.receiver?.control ? wireControl(loadControl(dataDir)) : null;
+    // The file is read against the receiver's last acknowledgement, so a lost or
+    // damaged file switches the receiver off instead of being ignored as stale.
+    const acknowledged = state.delivery?.receiver?.control;
+    const control = acknowledged ? wireControl(againstReceiver(loadControl(dataDir), acknowledged)) : null;
     const body = JSON.stringify({ schemaVersion: 1, producer: 'dash-status', sentAt: new Date(now).toISOString(), events, ...(control ? { control } : {}) });
     try {
       const response = await fetcher(validateDestination(destination), { method: 'POST', headers: signedHeaders(body, secret, now), body, redirect: 'error', signal: AbortSignal.timeout(15_000) });

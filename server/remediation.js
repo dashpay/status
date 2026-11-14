@@ -92,7 +92,7 @@ export function remediationView(state, { full = false, visibleNetworks = [], now
     pending: !!acknowledged && Number.isSafeInteger(requested?.seq) && Number.isSafeInteger(acknowledged.seq) && acknowledged.seq < requested.seq,
     localEnabled: acknowledged ? acknowledged.localEnabled === true : null,
     lastClear: Number.isFinite(acknowledged?.lastClear?.at) ? { at: iso(acknowledged.lastClear.at * 1000), count: Number.isSafeInteger(acknowledged.lastClear.count) ? acknowledged.lastClear.count : null } : null,
-    ...(full ? { changedAt: iso(requested?.updatedAt), changedBy: text(requested?.updatedBy, 39), clearedAt: iso(requested?.clearedAt), clearedBy: text(requested?.clearedBy, 39) } : {}) };
+    ...(full ? { reset: requested?.recovered === true, changedAt: iso(requested?.updatedAt), changedBy: text(requested?.updatedBy, 39), clearedAt: iso(requested?.clearedAt), clearedBy: text(requested?.clearedBy, 39) } : {}) };
   return { schemaVersion: 1, public: !full, generatedAt: iso(state?.generatedAt), workerAt, control,
     stalled: attention.length > 0, attention: full ? attention : undefined, stalledSince: full ? iso(state?.stall?.since) : undefined,
     stale: !producerFresh || !workerFresh, producerFresh, workerFresh, truncated: feed?.truncated === true,

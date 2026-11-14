@@ -135,19 +135,23 @@ export function deriveIssues({ settings, states, ci, aws, maintenance = {}, acti
   for (const n of list(settings.networks)) {
     const s = states?.[n.name], generation = n.generation ?? s?.generation ?? n.coreNetwork ?? 'unversioned';
     const identity = [generation], key = `network:${n.name}`, max = Math.max(180_000, settings.pollSeconds * 4000);
-    const suppressed = ['creating', 'services'].includes(n.lifecycle?.status) || n.lifecycle?.platform?.status === 'starting'
-      || maintenance[n.name]?.active === true || n.maintenance?.active === true || s?.maintenance?.active === true
-      // A journal claim is held through the bounded activity result, so a runner
-      // that crashed without releasing it cannot silence the network forever.
-      || (activity ? activity.networks?.[n.name]?.held === true : text(s?.journal?.owner));
+    const declared = ['creating', 'services'].includes(n.lifecycle?.status) || n.lifecycle?.platform?.status === 'starting'
+      || maintenance[n.name]?.active === true || n.maintenance?.active === true || s?.maintenance?.active === true;
+    // A journal claim is held through the bounded activity result, so a runner
+    // that crashed without releasing it cannot silence the network forever.
+    const suppressed = declared || (activity ? activity.networks?.[n.name]?.held === true : text(s?.journal?.owner));
     suppressions[n.name] = suppressed;
+    // A rolling change is only inferred from other hosts restarting cleanly. It
+    // says nothing about a host in a crash loop, whose fault stays actionable.
+    // A declared operation or a journal claim still holds every host.
+    const crashing = new Set(!declared && activity?.networks?.[n.name]?.reason === 'rolling' && Array.isArray(activity.crashing) ? activity.crashing : []);
     // A recognised change on one host (for example the services host carrying
     // the quorum server) also holds that network's public endpoint checks.
     const hostChanging = Object.values(activity?.hosts || {}).some((v) => v?.network === n.name && v.held === true);
     // Collected before the freshness exits below: a collector gap must not
     // release the EC2 status check of a host that is still held.
     for (const v of Object.values(activity?.hosts || {})) if (v?.network === n.name && v.held === true && text(v.instanceId)) heldInstances.add(v.instanceId);
-    if (suppressed) for (const h of list(s?.hosts)) if (text(h.instanceId)) heldInstances.add(h.instanceId);
+    if (suppressed) for (const h of list(s?.hosts)) if (text(h.instanceId) && !crashing.has(activityKey(n.name, h))) heldInstances.add(h.instanceId);
     const current = source(key, s?.generatedAt, object(s) && Array.isArray(s.hosts), max);
     source(`${key}:monitor`, iso(now), true, max);
     check('network', n.name, 'collector', 'collector_stale', key, current, identity, { suppressed });
@@ -177,9 +181,10 @@ export function deriveIssues({ settings, states, ci, aws, maintenance = {}, acti
       const hi = [...identity, resource || `unidentified:${h.name}`], hk = `${key}:host:${resource || h.name}`;
       const valid = source(hk, h.probe?.at, discoveryOk && text(resource) && h.state === 'running'
         && h.probe?.ok === true && !h.probe.skipped && object(h.probe.data), max);
-      const held = suppressed || activity?.hosts?.[activityKey(n.name, h)]?.held === true;
+      const exempt = crashing.has(activityKey(n.name, h));
+      const held = !exempt && (suppressed || activity?.hosts?.[activityKey(n.name, h)]?.held === true);
       const id = check('network', n.name, h.name, 'host_health', hk, valid, hi, {
-        kind: 'host', suppressed: held, healthyRules: valid ? hostProofs(row, n, settings, coreTip, platformTip, now) : [],
+        kind: 'host', suppressed: held, exempt, healthyRules: valid ? hostProofs(row, n, settings, coreTip, platformTip, now) : [],
         sampleKey: idFor('network', n.name, resource, 'explorer_sample', identity), maxLagBlocks: settings.thresholds.platformLagBlocks,
       });
       if (fresh(h.probe?.at, now, max) && text(resource)) {
@@ -336,7 +341,8 @@ export function reconcile(previous, derived, now = Date.now()) {
     Object.assign(issue, { revision, lastEventAt: iso(now) });
     events.push({ schemaVersion: 1, eventId: `${issue.id}:${revision}`, occurredAt: iso(now), transition, issue: structuredClone(issue) });
   };
-  const suppressed = (issue, check) => check?.suppressed === true || (issue.domain === 'network' && derived.suppressions?.[issue.scope] === true);
+  // `exempt` marks a check the network-wide hold must not cover (a crash loop).
+  const suppressed = (issue, check) => check?.suppressed === true || (check?.exempt !== true && issue.domain === 'network' && derived.suppressions?.[issue.scope] === true);
   const positive = (issue, check) => {
     const s = derived.sources?.[check?.sourceKey];
     const at = Date.parse(check?.observedAt), lastFault = Date.parse(issue.lastFaultAt || issue.observedAt || issue.firstSeen);

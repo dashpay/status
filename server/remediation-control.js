@@ -19,16 +19,34 @@ export function loadControl(dataDir) {
     clearedAt: time(c.clearedAt), clearedBy: text(c.clearedBy, 39) };
 }
 
-const save = (dataDir, control) => { writeAtomic(path(dataDir), JSON.stringify(control)); return control; };
+// The receiver keeps the highest sequence it has applied and ignores anything
+// not above it. It only ever learns sequences from this file, so a receiver
+// that is ahead means the file was lost, damaged or replaced by an older copy.
+// Read as written, such a file could not switch the receiver off: its OFF, and
+// every later command numbered from it, would be discarded as stale. So it is
+// read as OFF at a sequence the receiver accepts. No clear is inferred: the
+// clear counter is the one the receiver already applied.
+// `acknowledged` is the control block of the receiver's last acknowledgement.
+export function againstReceiver(control, acknowledged) {
+  if (!count(acknowledged?.seq) || acknowledged.seq <= control.seq) return control;
+  // Already off: repeat its own sequence, which changes nothing. Otherwise one above.
+  const seq = acknowledged.dispatch === 'off' ? acknowledged.seq : acknowledged.seq + 1;
+  return { ...control, seq, dispatch: 'off', clearSeq: count(acknowledged.clearSeq) ? Math.min(acknowledged.clearSeq, acknowledged.seq) : 0,
+    updatedAt: null, updatedBy: null, recovered: true };
+}
 
-export function setDispatch(dataDir, enabled, actor, now = Date.now()) {
+const save = (dataDir, control) => { writeAtomic(path(dataDir), JSON.stringify({ ...control, recovered: undefined })); return loadControl(dataDir); };
+
+// Both commands are numbered above the file and above what the receiver has
+// acknowledged, so neither can be stale after the file was lost.
+export function setDispatch(dataDir, enabled, actor, now = Date.now(), acknowledged = null) {
   if (typeof enabled !== 'boolean') throw new Error('enabled must be true or false');
-  const c = loadControl(dataDir);
+  const c = againstReceiver(loadControl(dataDir), acknowledged);
   return save(dataDir, { ...c, seq: c.seq + 1, dispatch: enabled ? 'on' : 'off', updatedAt: new Date(now).toISOString(), updatedBy: text(actor, 39) });
 }
 
-export function requestClear(dataDir, actor, now = Date.now()) {
-  const c = loadControl(dataDir), seq = c.seq + 1;
+export function requestClear(dataDir, actor, now = Date.now(), acknowledged = null) {
+  const c = againstReceiver(loadControl(dataDir), acknowledged), seq = c.seq + 1;
   return save(dataDir, { ...c, seq, clearSeq: seq, clearedAt: new Date(now).toISOString(), clearedBy: text(actor, 39) });
 }
 

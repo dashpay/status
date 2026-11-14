@@ -778,6 +778,22 @@ class Tests(unittest.TestCase):
         self.assertFalse(b.dispatch_on(self.db))
         self.assertEqual(self.db.execute('select status from events').fetchone()[0], 'running', 'switching off never interrupts work in progress')
 
+    def test_a_producer_that_lost_its_counter_switches_off_with_the_acknowledged_sequence(self):
+        root = pathlib.Path(self.temp.name)
+        control = lambda seq, dispatch, clear: {**envelope(), 'control': {'seq': seq, 'dispatch': dispatch, 'clearSeq': clear}}
+        b.ingest(self.db, control(5, 'on', 3))
+        b.ingest(self.db, envelope(event()))
+        # A control file recreated from nothing numbers its commands from zero.
+        b.ingest(self.db, control(1, 'off', 0))
+        self.assertTrue(b.dispatch_on(self.db), 'a lower counter is ignored, so the producer must not send one')
+        # The producer therefore answers with what this receiver acknowledged:
+        # one above its sequence, and its own clear counter.
+        acknowledged = b.health(self.db, root)['control']
+        b.ingest(self.db, control(acknowledged['seq'] + 1, 'off', acknowledged['clearSeq']))
+        self.assertFalse(b.dispatch_on(self.db))
+        self.assertEqual(self.db.execute('select status from events').fetchone()[0], 'queued', 'and nothing is cleared')
+        self.assertEqual(b.health(self.db, root)['control']['seq'], 6)
+
     def test_clear_empties_only_queued_work_and_only_once(self):
         b.ingest(self.db, envelope(event()))
         self.concurrent_event('b', 'sakura'); self.concurrent_event('c', 'other')
