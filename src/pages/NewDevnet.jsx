@@ -31,7 +31,7 @@ export default function NewDevnet() {
   const storage = (form.validators + 1) * form.rootVolumeGiB * 0.08;
   const problems = [];
   if (!/^[a-z][a-z0-9-]{1,30}$/.test(name)) problems.push('name: lowercase letters, digits and dashes, 2-31 characters');
-  if (existing.includes(full)) problems.push(`${full} already exists; names cannot be reused`);
+  if (existing.includes(full)) problems.push(`${full} already exists; delete it before using the name again`);
   if (form.validators < 13 || form.validators > 25) problems.push('13 to 25 validators');
   for (const c of COMPONENTS) if ((form.images[c] || '').replace(/^docker\.io\//, '').split(/[@:]/)[0] !== REPOS[c]) problems.push(`${c} image must be ${REPOS[c]}:<tag>`);
   if (form.images.acme && form.images.acme.replace(/^docker\.io\//, '').split(/[@:]/)[0] !== 'goacme/lego') problems.push('ACME client image must be goacme/lego:<tag>, or empty for self-signed gateways');

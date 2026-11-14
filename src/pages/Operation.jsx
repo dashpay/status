@@ -171,6 +171,10 @@ function CreateReview({ op, review, operator, pending, act, expiresIn }) {
   const e = review.estimate || {};
   return (
     <>
+      {review.replaces && <p className="panel p-3 mb-3 text-[12px] lv-warn" data-name-reused>
+        The name {op.network} was used before{review.replaces.createdBy ? ` (created by ${review.replaces.createdBy})` : ''}; that devnet was deleted{review.replaces.deletedAt ? ` ${new Date(review.replaces.deletedAt).toISOString().slice(0, 16).replace('T', ' ')} UTC` : ''}.
+        This is a new chain with the same chain name ({review.coreNetwork}): anything still configured for the old one (wallets, peers, saved addresses) will not match it. The old devnet's files are kept aside and are not reused.
+      </p>}
       <Section title={`Devnet ${op.network} · ${review.instances} instances`} right={op.status === 'review' && <span className="text-dim text-[12px]">expires in {Math.max(0, Math.round(expiresIn / 60))} min</span>}>
         <div className="grid gap-3 lg:grid-cols-2">
           <div className="panel">
