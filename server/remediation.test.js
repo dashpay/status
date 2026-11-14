@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { remediationView } from './remediation.js';
+import { againstReceiver } from './remediation-control.js';
 
 const now = Date.now(), at = new Date(now).toISOString();
 const issue = (id, extra = {}) => ({ id, domain: 'network', scope: 'testnet', target: 'PRIVATE-HOST', code: 'host_health', severity: 'critical', status: 'open', firstSeen: at, lastSeen: at, ...extra });
@@ -9,6 +10,20 @@ const state = (issues, cases) => ({ generatedAt: at, issues, outbox: [], deliver
   remediation: { schemaVersion: 1, generatedAt: at, enabled: true, maxActive: 2, cases },
 } } });
 const options = { full: true, visibleNetworks: ['testnet'], now };
+
+test('fresh delivery does not hide stalled execution or imply released ownership', () => {
+  const data = state([issue('a')], [{ issueId: 'a', active: true, workerState: 'uncertain', attentionRequired: true,
+    lifecycle: 'PRIVATE-STATE', pendingEvents: 2 }]);
+  data.delivery.receiver.remediation.progress = { attentionRequired: true, stalledRuns: 1, privateDetail: 'PRIVATE-DETAIL' };
+  const view = remediationView(data, { ...options, full: false });
+  assert.equal(view.execution, 'stalled'); assert.equal(view.stale, false); assert.equal(view.dispatch, 'enabled');
+  assert.equal(view.stalledRuns, 1); assert.equal(view.counts.blocked, 1); assert.equal(view.counts.working, 0);
+  assert.match(view.cases[0].reason, /ownership is retained/);
+  assert.doesNotMatch(JSON.stringify(view), /PRIVATE/);
+  data.delivery.receiver.workerAt = (now - 200_000) / 1000;
+  assert.equal(remediationView(data, options).execution, 'unknown');
+  assert.equal(remediationView(data, options).stalledRuns, null);
+});
 
 test('remediation separates completed response from verified repair and preserves root-cause blockers', () => {
   const data = state([issue('a'), issue('b', { status: 'resolved' }), issue('c', { status: 'resolved' }), issue('d', { status: 'resolved' })], [
@@ -68,6 +83,48 @@ test('verified monitoring correction is not an outage recovery or stale batch bl
   assert.equal(view.counts.blocked, 0); assert.equal(view.counts.fixed, 0);
   data.generatedAt = new Date(now - 200_000).toISOString();
   assert.equal(remediationView(data, options).cases[0].stage, 'blocked');
+});
+
+test('recognised upgrades, settling operations and stalls are explained, with details for administrators only', () => {
+  const data = state([issue('a', { suppressed: true, evidence: { instanceId: 'i-one' } }), issue('b', { suppressed: true, scope: 'other' }), issue('d', { suppressed: true, scope: 'third' })], []);
+  data.activity = { hosts: { 'testnet/i-one': { held: true } }, networks: { other: { held: true } } };
+  data.maintenance = { third: { active: true, operations: [{ id: 'op', action: 'upgrade', status: 'settling' }] } };
+  data.delivery.receiver.counts = { queued: 2 };
+  data.delivery.receiver.attention = [{ code: 'route_unavailable', detail: 'PRIVATE route detail' }];
+  const view = remediationView(data, { ...options, visibleNetworks: ['testnet', 'other', 'third'] });
+  const reason = (id) => view.cases.find((c) => c.id === id).reason;
+  assert.match(reason('a'), /recognised on this host/); assert.match(reason('b'), /recognised on this network/);
+  const endpoint = state([issue('e', { suppressed: true, code: 'endpoint_failed', target: 'API' })], []);
+  endpoint.activity = { hosts: { 'testnet/i-one': { held: true, network: 'testnet' } }, networks: {} };
+  assert.match(remediationView(endpoint, options).cases[0].reason, /on a host of this network/);
+  assert.match(reason('d'), /just finished/);
+  assert.equal(view.stalled, true); assert.equal(view.attention[0].code, 'route_unavailable');
+  const publicView = remediationView(data, { ...options, full: false, visibleNetworks: ['testnet', 'other', 'third'] });
+  assert.equal(publicView.stalled, true); assert.equal(publicView.attention, undefined);
+  assert.doesNotMatch(JSON.stringify(publicView), /PRIVATE/);
+});
+
+test('the switch shows what was requested and what the worker acknowledged; cleared issues say so', () => {
+  const data = state([issue('a')], [{ issueId: 'a', workerState: 'cleared' }]);
+  data.delivery.receiver.remediation.enabled = false;
+  data.control = { seq: 4, dispatch: 'on', clearSeq: 3, updatedAt: at, updatedBy: 'PRIVATE-ADMIN', clearedAt: at, clearedBy: 'PRIVATE-ADMIN' };
+  data.delivery.receiver.control = { seq: 3, dispatch: 'off', clearSeq: 3, localEnabled: true, lastClear: { at: now / 1000, count: 250 } };
+  const view = remediationView(data, options);
+  assert.deepEqual([view.dispatch, view.control.requested, view.control.applied, view.control.pending, view.control.supported], ['paused', 'on', 'off', true, true]);
+  assert.deepEqual([view.control.lastClear.count, view.control.localEnabled, view.control.changedBy], [250, true, 'PRIVATE-ADMIN']);
+  assert.match(view.cases[0].reason, /Removed from the queue/);
+  data.delivery.receiver.control.seq = 4; data.delivery.receiver.control.dispatch = 'on';
+  assert.equal(remediationView(data, options).control.pending, false);
+  const publicView = remediationView(data, { ...options, full: false });
+  assert.equal(publicView.control.applied, 'on'); assert.doesNotMatch(JSON.stringify(publicView), /PRIVATE/);
+  assert.equal(remediationView(data, options).control.reset, false);
+  // The control file was lost while the worker was on: the board says OFF and why.
+  data.control = againstReceiver({ schemaVersion: 1, seq: 0, dispatch: 'off', clearSeq: 0 }, data.delivery.receiver.control);
+  const lost = remediationView(data, options).control;
+  assert.deepEqual([lost.requested, lost.applied, lost.pending, lost.reset, lost.changedBy], ['off', 'on', true, true, null]);
+  assert.equal(remediationView(data, { ...options, full: false }).control.reset, undefined);
+  const older = state([issue('a')], []);
+  assert.deepEqual([remediationView(older, options).control.supported, remediationView(older, options).control.requested, remediationView(older, options).control.applied], [false, 'off', null]);
 });
 
 test('maintenance is visible without claiming recovery or hiding already-running repair ownership',()=>{

@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 import urllib.request
 import urllib.error
@@ -35,6 +36,51 @@ class Tests(unittest.TestCase):
 
     def done(self):
         return {'status': 'done', 'endedAt': self.ended, 'lastRunId': 'test-runtime-run', 'abortedLastRun': False}
+
+    def release_event(self, ident='b', release_id=123):
+        e = event(severity='info'); e['eventId'] = ident * 24 + ':1'
+        e['issue'].update(id=ident * 24, domain='maintenance', scope='dash-network-go',
+                          code='platform_release_compatibility', target='Platform v5.0.0-beta.2',
+                          evidence={'repository': 'dashpay/platform', 'repositoryId': 424232911,
+                                    'releaseId': release_id, 'tag': 'v5.0.0-beta.2',
+                                    'mode': 'code-and-tests-only', 'liveChangesAllowed': False})
+        return e
+
+    def test_only_allowlisted_code_only_maintenance_is_actionable(self):
+        e = self.release_event(); b.ingest(self.db, envelope(e))
+        self.assertEqual(self.db.execute('select status from events').fetchone()['status'], 'queued')
+        for key, wrong in [('repositoryId', 1), ('liveChangesAllowed', True), ('mode', 'deploy')]:
+            invalid = copy.deepcopy(e); invalid['issue']['evidence'][key] = wrong
+            with self.assertRaises(ValueError): b.validate(envelope(invalid))
+        e['issue']['code'] = 'arbitrary_command'
+        with self.assertRaises(ValueError): b.validate(envelope(e))
+
+    def test_release_budget_is_separate_and_bounded(self):
+        now = time.time()
+        for i in range(48):
+            e = event(); ident = hashlib.sha256(str(i).encode()).hexdigest()[:24]
+            e['eventId'] = ident + ':1'; e['issue']['id'] = ident
+            b.ingest(self.db, envelope(e))
+            self.db.execute("update events set status='completed',started=?,finished=? where id=?", (now-3601-i*100, now-3600-i*100, e['eventId']))
+        self.db.commit()
+        e = self.release_event(); b.ingest(self.db, envelope(e))
+        self.assertTrue(b.budget_exhausted(self.db, 'network:testnet'))
+        self.assertFalse(b.budget_exhausted(self.db, 'maintenance:dash-network-go'))
+        claimed = b.claim(self.db)
+        self.assertEqual([r['id'] for r, _ in claimed], [e['eventId']])
+        self.db.execute("update events set status='completed',finished=? where id=?", (now, e['eventId'])); self.db.commit()
+        b.ingest(self.db, envelope(self.release_event('c', 124)))
+        self.assertEqual(b.claim(self.db, cooldown=0), [])
+        snapshot = b.scheduler_snapshot(self.db, {'maxActive': 1, 'scopes': {}}, True)
+        self.assertEqual(snapshot['queued'][0]['reason'], 'budget')
+
+    def test_compatibility_report_projection_requires_version_bound_evidence(self):
+        report = {'releaseId': 123, 'platformTag': 'v5.0.0-beta.2', 'platformCommit': 'a'*40,
+                  'dashnetCommit': 'b'*40, 'result': 'fixed', 'report': 'reports/task.md', 'tests': ['regression passed'], 'untrustedExtra': 'not forwarded'}
+        self.assertNotIn('untrustedExtra', b.compatibility_result(report))
+        for key in ['platformCommit', 'dashnetCommit', 'report', 'tests']:
+            invalid = dict(report); invalid.pop(key)
+            self.assertIsNone(b.compatibility_result(invalid))
 
     def reconcile(self, root):
         reader = lambda session: self.done()
@@ -177,6 +223,20 @@ class Tests(unittest.TestCase):
         self.assertEqual(b.claim(self.db, config=config), [])  # two occupied slots
         self.assertEqual(self.db.execute("select status from events where id=?", ('a'*24+':1',)).fetchone()[0], 'uncertain')
 
+    def test_three_disjoint_scopes_keep_shared_and_uncertain_locks(self):
+        config = self.concurrency(); config['maxActive'] = 3
+        for letter, scope, domain in [('a','sakura','network'),('b','testnet','network'),('c','brian','ci')]:
+            self.concurrent_event(letter, scope, domain)
+            self.assertEqual(len(b.claim(self.db, config=config)), 1)
+        with self.db: self.db.execute("update events set status='uncertain' where scope='network:sakura'")
+        self.concurrent_event('d','builder','ci')
+        self.assertEqual(b.claim(self.db, config=config), [])
+        with self.db: self.db.execute("update events set status='completed' where scope='ci:brian'")
+        self.assertEqual(b.claim(self.db, config=config), [])  # shared build-host remains locked
+        root = pathlib.Path(self.temp.name)
+        (root/'concurrency.json').write_text(json.dumps(config))
+        self.assertEqual(b.concurrency_config(root)['maxActive'], 3)
+
     def test_unknown_scope_is_exclusive_even_with_free_slot(self):
         config = self.concurrency()
         self.concurrent_event('a', 'unknown')
@@ -192,7 +252,7 @@ class Tests(unittest.TestCase):
         root = pathlib.Path(self.temp.name)
         self.assertEqual(b.concurrency_config(root)['maxActive'], 1)
         path = root / 'concurrency.json'
-        for invalid in [{}, {'schemaVersion': 1, 'maxActive': 3, 'scopes': {}},
+        for invalid in [{}, {'schemaVersion': 1, 'maxActive': 4, 'scopes': {}},
                         {**self.concurrency(), 'scopes': {'network:sakura': []}},
                         {**self.concurrency(), 'maxActive': True}]:
             path.write_text(json.dumps(invalid))
@@ -200,17 +260,85 @@ class Tests(unittest.TestCase):
         path.write_text(json.dumps(self.concurrency()))
         self.assertEqual(b.concurrency_config(root), self.concurrency())
 
-    def test_known_uncertainty_never_enables_operator_pause(self):
+    def test_holds_never_touch_the_operator_switch(self):
         root = pathlib.Path(self.temp.name); config = self.concurrency()
         b.hold_uncertain(root, 'known', 'network:sakura', config)
         self.assertTrue((root/'HELD-known').exists())
         self.assertFalse((root/'ENABLED').exists())
         (root/'ENABLED').touch()
-        b.hold_uncertain(root, 'known', 'network:sakura', config)
-        self.assertTrue((root/'ENABLED').exists())
+        # Serial mode and unknown scopes used to rename ENABLED, which also
+        # disabled the only automatic way out of the hold.
         b.hold_uncertain(root, 'unknown', 'network:other', config)
+        b.hold_uncertain(root, 'serial', 'network:sakura', {'maxActive': 1, 'scopes': {}})
+        self.assertTrue((root/'ENABLED').exists())
+        self.assertTrue((root/'HELD-unknown').exists() and (root/'HELD-serial').exists())
+        self.assertEqual(list(root.glob('PAUSED-*')), [])
+
+    def test_serial_hold_still_blocks_admission_without_a_pause_file(self):
+        b.ingest(self.db, envelope(event())); b.claim(self.db, cooldown=0)
+        with self.db: self.db.execute("update events set status='uncertain'")
+        self.concurrent_event('b', 'other')
+        self.assertEqual(b.claim(self.db, cooldown=0), [])
+
+    def test_startup_returns_automatic_pauses_but_not_operator_pauses(self):
+        root = pathlib.Path(self.temp.name)
+        (root/'PAUSED-route-unavailable').touch()
+        self.assertEqual(b.adopt_legacy_pauses(root), 'PAUSED-route-unavailable')
+        self.assertTrue((root/'ENABLED').exists())
+        (root/'ENABLED').rename(root/'PAUSED-operator')
+        self.assertIsNone(b.adopt_legacy_pauses(root))
         self.assertFalse((root/'ENABLED').exists())
-        self.assertTrue((root/'PAUSED-unknown').exists())
+        (root/'PAUSED-operator').unlink(); (root/('PAUSED-'+'1'*24)).touch()
+        self.assertEqual(b.adopt_legacy_pauses(root), 'PAUSED-'+'1'*24)
+        self.assertTrue((root/'ENABLED').exists() and (root/('HELD-'+'1'*24)).exists())
+
+    def test_route_failure_backs_off_and_recovers_without_pausing(self):
+        root = pathlib.Path(self.temp.name); now = time.time()
+        first = b.route_failed(self.db, 'route down', 'pin', now)
+        self.assertEqual(first['retryAt'], now + 60)
+        second = b.route_failed(self.db, 'route down', 'pin', now + 60)
+        self.assertEqual((second['failures'], second['openedAt'], second['retryAt']), (2, now, now + 180))
+        for _ in range(10): last = b.route_failed(self.db, 'route down', 'pin', now)
+        self.assertEqual(last['retryAt'], now + 1800)
+        self.assertEqual([a['code'] for a in b.attention(self.db, root)], ['route_unavailable'])
+        b.route_recovered(self.db)
+        self.assertIsNone(b.route_breaker(self.db))
+        self.assertEqual(b.attention(self.db, root), [])
+
+    def test_unavailable_route_requeues_and_leaves_dispatch_enabled(self):
+        root = pathlib.Path(self.temp.name); (root/'ENABLED').touch()
+        b.ingest(self.db, envelope(event()))
+        batch = b.claim(self.db, cooldown=0)
+        args = SimpleNamespace(state_dir=str(root), container_state_dir=str(root), api_token_file=str(root/'token'))
+        with patch.object(b, 'refreshed_events', side_effect=lambda events, _: events), \
+                patch.object(b, 'pin_session_route', side_effect=ValueError('not pinned')):
+            self.assertIsNone(b.prepare(args, root, 'policy', {'maxActive': 1, 'scopes': {}}, batch, batch[0][1],
+                                        b.attempt_id([r for r, _ in batch]), threading.Event()))
+        row = self.db.execute('select * from events').fetchone()
+        self.assertEqual((row['status'], row['started'], row['invoked']), ('queued', None, None))
+        self.assertTrue((root/'ENABLED').exists())
+        self.assertEqual(list(root.glob('PAUSED-*')), [])
+        self.assertEqual(b.route_breaker(self.db)['kind'], 'pin')
+        # The same work is admitted again once the route answers.
+        with self.db: self.db.execute("delete from meta where key='route_breaker'")
+        self.assertEqual(len(b.claim(self.db, cooldown=0)), 1)
+
+    def test_withdrawn_batch_consumes_no_dispatch_budget(self):
+        root = pathlib.Path(self.temp.name)
+        b.ingest(self.db, envelope(event()))
+        batch = b.claim(self.db, cooldown=0)
+        args = SimpleNamespace(state_dir=str(root), container_state_dir=str(root), api_token_file=str(root/'token'))
+        with patch.object(b, 'refreshed_events', return_value=[]):
+            self.assertIsNone(b.prepare(args, root, 'policy', {'maxActive': 1, 'scopes': {}}, batch, batch[0][1], 'r'*24, threading.Event()))
+        row = self.db.execute('select * from events').fetchone()
+        self.assertEqual((row['status'], row['started']), ('superseded', None))
+
+    def test_new_events_wait_before_admission(self):
+        b.ingest(self.db, envelope(event()))
+        self.assertEqual(b.claim(self.db, cooldown=0, min_age=300), [])
+        self.assertEqual(b.scheduler_snapshot(self.db, {'maxActive': 1, 'scopes': {}}, True)['queued'][0]['reason'], 'settling')
+        with self.db: self.db.execute('update events set received=received-301')
+        self.assertEqual(len(b.claim(self.db, cooldown=0, min_age=300)), 1)
 
     def test_parallel_claims_respect_two_slots_atomically(self):
         config = self.concurrency()
@@ -316,6 +444,71 @@ class Tests(unittest.TestCase):
             with patch.object(b,'describe_session',return_value=live), patch.object(b,'pin_session_route') as pin:
                 b.request_completion_check(args,checks[0]);pin.assert_not_called()
 
+    def test_killed_session_gets_bookkeeping_but_never_automatic_success(self):
+        root,run=self.uncertain_run(); self.write_receipt(root,run); now=time.time()
+        killed={**self.done(),'status':'killed','abortedLastRun':True}
+        b.reconcile_sessions(root,lambda _:killed,now)
+        checks=b.reconcile_sessions(root,lambda _:killed,now+31)
+        self.assertEqual(len(checks),1)
+        self.assertEqual(self.db.execute('select status from events').fetchone()[0],'uncertain')
+        from types import SimpleNamespace
+        args=SimpleNamespace(state_dir=str(root),container_state_dir=str(root))
+        with patch.object(b,'describe_session',return_value=killed), patch.object(b,'pin_session_route',return_value={}), patch.object(b.subprocess,'run') as execute:
+            b.request_completion_check(args,checks[0])
+            self.assertEqual(execute.call_count,1)
+
+    def test_legacy_background_hold_gets_bounded_followups_preserving_evidence(self):
+        root,run=self.uncertain_run(); now=time.time()
+        b.reconcile_sessions(root,lambda _:self.done(),now)
+        b.reconcile_sessions(root,lambda _:self.done(),now+31)
+        with self.db:
+            self.db.execute('update lifecycle set check_requested=? where run=?',(now-1000,run))
+        original=root/(run+'.completion-check.result.json'); original.write_text('original nonterminal result')
+        checks=b.reconcile_sessions(root,lambda _:self.done(),now+62)
+        self.assertEqual(len(checks),1)
+        from types import SimpleNamespace
+        args=SimpleNamespace(state_dir=str(root),container_state_dir=str(root))
+        with patch.object(b,'describe_session',return_value=self.done()), patch.object(b,'pin_session_route',return_value={}), patch.object(b.subprocess,'run') as execute:
+            b.request_completion_check(args,checks[0]);b.request_completion_check(args,checks[0])
+            self.assertEqual(execute.call_count,1)
+        self.assertEqual(original.read_text(),'original nonterminal result')
+        self.assertTrue((root/(run+'.completion-check-2.result.json')).exists())
+        # A restart retains counts/backoff; a third check cannot repeat forever.
+        self.assertEqual(b.completion_schedule(self.db,run,now+120)['due'],False)
+        self.assertEqual(b.completion_schedule(self.db,run,now+3700)['attempt'],3)
+        with self.db:self.db.execute('insert into completion_checks values(?,?,?,?)',(run,3,now+3700,'last'))
+        self.assertTrue(b.completion_schedule(self.db,run,now+86400)['exhausted'])
+        self.assertEqual(b.reconcile_sessions(root,lambda _:self.done(),now+86400),[])
+        self.assertEqual(self.db.execute('select status from events').fetchone()[0],'uncertain')
+
+    def test_completion_check_rechecks_persisted_ownership(self):
+        root,run=self.uncertain_run();now=time.time()
+        b.reconcile_sessions(root,lambda _:self.done(),now)
+        checks=b.reconcile_sessions(root,lambda _:self.done(),now+31)
+        with self.db:self.db.execute("update events set status='completed'")
+        from types import SimpleNamespace
+        args=SimpleNamespace(state_dir=str(root),container_state_dir=str(root))
+        with patch.object(b,'describe_session',return_value=self.done()),patch.object(b,'pin_session_route') as pin:
+            b.request_completion_check(args,checks[0]);pin.assert_not_called()
+
+    def test_fresh_heartbeat_does_not_hide_stalled_capacity(self):
+        root,run=self.uncertain_run();now=time.time()
+        with self.db:
+            self.db.execute('update events set started=?,finished=?',(now-2000,now-1800))
+            self.db.execute('insert or replace into meta values(?,?)',('worker_heartbeat',str(now)))
+        self.assertEqual(b.health(self.db,root)['status'],'degraded')
+        self.assertEqual(b.progress_health(self.db,now)['stalledRuns'],1)
+        self.assertTrue(b.remediation_snapshot(self.db,root)['cases'][0]['attentionRequired'])
+        with self.db:self.db.execute("update events set status='completed'")
+        self.assertEqual(b.health(self.db,root)['status'],'ok')
+
+    def test_active_or_undated_session_never_gets_bookkeeping(self):
+        root,run=self.uncertain_run();now=time.time()
+        for changes in [{'status':'running'},{'status':'unknown'},{'permissionModePending':True},{'endedAt':None},{'lastRunId':None}]:
+            live={**self.done(),**changes}
+            self.assertEqual(b.reconcile_sessions(root,lambda _:live,now),[])
+            self.assertEqual(b.reconcile_sessions(root,lambda _:live,now+31),[])
+
     def test_stale_aborted_and_children_receipts_never_release(self):
         root,run=self.uncertain_run(); receipt=self.write_receipt(root,run)
         p=root/(run+'.completion.json')
@@ -326,9 +519,140 @@ class Tests(unittest.TestCase):
         for t in [now,now+31]:b.reconcile_sessions(root,lambda _:{**self.done(),'abortedLastRun':True},t)
         self.assertEqual(self.db.execute('select status from events').fetchone()[0],'uncertain')
 
+    # What the installed Gateway (OpenClaw 2026.11.3) printed and reported when
+    # the account was unavailable: a JSON error object followed by plain text.
+    CLI_FAILURE = json.dumps({'ok': False, 'runId': 'this-attempt', 'origin': 'gateway', 'error': {
+        'type': 'cli_error', 'message': 'Auth profile "openai:work" is temporarily unavailable for openai/gpt-6-astra.'}}, indent=2) \
+        + '\n[openclaw] The CLI command failed.\n[openclaw] Reason: Auth profile "openai:work" is temporarily unavailable.\n'
+
+    def unstarted_run(self):
+        """A hold as that Gateway shows one for an unavailable account. The
+        worker snapshots the session before invoking. The invocation then
+        registers a run that fails in milliseconds: a new run id, end time and
+        status, but no activity, no active run and no child session."""
+        root,run=self.uncertain_run(); now=time.time()
+        before={'status':'done','endedAt':(now-3600)*1000,'lastRunId':'earlier-run','lastActivityAt':(now-3600)*1000,
+                'hasActiveRun':False,'activeRunIds':[],'childOwnerSessionKeys':[]}
+        failed={**before,'status':'failed','lastRunId':'this-attempt','endedAt':(now+0.05)*1000,'runtimeMs':48}
+        (root/(run+'.result.json')).write_text(self.CLI_FAILURE)
+        with self.db: self.db.execute('insert into lifecycle(run,baseline) values(?,?)',(run,b.session_baseline(before)))
+        return root,run,now,failed
+
+    def held(self):
+        return self.db.execute("select status from events where id=?",('a'*24+':1',)).fetchone()[0]
+
+    def test_an_attempt_that_did_no_work_returns_to_the_queue_after_its_lease(self):
+        root,run,now,failed=self.unstarted_run()
+        def broken(_): raise OSError('gateway unavailable')
+        # Inside the lease nothing is released, however idle the session looks.
+        for t in [now,now+31,now+62,now+93]: b.reconcile_sessions(root,lambda _:failed,t)
+        self.assertEqual(self.held(),'uncertain')
+        self.assertIn('hold',[a['code'] for a in b.attention(self.db,root,now+1801)])
+        late=now+b.HOLD_LEASE+1
+        # Past the lease an active, recently active or unreadable session keeps it.
+        for reader in [lambda _:{**failed,'status':'running','hasActiveRun':True,'activeRunIds':['r']}, lambda _:{**failed,'lastActivityAt':late*1000}, broken]:
+            for t in [late,late+31,late+62,late+93]: b.reconcile_sessions(root,reader,t)
+            self.assertEqual(self.held(),'uncertain')
+        b.reconcile_sessions(root,lambda _:failed,late+200)
+        b.reconcile_sessions(root,lambda _:failed,late+231)
+        self.assertEqual(self.held(),'uncertain','one observation is not enough')
+        b.reconcile_sessions(root,lambda _:failed,late+262)
+        row=self.db.execute('select * from events').fetchone()
+        self.assertEqual((row['status'],row['started'],row['invoked']),('queued',None,None),'nothing was played, so it is simply queued again')
+        self.assertTrue((root/(run+'.released.json')).exists())
+        self.assertFalse((root/('HELD-'+run)).exists())
+        self.assertTrue((root/'ENABLED').exists())
+        batch=b.claim(self.db,config=self.concurrency(),cooldown=0)
+        self.assertEqual([r['id'] for r,_ in batch],['a'*24+':1'])
+        self.assertNotEqual(b.attempt_id([r for r,_ in batch]),run,'a new attempt with its own artifacts')
+
+    def test_an_idle_parent_never_releases_work_that_may_still_be_running(self):
+        root,run,now,failed=self.unstarted_run()
+        late=now+b.HOLD_LEASE+1
+        def settle(reader):
+            for t in [late,late+61,late+122,late+183,late+244]: b.reconcile_sessions(root,reader,t)
+            self.assertEqual(self.held(),'uncertain')
+            self.assertTrue((root/('HELD-'+run)).exists())
+            self.assertFalse((root/(run+'.released.json')).exists())
+        receipt=root/(run+'.completion.json')
+        # A receipt that says children are still pending is a statement that work continues.
+        receipt.write_text(json.dumps({'runId':run,'terminal':True,'pendingChildren':1,'outcome':'blocked',
+                                       'finishedAt':datetime.datetime.fromtimestamp(time.time()+1,datetime.timezone.utc).isoformat()}))
+        settle(lambda _:failed)
+        receipt.write_text('not even json')
+        settle(lambda _:failed)
+        receipt.unlink()
+        # The Gateway reports a child session, or a run still executing.
+        settle(lambda _:{**failed,'childOwnerSessionKeys':['agent:main:subagent:1']})
+        settle(lambda _:{**failed,'hasActiveRun':True})
+        settle(lambda _:{**failed,'activeRunIds':['still-running']})
+        # A Gateway that does not report those facts gives no evidence at all.
+        settle(lambda _:{k:v for k,v in failed.items() if k not in ('hasActiveRun','activeRunIds','childOwnerSessionKeys')})
+        # Activity after the attempt was claimed: a turn did something.
+        settle(lambda _:{**failed,'lastActivityAt':(now+5)*1000})
+        settle(lambda _:{**failed,'status':'done','lastActivityAt':(now+2)*1000,'endedAt':(now+2)*1000})
+        settle(lambda _:self.done())
+        # Activity that differs from the snapshot, even though it predates the claim.
+        settle(lambda _:{**failed,'lastActivityAt':(now-60)*1000})
+        # The CLI itself reports a turn.
+        result=root/(run+'.result.json')
+        for output in [json.dumps({'ok':True,'runId':'x'})+'\ntrailing text', json.dumps({'status':'ok','result':{'meta':{}}})]:
+            result.write_text(output)
+            settle(lambda _:failed)
+        result.write_text(self.CLI_FAILURE)
+        # Only with every condition met is the attempt known to have done nothing.
+        for t in [late+400,late+461]: b.reconcile_sessions(root,lambda _:failed,t)
+        self.assertEqual(self.held(),'queued')
+
+    def test_a_hold_from_before_snapshots_is_judged_on_the_same_gateway_facts(self):
+        root,run,now,failed=self.unstarted_run()
+        with self.db: self.db.execute('update lifecycle set baseline=null')
+        late=now+b.HOLD_LEASE+1
+        for t in [late,late+61]: b.reconcile_sessions(root,lambda _:{**failed,'lastActivityAt':(now+5)*1000},t)
+        self.assertEqual(self.held(),'uncertain','activity after the claim keeps it, snapshot or not')
+        for t in [late+100,late+161]: b.reconcile_sessions(root,lambda _:failed,t)
+        self.assertEqual(self.held(),'queued')
+
+    def test_fast_failure_uses_the_short_lease(self):
+        root,run,now,failed=self.unstarted_run()
+        with self.db: self.db.execute('update events set finished=started+5')
+        for t in [now+60,now+121]: b.reconcile_sessions(root,lambda _:failed,t)
+        self.assertEqual(self.held(),'uncertain')
+        late=now+b.QUICK_HOLD_LEASE+1
+        for t in [late,late+61]: b.reconcile_sessions(root,lambda _:failed,t)
+        self.assertEqual(self.held(),'queued')
+
+    def test_bookkeeping_check_is_not_spent_on_an_unavailable_route_and_retries(self):
+        root,run=self.uncertain_run(); now=time.time()
+        b.reconcile_sessions(root,lambda _:self.done(),now)
+        checks=b.reconcile_sessions(root,lambda _:self.done(),now+31)
+        args=SimpleNamespace(state_dir=str(root),container_state_dir=str(root))
+        with patch.object(b,'describe_session',return_value=self.done()), patch.object(b,'pin_session_route',side_effect=ValueError('route')), patch.object(b.subprocess,'run') as execute:
+            b.request_completion_check(args,checks[0]); execute.assert_not_called()
+        self.assertEqual(self.db.execute('select count(*) from completion_checks').fetchone()[0],0,'a deferred check consumes no attempt')
+        self.assertEqual(len(b.reconcile_sessions(root,lambda _:self.done(),now+62)),1)
+        self.assertEqual(b.route_breaker(self.db)['kind'],'pin')
+        due={**b.route_breaker(self.db),'retryAt':time.time()-1}
+        with self.db: self.db.execute("update meta set value=? where key='route_breaker'",(json.dumps(due),))
+        with patch.object(b,'describe_session',return_value=self.done()), patch.object(b,'pin_session_route',return_value={}), patch.object(b.subprocess,'run') as execute:
+            execute.return_value.returncode=0
+            b.request_completion_check(args,checks[0]); self.assertEqual(execute.call_count,1)
+        self.assertIsNone(b.route_breaker(self.db),'a successful pin closes the breaker a failed pin opened')
+        self.assertEqual(b.reconcile_sessions(root,lambda _:self.done(),now+93),[])
+        self.assertEqual(len(b.reconcile_sessions(root,lambda _:self.done(),now+93+b.COMPLETION_DELAYS[1])),1,'a later bounded retry')
+
+    def test_restart_requeues_work_that_never_reached_the_model(self):
+        root=pathlib.Path(self.temp.name)
+        self.concurrent_event('a','sakura');b.claim(self.db,config=self.concurrency())
+        b.recover_interrupted(root,None)
+        row=self.db.execute('select * from events').fetchone()
+        self.assertEqual((row['status'],row['started']),('queued',None))
+        self.assertEqual(list(root.glob('HELD-*')),[])
+
     def test_restart_recovers_running_as_hold_not_requeue(self):
         root=pathlib.Path(self.temp.name);config=self.concurrency()
         self.concurrent_event('a','sakura');b.claim(self.db,config=config)
+        with self.db: self.db.execute('update events set invoked=started')
         (root/'ENABLED').touch();b.recover_interrupted(root,config)
         row=self.db.execute('select * from events').fetchone()
         self.assertEqual(row['status'],'uncertain');self.assertTrue(row['result'])
@@ -397,6 +721,21 @@ class Tests(unittest.TestCase):
         self.reconcile(root)
         self.assertFalse((root / 'ENABLED').exists())
 
+    def test_ending_a_legacy_paused_run_does_not_lift_an_operator_pause(self):
+        root = pathlib.Path(self.temp.name)
+        db = b.connect(root / 'inbox.sqlite'); self.addCleanup(db.close)
+        b.ingest(db, envelope(event())); b.claim(db, cooldown=0)
+        run = '3'*24
+        with db: db.execute("update events set status='uncertain',result=?", (run,))
+        (root / (run+'.result.json')).write_text(json.dumps({'status':'ok'}))
+        (root / ('PAUSED-'+run)).touch(); (root / 'PAUSED-operator').touch()
+        (root / (run+'.completion.json')).write_text(json.dumps({'runId':run,'terminal':True,'pendingChildren':0,'outcome':'no_change','finishedAt':datetime.datetime.fromtimestamp(time.time()+1,datetime.timezone.utc).isoformat()}))
+        self.reconcile(root)
+        self.assertEqual(db.execute('select status from events').fetchone()[0], 'completed')
+        self.assertFalse((root / 'ENABLED').exists(), 'the operator pause still holds dispatch off')
+        (root / 'PAUSED-operator').unlink()
+        self.assertEqual(b.adopt_legacy_pauses(root), 'PAUSED-'+run)
+
     def test_utc_offset_receipt_unblocks_finished_batch_without_replaying_it(self):
         root = pathlib.Path(self.temp.name)
         db = b.connect(root / 'inbox.sqlite'); self.addCleanup(db.close)
@@ -419,6 +758,70 @@ class Tests(unittest.TestCase):
         self.assertTrue((root / 'ENABLED').exists())
         self.assertEqual(db.execute("select status from events where id=?", ('a'*24+':1',)).fetchone()[0], 'completed')
         self.assertEqual(db.execute("select status from events where id=?", ('a'*24+':2',)).fetchone()[0], 'queued')
+
+    def test_administrator_switch_defaults_off_and_cannot_override_the_local_file(self):
+        root = pathlib.Path(self.temp.name); gate = root/'ENABLED'; gate.touch()
+        control = lambda seq, dispatch: {**envelope(), 'control': {'seq': seq, 'dispatch': dispatch, 'clearSeq': 0}}
+        b.ingest(self.db, envelope(event()))
+        self.assertEqual(b.claim(self.db, cooldown=0, admission_path=gate, switch=True), [], 'off until an administrator switches it on')
+        self.assertFalse(b.remediation_snapshot(self.db, root)['enabled'])
+        b.ingest(self.db, control(1, 'on'))
+        self.assertEqual(b.health(self.db, root)['control'], {'seq': 1, 'dispatch': 'on', 'clearSeq': 0, 'lastClear': None, 'localEnabled': True})
+        b.ingest(self.db, control(0, 'off'))
+        self.assertTrue(b.dispatch_on(self.db), 'a replayed older envelope changes nothing')
+        gate.unlink()
+        self.assertEqual(b.claim(self.db, cooldown=0, admission_path=gate, switch=True), [], 'the local file stays the master switch')
+        self.assertFalse(b.remediation_snapshot(self.db, root)['enabled'])
+        gate.touch()
+        self.assertEqual(len(b.claim(self.db, cooldown=0, admission_path=gate, switch=True)), 1)
+        b.ingest(self.db, control(2, 'off'))
+        self.assertFalse(b.dispatch_on(self.db))
+        self.assertEqual(self.db.execute('select status from events').fetchone()[0], 'running', 'switching off never interrupts work in progress')
+
+    def test_a_producer_that_lost_its_counter_switches_off_with_the_acknowledged_sequence(self):
+        root = pathlib.Path(self.temp.name)
+        control = lambda seq, dispatch, clear: {**envelope(), 'control': {'seq': seq, 'dispatch': dispatch, 'clearSeq': clear}}
+        b.ingest(self.db, control(5, 'on', 3))
+        b.ingest(self.db, envelope(event()))
+        # A control file recreated from nothing numbers its commands from zero.
+        b.ingest(self.db, control(1, 'off', 0))
+        self.assertTrue(b.dispatch_on(self.db), 'a lower counter is ignored, so the producer must not send one')
+        # The producer therefore answers with what this receiver acknowledged:
+        # one above its sequence, and its own clear counter.
+        acknowledged = b.health(self.db, root)['control']
+        b.ingest(self.db, control(acknowledged['seq'] + 1, 'off', acknowledged['clearSeq']))
+        self.assertFalse(b.dispatch_on(self.db))
+        self.assertEqual(self.db.execute('select status from events').fetchone()[0], 'queued', 'and nothing is cleared')
+        self.assertEqual(b.health(self.db, root)['control']['seq'], 6)
+
+    def test_clear_empties_only_queued_work_and_only_once(self):
+        b.ingest(self.db, envelope(event()))
+        self.concurrent_event('b', 'sakura'); self.concurrent_event('c', 'other')
+        with self.db:
+            self.db.execute("update events set status='uncertain' where id like 'b%'")
+            self.db.execute("update events set status='running' where id like 'c%'")
+        clearing = {**envelope(event(2)), 'control': {'seq': 1, 'dispatch': 'off', 'clearSeq': 1}}
+        statuses = lambda: {r['id'][0] + r['id'][-2:]: r['status'] for r in self.db.execute('select id,status from events')}
+        b.ingest(self.db, clearing)
+        self.assertEqual(statuses(), {'a:1': 'cleared', 'a:2': 'queued', 'b:1': 'uncertain', 'c:1': 'running'})
+        self.assertEqual(b.remote_control(self.db)['lastClear']['count'], 1)
+        b.ingest(self.db, clearing)
+        self.assertEqual(statuses()['a:2'], 'queued', 'redelivery does not clear again')
+        self.assertEqual(b.claim(self.db, cooldown=0), [], 'the held scope still owns its slot')
+
+    def test_clear_keeps_release_tasks_that_are_never_raised_again(self):
+        b.ingest(self.db, envelope(event(), self.release_event()))
+        b.ingest(self.db, {**envelope(), 'control': {'seq': 1, 'dispatch': 'off', 'clearSeq': 1}})
+        self.assertEqual({r['scope']: r['status'] for r in self.db.execute('select scope,status from events')},
+                         {'network:testnet': 'cleared', 'maintenance:dash-network-go': 'queued'})
+        self.assertEqual(b.remote_control(self.db)['lastClear']['count'], 1)
+
+    def test_control_vocabulary_is_closed(self):
+        for bad in ['on', {'seq': 1, 'dispatch': 'on'}, {'seq': 1, 'dispatch': 'run', 'clearSeq': 0}, {'seq': True, 'dispatch': 'on', 'clearSeq': 0},
+                    {'seq': 1, 'dispatch': 'on', 'clearSeq': 2}, {'seq': -1, 'dispatch': 'on', 'clearSeq': 0},
+                    {'seq': 1, 'dispatch': 'on', 'clearSeq': 0, 'command': 'run this'}]:
+            with self.assertRaises(ValueError): b.validate({**envelope(), 'control': bad})
+        self.assertEqual(b.validate({**envelope(), 'control': {'seq': 1, 'dispatch': 'on', 'clearSeq': 1}}), [])
 
     def test_hmac_replay_window_and_ack(self):
         secret = 'test-secret-123'
