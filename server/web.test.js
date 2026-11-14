@@ -381,3 +381,14 @@ test('Actions queue: private changes are announced to members only', async () =>
     assert.equal(anon.includes('ci-queue'), true);
   } finally { for (const s of streams) s.abort(); w.close(); }
 });
+
+test('a deleted devnet no longer blocks its name in the new-devnet form', async () => {
+  const w = await start();
+  try {
+    writeFileSync(join(w.dataDir, 'devnets.json'), JSON.stringify({ 'devnet-sakura': { status: 'deleted' }, 'devnet-bonsai': { status: 'ready' }, 'devnet-stuck': { status: 'deleting' } }));
+    await w.login();
+    const { existing } = await (await w.req('/api/devnets/defaults')).json();
+    assert.equal(existing.includes('devnet-sakura'), false);
+    assert.ok(existing.includes('devnet-bonsai') && existing.includes('devnet-stuck') && existing.includes('testnet'));
+  } finally { w.close(); }
+});

@@ -268,7 +268,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   // New devnets (admins; billable). The agent prepares a plan that must be confirmed.
   app.get('/api/devnets/defaults', (req, res) => {
     if (!isAdmin(req)) return res.status(403).json({ error: 'Only admins create devnets' });
-    res.json({ defaults: reloadSettings().devnets, existing: [...settings.networks.map((n) => n.name), ...Object.keys(registry())] });
+    res.json({ defaults: reloadSettings().devnets, existing: [...settings.networks.map((n) => n.name), ...Object.entries(registry()).filter(([, reg]) => reg?.status !== 'deleted').map(([name]) => name)] });
   });
   app.post('/api/devnets', (req, res, next) => { const s = auth.session(req); if (!s) return res.status(401).json({ error: 'Sign in required' }); req.session = s; next(); }, auth.csrf, (req, res) => {
     if (!isAdmin(req)) return res.status(403).json({ error: 'Only admins create devnets' });
