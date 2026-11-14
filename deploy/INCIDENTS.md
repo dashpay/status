@@ -243,14 +243,18 @@ hold ends, a fault that is still present is emitted with fresh evidence.
 | dashnet journal claimed by another runner (existing) | the network | 20 minutes after release; at once if the journal records an error |
 | Container recreated (started under 20 minutes ago, `RestartCount` 0, running) | that host, the network's endpoint checks, its EC2 status check | 20 minutes after the last such start |
 | Host rebooted (uptime under 20 minutes) | same | 20 minutes after boot |
-| Two or more hosts changing at once | the network | when fewer than two are changing |
+| Two or more hosts changing at once | the network, except a host in a crash loop | when fewer than two are changing |
 
 `server/change-activity.js` derives the observational signals from the fresh
 probe every cycle, so a manual `docker compose pull && up` of the quorum
 server, or a hand-run Testnet upgrade, is recognised without a dashboard
 operation. A crash loop under a restart policy increments `RestartCount` and is
 not a planned change; seen in a fresh probe, it ends that host's hold at once,
-even inside the settle window an earlier clean start opened. Failed, cancelled and interrupted operations get no
+even inside the settle window an earlier clean start opened. A network hold
+inferred from other hosts changing does not cover that host either: its fault
+and its EC2 status check are sent for repair while the rest of the network
+stays held. A dashboard operation or a journal claim still holds every host,
+since restarts are part of the operation. Failed, cancelled and interrupted operations get no
 settle window, and a journal that records an error also ends rolling inference
 for that operation. Holds are bounded: a host is held at most 90 minutes per
 episode and a network at most three hours, so a recreate loop, or a journal
@@ -302,6 +306,18 @@ request as pending until it is acknowledged (normally within a minute; longer
 while delivery is failing). The counters only move forward, so redelivery and
 a replayed older envelope change nothing. Payloads still never choose commands,
 targets, models, sessions or credentials.
+
+The receiver keeps the highest sequence it has applied and only learns
+sequences from this file. If the file is lost, damaged or replaced by an older
+copy, its numbering restarts below the receiver's, and commands numbered from
+it, including OFF, would be ignored as stale while the receiver kept its last
+setting. The status server therefore reads the file against the sequence in
+the receiver's last ACK. When the receiver is ahead, the request is **off**,
+sent one above the receiver's sequence, and the next switch or clear is
+numbered above it as well. No clear is inferred: the clear counter sent is the
+one the receiver already applied. The board says the saved setting was lost;
+switching on again is an administrator action. The sidecar never writes the
+file.
 
 Controls are sent only after the receiver has announced them in an ACK, so an
 older receiver never sees an unknown envelope field. Deploy the receiver first;

@@ -95,6 +95,7 @@ function Controls({ data, now, reload }) {
         : c.pending ? 'Waiting for the repair worker to acknowledge (about a minute).' : 'Acknowledged by the repair worker.'}</span>
     </div>
     <Err error={error} />
+    {c.reset && <p className="mt-2 lv-warn">The saved switch setting was lost or was older than what the repair worker had applied, so dispatch was switched off. Switch it on again to resume.</p>}
     {c.localEnabled === false && <p className="mt-2 lv-warn">Dispatch is also disabled on the worker host itself (its ENABLED file is absent). This switch cannot override that.</p>}
     {(c.changedBy || c.lastClear) && <p className="mt-2 text-dim">
       {c.changedBy && <span title={clock(c.changedAt)}>Switch last changed by {c.changedBy} {ago(c.changedAt, now)} ago. </span>}

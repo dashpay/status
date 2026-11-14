@@ -392,3 +392,36 @@ test('malformed numeric host metrics cannot positively clear a grouped memory fa
   const s = reconcile(initial, deriveNetwork(now + 30_000, invalid), now + 30_000);
   assert.equal(byCode(s, 'host_health')[0].status, 'open');
 });
+
+test('a crash loop stays actionable while a rolling change on other hosts holds the rest of the network', () => {
+  const settings = settingsFor();
+  const container = (startedAgo, extra = {}) => ({ name: 'core', running: true, state: 'running', restarting: false, restarts: 0, startedAt: stamp(now - startedAgo), ...extra });
+  const node = (name, containers) => host(now, { services: [{ service: 'indexer', ok: false }], system: { uptime: 86_400 }, containers }, { name, instanceId: `i-${name}` });
+  // mn-1 and mn-2 were recreated cleanly, mn-3 is in a restart loop, mn-4 was not touched.
+  const state = network(now, [node('mn-1', [container(60_000)]), node('mn-2', [container(30_000)]), node('mn-3', [container(5_000, { restarts: 4 })]), node('mn-4', [container(86_400_000)])]);
+  const activity = recognizeActivity({ settings, states: { testnet: state }, now });
+  assert.deepEqual([activity.networks.testnet.held, activity.networks.testnet.reason], [true, 'rolling']);
+  const impaired = (id) => ({ id, region: 'us-west-2', state: 'running', instanceStatus: 'impaired', systemStatus: 'ok' });
+  const aws = { at, errors: [], volumes: [], addresses: [], health: { at, errors: [], alarms: [], instances: ['i-mn-1', 'i-mn-3', 'i-mn-4'].map(impaired) } };
+  const emitted = (s, code) => s.outbox.filter((e) => e.issue.code === code).map((e) => e.issue.target).sort();
+  const held = (s) => byCode(s, 'host_health').filter((i) => i.suppressed).map((i) => i.target).sort();
+  const s = reconcile(null, deriveIssues({ settings, states: { testnet: state }, activity, aws, now }), now);
+  assert.deepEqual(emitted(s, 'host_health'), ['mn-3'], 'only the crashing host is sent for repair');
+  assert.deepEqual(emitted(s, 'aws_instance_impaired'), ['i-mn-3'], 'and its instance check with it');
+  assert.deepEqual(held(s), ['mn-1', 'mn-2', 'mn-4'], 'the rest of the network stays held, as an open issue');
+  // The host was held with the others a minute ago; the crash loop releases it alone.
+  const before = network(now - 60_000, state.hosts.map((h) => ({ ...h, probe: { ...h.probe, at: stamp(now - 60_000), data: { ...h.probe.data, containers: [container(h.name === 'mn-4' ? 86_400_000 : 90_000)] } } })));
+  const earlier = recognizeActivity({ settings, states: { testnet: before }, now: now - 60_000 });
+  assert.deepEqual(earlier.crashing, []);
+  let rolling = reconcile(null, deriveIssues({ settings, states: { testnet: before }, activity: earlier, now: now - 60_000 }), now - 60_000);
+  assert.deepEqual([emitted(rolling, 'host_health'), held(rolling)], [[], ['mn-1', 'mn-2', 'mn-3', 'mn-4']]);
+  rolling = reconcile(rolling, deriveIssues({ settings, states: { testnet: state }, activity: recognizeActivity({ settings, states: { testnet: state }, previous: earlier, now }), now }), now);
+  assert.deepEqual([emitted(rolling, 'host_health'), held(rolling)], [['mn-3'], ['mn-1', 'mn-2', 'mn-4']]);
+  // A declared operation owns every host: restarts are part of it.
+  const declared = reconcile(null, deriveIssues({ settings: settingsFor({ maintenance: { active: true } }), states: { testnet: state }, activity, aws, now }), now);
+  assert.deepEqual([emitted(declared, 'host_health'), emitted(declared, 'aws_instance_impaired')], [[], []]);
+  const claimed = { ...state, journal: { owner: 'dashnet-runner' } };
+  const journal = recognizeActivity({ settings, states: { testnet: claimed }, now });
+  assert.equal(journal.networks.testnet.reason, 'journal');
+  assert.deepEqual(emitted(reconcile(null, deriveIssues({ settings, states: { testnet: claimed }, activity: journal, now }), now), 'host_health'), []);
+});
