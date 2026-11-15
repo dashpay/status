@@ -211,6 +211,22 @@ test('a journal claim is held only through the bounded activity result, and a co
   assert.ok(s.outbox.some((e) => e.issue.code === 'collector_stale'), 'the collector gap itself is still reported');
 });
 
+test('a stale network snapshot retains individual host and endpoint holds without asserting recovery', () => {
+  const settings = settingsFor();
+  const state = network(now, [host(now, { services: [{ service: 'indexer', ok: false }] })], [{ label: 'API', kind: 'http', ok: false }]);
+  let initial = reconcile(null, deriveIssues({ settings, states: { testnet: state }, now }), now);
+  const activity = { networks: {}, hosts: { 'testnet/i-one': { held: true, network: 'testnet', instanceId: 'i-one' } } };
+  initial = reconcile(initial, deriveIssues({ settings, states: { testnet: state }, activity, now: now + 60_000 }), now + 60_000);
+  const stale = { ...state, generatedAt: stamp(now - 600_000) };
+  const after = reconcile(initial, deriveIssues({ settings, states: { testnet: stale }, activity, now: now + 120_000 }), now + 120_000);
+  for (const code of ['host_health', 'endpoint_failed']) {
+    assert.equal(byCode(after, code)[0].suppressed, true, code);
+    assert.equal(byCode(after, code)[0].status, 'open', code);
+  }
+  const ended = reconcile(after, deriveIssues({ settings, states: { testnet: stale }, activity: { networks: {}, hosts: {} }, now: now + 180_000 }), now + 180_000);
+  for (const code of ['host_health', 'endpoint_failed']) assert.equal(byCode(ended, code)[0].suppressed, false, code);
+});
+
 test('omitted endpoint, skipped/stopped host, or malformed nested report cannot recover', () => {
   const state = network(now, [host(now, { services: [{ service: 'indexer', ok: false }] })], [{ label: 'API', kind: 'http', ok: false }]);
   const initial = reconcile(null, deriveNetwork(now, state), now);

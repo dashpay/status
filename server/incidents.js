@@ -156,6 +156,21 @@ export function deriveIssues({ settings, states, ci, aws, maintenance = {}, acti
     if (suppressed) for (const h of list(s?.hosts)) if (text(h.instanceId) && !crashing.has(activityKey(n.name, h))) heldInstances.add(h.instanceId);
     const current = source(key, s?.generatedAt, object(s) && Array.isArray(s.hosts), max);
     source(`${key}:monitor`, iso(now), true, max);
+    // Preserve hold/exemption metadata even when freshness or evaluation exits
+    // before health checks exist. These checks provide no recovery evidence.
+    for (const h of list(s?.hosts)) {
+      if (h.duplicate) continue;
+      const resource = h.instanceId || (n.source === 'report' ? `report:${h.name}` : null);
+      const exempt = crashing.has(activityKey(n.name, h));
+      check('network', n.name, h.name, 'host_health', key, false,
+        [...identity, resource || `unidentified:${h.name}`],
+        { suppressed: !exempt && (suppressed || activity?.hosts?.[activityKey(n.name, h)]?.held === true), exempt });
+    }
+    for (const e of list(s?.endpoints)) if (text(e.label)) {
+      check('network', n.name, e.label, 'endpoint_failed', key, false,
+        [...identity, e.kind || 'http', list(n.endpoints).find((v) => v.label === e.label)?.url || e.url || e.label],
+        { suppressed: suppressed || hostChanging });
+    }
     check('network', n.name, 'collector', 'collector_stale', key, current, identity, { suppressed });
     if (!current) {
       add('network', n.name, 'collector', 'collector_stale', 'critical', `${key}:monitor`, { lastObservationAt: sources[key].observedAt }, iso(now), identity);

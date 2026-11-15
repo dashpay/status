@@ -92,7 +92,8 @@ function Controls({ data, now, reload }) {
       <button className="btn btn-danger" disabled={busy || !c.supported}
         onClick={() => run('/api/remediation/clear', undefined, `Clear the repair queue? ${data.queuedEvents} queued event(s) are removed without being repaired. Repairs in progress and release compatibility tasks are not affected. Issues that are still open return on their next monitoring update.`)}>Clear queue</button>
       <span className="text-dim">{!c.supported ? 'The repair worker has not announced these controls yet; they become available once it runs this release.'
-        : c.pending ? 'Waiting for the repair worker to acknowledge (about a minute).' : 'Acknowledged by the repair worker.'}</span>
+        : c.applied == null ? 'Worker acknowledgement is unavailable; the requested setting is not yet confirmed.'
+          : c.pending || c.applied !== c.requested ? 'Waiting for the repair worker to acknowledge (about a minute).' : 'Acknowledged by the repair worker.'}</span>
     </div>
     <Err error={error} />
     {c.reset && <p className="mt-2 lv-warn">The saved switch setting was lost or was older than what the repair worker had applied, so dispatch was switched off. Switch it on again to resume.</p>}

@@ -591,6 +591,47 @@ class Tests(unittest.TestCase):
     def held(self):
         return self.db.execute("select status from events where id=?",('a'*24+':1',)).fetchone()[0]
 
+    def test_terminal_done_no_work_attempt_releases_after_two_inactive_observations(self):
+        root, run, now, failed = self.unstarted_run()
+        done = {**failed, 'status': 'done'}
+        late = now + b.HOLD_LEASE + 1
+        b.reconcile_sessions(root, lambda _: done, late)
+        self.assertEqual(self.held(), 'uncertain')
+        b.reconcile_sessions(root, lambda _: done, late + 61)
+        self.assertEqual(self.held(), 'queued')
+        self.assertTrue((root / (run + '.released.json')).exists())
+
+    def test_release_completion_survives_board_trimming_until_producer_acknowledges(self):
+        root = pathlib.Path(self.temp.name)
+        release = self.release_event()
+        b.ingest(self.db, envelope(release))
+        run = '1' * 24
+        with self.db:
+            self.db.execute("update events set status='completed',result=?,finished=?", (run, time.time()))
+        (root / (run + '.completion.json')).write_text(json.dumps({
+            'runId': run, 'terminal': True, 'pendingChildren': 0, 'outcome': 'resolved',
+            'finishedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            'compatibility': {'releaseId': 123, 'platformTag': 'v5.0.0-beta.2',
+                              'platformCommit': 'a'*40, 'dashnetCommit': 'b'*40,
+                              'result': 'compatible', 'report': 'fixture report', 'tests': ['fixture test']}}))
+        for start in range(0, 1000, 50):
+            batch = []
+            for n in range(start, start + 50):
+                e = event(); ident = hashlib.sha256(str(n).encode()).hexdigest()[:24]
+                e['eventId'] = ident + ':1'; e['issue']['id'] = ident; batch.append(e)
+            b.ingest(self.db, envelope(*batch))
+        snapshot = b.remediation_snapshot(self.db, root)
+        case = next(c for c in snapshot['cases'] if c['issueId'] == release['issue']['id'])
+        self.assertEqual(case['lastResponse']['compatibility']['releaseId'], 123)
+        self.assertEqual(len(snapshot['cases']), 1001)
+        resolved = copy.deepcopy(release)
+        resolved.update(eventId='b'*24+':2', transition='resolved')
+        resolved['issue'].update(revision=2, status='resolved')
+        b.ingest(self.db, envelope(resolved))
+        snapshot = b.remediation_snapshot(self.db, root)
+        self.assertEqual(len(snapshot['cases']), 1000)
+        self.assertNotIn('b'*24, [c['issueId'] for c in snapshot['cases']])
+
     def test_an_attempt_that_did_no_work_returns_to_the_queue_after_its_lease(self):
         root,run,now,failed=self.unstarted_run()
         def broken(_): raise OSError('gateway unavailable')
@@ -827,6 +868,46 @@ class Tests(unittest.TestCase):
         b.ingest(self.db, control(2, 'off'))
         self.assertFalse(b.dispatch_on(self.db))
         self.assertEqual(self.db.execute('select status from events').fetchone()[0], 'running', 'switching off never interrupts work in progress')
+
+    def test_concurrent_older_on_cannot_overwrite_newer_off(self):
+        first_read = threading.Event(); release_first = threading.Event()
+        second_started = threading.Event(); second_done = threading.Event()
+        failures = []
+        original = b.remote_control
+        def paused_read(db):
+            state = original(db)
+            if threading.current_thread().name == 'older-on':
+                first_read.set()
+                if not release_first.wait(5): raise TimeoutError('test release missing')
+            return state
+        def deliver(seq, dispatch):
+            db = b.sqlite3.connect(pathlib.Path(self.temp.name)/'inbox.sqlite', timeout=5)
+            db.row_factory = b.sqlite3.Row
+            try:
+                if seq == 2: second_started.set()
+                b.ingest(db, {**envelope(), 'control': {'seq': seq, 'dispatch': dispatch, 'clearSeq': 0}})
+            except Exception as error:
+                failures.append(error)
+            finally:
+                db.close()
+                if seq == 2: second_done.set()
+        with patch.object(b, 'remote_control', paused_read):
+            older = threading.Thread(target=deliver, args=(1, 'on'), name='older-on')
+            newer = threading.Thread(target=deliver, args=(2, 'off'), name='newer-off')
+            older.start()
+            try:
+                self.assertTrue(first_read.wait(3))
+                newer.start()
+                self.assertTrue(second_started.wait(3))
+                self.assertFalse(second_done.wait(.15), 'control read must hold the write lock')
+            finally:
+                release_first.set()
+                older.join(5)
+                if newer.ident is not None: newer.join(5)
+        self.assertFalse(older.is_alive() or newer.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(b.remote_control(self.db)['seq'], 2)
+        self.assertFalse(b.dispatch_on(self.db))
 
     def test_a_producer_that_lost_its_counter_switches_off_with_the_acknowledged_sequence(self):
         root = pathlib.Path(self.temp.name)

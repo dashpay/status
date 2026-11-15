@@ -269,6 +269,11 @@ def validate(payload):
 def ingest(db, payload):
     events = validate(payload)
     with db:
+        # Serialize the read/compare/write of control counters, not only the
+        # eventual INSERT. Otherwise an older concurrent ON can overwrite OFF.
+        # A harmless write also acquires the lock when a caller already opened
+        # a transaction; unlike BEGIN IMMEDIATE it can safely join that one.
+        db.execute("update meta set value=value where key='remote_control'")
         # A clear empties what was queued before this envelope; the events it
         # carries arrive after the administrator's request and stay queued.
         if 'control' in payload:
@@ -380,8 +385,7 @@ def ci_failure_fingerprint(event):
             or type(evidence.get('runId')) is not int or evidence['runId'] <= 0
             or type(evidence.get('attempt')) is not int or evidence['attempt'] <= 0
             or any(not isinstance(evidence.get(k), str) or not evidence[k].strip()
-                   for k in ('repo', 'jobName', 'runner', 'end'))
-            or evidence['runner'] != issue.get('scope')):
+                   for k in ('repo', 'jobName', 'runner', 'end'))):
         return None
     try:
         clock_value(evidence['end'])
@@ -476,6 +480,7 @@ def remediation_snapshot(db, root):
         presentations = {}
     if not isinstance(presentations, dict): presentations = {}
     cases = []
+    pending_releases = set()
     scheduler_row = db.execute("select value from meta where key='scheduler'").fetchone()
     scheduler = json.loads(scheduler_row['value']) if scheduler_row else {}
     waits = {r['eventId']: r for r in scheduler.get('queued', [])}
@@ -485,6 +490,9 @@ def remediation_snapshot(db, root):
         return value[:limit] if isinstance(value, str) else None
     for ident, rows in groups.items():
         latest = max(rows, key=lambda r: int(r['id'].split(':')[1]))
+        issue = json.loads(latest['body'])['issue']
+        if issue['domain'] == 'maintenance' and issue['status'] == 'open':
+            pending_releases.add(ident)
         active = [r for r in rows if r['status'] in {'running', 'uncertain'}]
         current = max(active, key=lambda r: r['started'] or 0) if active else latest
         finished = [r for r in rows if r['status'] == 'completed' and r['result']]
@@ -519,8 +527,13 @@ def remediation_snapshot(db, root):
                                        'nextAction': bounded(detail.get('nextAction')),
                                        'changes': [bounded(x, 300) for x in detail.get('changes', [])[:8] if isinstance(x, str)] if isinstance(detail.get('changes'), list) else []}
                                       if receipt else None})
+    # Release tasks emit no reminders. Retain their completion channel until
+    # the producer sends the resolved revision acknowledging the receipt.
+    recent = cases[-1000:]
+    shown = {c['issueId'] for c in recent}
+    retained = [c for c in cases if c['issueId'] in pending_releases and c['issueId'] not in shown] + recent
     return {'schemaVersion': 1, 'generatedAt': stamp(time.time()), 'enabled': (root / 'ENABLED').exists() and dispatch_on(db),
-            'maxActive': scheduler.get('maxActive'), 'progress': progress_health(db), 'cases': cases[-1000:], 'truncated': len(cases) > 1000}
+            'maxActive': scheduler.get('maxActive'), 'progress': progress_health(db), 'cases': retained, 'truncated': len(cases) > len(retained)}
 
 
 def health(db, root=None):
@@ -1059,11 +1072,11 @@ def reconcile_sessions(root, session_reader=describe_session, now=None):
                         db.execute('update lifecycle set idle_since=null where run=? and idle_since is not null', (run,))
                 ended = session.get('endedAt')
                 idle = terminal_session(session, row['started'] or now)
+                if unstarted:
+                    if confirm_inactive(db, run, now):
+                        release_unstarted(db, root, row, session, now)
+                    continue
                 if not idle:
-                    if unstarted:
-                        if confirm_inactive(db, run, now):
-                            release_unstarted(db, root, row, session, now)
-                        continue
                     with db:
                         db.execute('insert into lifecycle(run,note) values(?,?) on conflict(run) do update set observation=null,observed=null,note=excluded.note',
                                    (run, 'session active or terminal identity not established; reservation retained'))
