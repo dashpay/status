@@ -58,7 +58,9 @@ export const coreNetwork = (name, generation = 1) => `devnet-${shortName(name)}$
 
 export function validateDevnetRequest(settings, q, registry) {
   if (!NAME.test(q.network || '')) throw new Error('name must look like devnet-<name> (lowercase, 2-31 characters after devnet-)');
-  if (settings.networks.some((n) => n.name === q.network) || registry[q.network]) throw new Error(`${q.network} already exists; journal records are permanent, pick a new name`);
+  // A deleted devnet's name is free again. Whether its EC2 journal record may be
+  // replaced is decided by dash-network-go at provisioning, from the record itself.
+  if (settings.networks.some((n) => n.name === q.network) || (registry[q.network] && registry[q.network].status !== 'deleted')) throw new Error(`${q.network} already exists; delete it before using the name again`);
   // <name>-g<N> is how a reset chain of devnet-<name> is named (and its DNS alias).
   if (/-g\d+$/.test(q.network)) throw new Error('name must not end in -g<number>: that is how a reset devnet chain is named');
   // Placement (VPC, subnet, groups, key, IPAM, DNS zone) always comes from Settings.
@@ -120,6 +122,33 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
   const registryPath = join(dirs.data, 'devnets.json');
   const registry = () => readJSON(registryPath, {});
   const register = (name, patch) => { const r = registry(); r[name] = { ...(r[name] || {}), ...patch, updatedAt: new Date().toISOString() }; writeAtomic(registryPath, JSON.stringify(r, null, 1)); };
+  // A name used again starts from an empty entry. Nothing of the deleted devnet
+  // (addresses, promo codes, wallet, versions, readiness) may carry over; a short
+  // history of who held the name is kept.
+  const supersede = (name) => {
+    const r = registry(), old = r[name] || {};
+    const held = { createdAt: old.createdAt || null, createdBy: old.createdBy || null, deletedAt: old.deletedAt || old.updatedAt || null, operation: old.operation || null, coreNetwork: old.coreNetwork || null };
+    r[name] = { previous: [...(Array.isArray(old.previous) ? old.previous : []), held].slice(-20), updatedAt: new Date().toISOString() };
+    writeAtomic(registryPath, JSON.stringify(r, null, 1));
+  };
+  // The deleted devnet's working files (plans, host keys, secrets, stage
+  // journals) must never be resumed by a new devnet of the same name. They are
+  // moved aside once, not removed. Its published connection facts are derived
+  // data and are removed, so they are never served for the new devnet.
+  const setAside = (name) => {
+    const reg = registry()[name];
+    if (reg?.status !== 'deleted' || reg.filesSetAsideAt) return null;
+    const dir = join(dirs.private, 'devnets', name);
+    let kept = null;
+    if (existsSync(dir)) {
+      mkdirSync(join(dirs.private, 'devnets-deleted'), { recursive: true, mode: 0o700 });
+      kept = join(dirs.private, 'devnets-deleted', `${name}-${stamp()}`);
+      renameSync(dir, kept);
+    }
+    rmSync(join(dirs.data, 'devnets', name), { recursive: true, force: true });
+    register(name, { filesSetAsideAt: new Date().toISOString() });
+    return kept;
+  };
   // Registered before Route 53 has them, so deleting after a failed install removes them too.
   const registerNames = (name, d, dplan) => register(name, { dns: { ...(registry()[name]?.dns || {}), ...serviceNames(name, d, dplan.coreNetwork) } });
   const ec2 = clients.ec2 || new EC2Client({ region }), r53 = clients.r53 || new Route53Client({ region: 'us-east-1' }), ssm = clients.ssm || new SSMClient({ region });
@@ -211,10 +240,17 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
   async function prepareCreate(r) {
     const s = getSettings();
     const d = validateDevnetRequest(s, r.request, registry());
-    const name = r.network, dir = workDir(name);
-    rmSync(join(dir, 'dashnet'), { force: true }); // nothing is bound to a binary before provisioning
+    const name = r.network, before = registry()[name];
     r.status = 'preparing'; save(r);
-    let done = step(r, 'Current Ubuntu 24.04 AMIs (Canonical)');
+    let done;
+    if (before?.status === 'deleted') {
+      done = step(r, 'Set aside the files of the deleted devnet of this name');
+      const kept = setAside(name);
+      done('ok', kept ? 'kept, not reused' : 'already set aside');
+    }
+    const dir = workDir(name);
+    rmSync(join(dir, 'dashnet'), { force: true }); // nothing is bound to a binary before provisioning
+    done = step(r, 'Current Ubuntu 24.04 AMIs (Canonical)');
     const amis = {};
     for (const a of new Set([d.validatorArch, d.walletArch])) amis[a] = await ami(a);
     done('ok', Object.entries(amis).map(([a, id]) => `${a} ${id}`).join(', '));
@@ -242,6 +278,8 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       images: Object.fromEntries([...COMPONENTS, ...(d.images.acme ? ['acme'] : [])].map((c) => [c, { ref: d.images[c], digests: lockDigests(lock, c) }])),
       protocol: d.protocol, blockTimeSeconds: blockSeconds(d), platformEpochSeconds: epochSeconds(d), coreNetwork: coreNetwork(name), platformChainId: `dash-${coreNetwork(name)}`,
       dns: serviceNames(name, d, coreNetwork(name)), services: d.services, amis, network: { vpc: d.vpcId, subnet: d.subnetId, securityGroups: d.securityGroupIds, ipamPool: d.ipamPoolId },
+      // Shown before confirmation: the name, and so the chain name, was used before.
+      ...(before?.status === 'deleted' ? { replaces: { deletedAt: before.deletedAt || before.updatedAt || null, createdBy: before.createdBy || null } } : {}),
     };
   }
 
@@ -263,8 +301,18 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     // Records created before stage tracking: derive completed stages from their steps.
     r.done ??= [['provision', 'dashnet provision)'], ['bootstrap', 'dashnet bootstrap)'], ['deploy', 'dashnet deploy)']]
       .filter(([, tag]) => r.steps.some((st) => st.name.endsWith(tag) && st.status === 'ok')).map(([k]) => k);
-    const reg = registry()[name];
-    if (reg && ['deleting', 'deleted'].includes(reg.status)) throw new Error(`${name} is ${reg.status}; this creation cannot resume`);
+    let reg = registry()[name];
+    if (reg?.status === 'deleting') throw new Error(`${name} is ${reg.status}; this creation cannot resume`);
+    if (reg?.status === 'deleted') {
+      // Only a creation requested after the deletion takes the name, and only
+      // once the deleted devnet's files were set aside by its own preparation.
+      if (!(Date.parse(r.createdAt) > Date.parse(reg.deletedAt || reg.updatedAt))) throw new Error(`${name} is ${reg.status}; this creation cannot resume`);
+      if (!reg.filesSetAsideAt) throw new Error(`${name} was deleted; prepare this creation again`);
+      supersede(name);
+      reg = registry()[name];
+    }
+    // An operation of the devnet that held the name before cannot continue this one.
+    if (reg?.operation && reg.operation !== r.id) throw new Error(`${name} belongs to another creation; this one cannot resume`);
     r.status = 'running'; save(r);
     // Resume continues at the first stage that has not completed.
     const once = async (key, fn) => { if (r.done.includes(key)) return; await fn(); r.done.push(key); save(r); };

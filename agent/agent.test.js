@@ -161,7 +161,8 @@ test('devnet requests: admin-only fields, permanent names, placement from settin
   assert.equal(d.subnetId, s.devnets.subnetId);
   assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { subnetId: 'subnet-evil' } }, {}), /not settable/);
   assert.throws(() => validateDevnetRequest(s, { ...q, network: 'devnet-moutai' }, {}), /already exists/);
-  assert.throws(() => validateDevnetRequest(s, q, { 'devnet-bonsai': { status: 'deleted' } }), /already exists/);
+  assert.equal(validateDevnetRequest(s, q, { 'devnet-bonsai': { status: 'deleted' } }).validators, 15, 'a deleted devnet releases its name');
+  for (const status of ['creating', 'services', 'ready', 'failed', 'deleting']) assert.throws(() => validateDevnetRequest(s, q, { 'devnet-bonsai': { status } }), /already exists/);
   assert.throws(() => validateDevnetRequest(s, { ...q, network: 'bonsai' }, {}), /devnet-<name>/);
   assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { validators: 7 } }, {}), /13..25/);
   assert.throws(() => validateDevnetRequest(s, { ...q, devnet: { images: { drive: 'evil/drive:1' } } }, {}), /images.drive/);
@@ -555,4 +556,67 @@ test('dashmate-rendered devnets need an IPAM pool, and their dashmate follows Dr
   assert.throws(() => validateDevnetRequest(s, q({}), {}), /IPAM pool is required/);
   assert.deepEqual(imagesOf('apiVersion: x\nimages:\n  core: docker.io/dashpay/dashd:23\n  helper: docker.io/dashpay/dashmate-helper:4.2.0-beta.6\n  acme: docker.io/goacme/lego:v5.5.2\nnodes: []\n'),
     { core: 'dashpay/dashd:23', helper: 'dashpay/dashmate-helper:4.2.0-beta.6', acme: 'goacme/lego:v5.5.2' });
+});
+
+test('a deleted devnet releases its name: the new one reuses none of its files or registry data', async () => {
+  const { createDevnets } = await import('./devnets.js');
+  const root = mkdtempSync(join(tmpdir(), 'reuse-'));
+  const dirs = { data: join(root, 'data'), private: join(root, 'private') };
+  const name = 'devnet-sakura', work = join(dirs.private, 'devnets', name), facts = join(dirs.data, 'devnets', name);
+  mkdirSync(work, { recursive: true }); mkdirSync(facts, { recursive: true });
+  // What the deleted devnet left behind.
+  for (const f of ['deployment.json', 'bootstrap-plan.json', 'ec2-plan.json', 'known_hosts', 'dashnet']) writeFileSync(join(work, f), 'OLD');
+  writeFileSync(join(facts, 'config.json'), JSON.stringify({ hosts: ['OLD'] }));
+  const deletedAt = '2026-11-10T10:00:00.000Z';
+  const old = { status: 'deleted', deletedAt, createdAt: '2026-11-01T10:00:00.000Z', createdBy: 'first-owner', operation: 'old-op', coreNetwork: name, readyAt: '2026-11-01T11:00:00.000Z',
+    platform: 'ready', walletAddress: 'yOLD', promoCodes: { OLD: 1 }, upgradeScopes: ['core'], dns: { explorer: { host: 'explorer.sakura.networks.dash.org' } }, dnsZoneId: 'Z1' };
+  const registryPath = join(dirs.data, 'devnets.json'), entry = () => JSON.parse(readFileSync(registryPath, 'utf8'))[name];
+  writeFileSync(registryPath, JSON.stringify({ [name]: old }));
+  const planId = 'a'.repeat(64), calls = [];
+  const dashnet = async (r, args) => {
+    calls.push(args[0]);
+    const out = args[args.indexOf('--out') + 1];
+    if (args[0] === 'resolve') writeFileSync(out, '{}');
+    if (args[0] === 'provision-plan') writeFileSync(out, JSON.stringify({ id: planId, targets: [{ group: 'validators', instanceType: 'c7g.large', architecture: 'arm64' }] }));
+    return args[0] === 'provision' ? 1 : 0; // stop at the first step that would touch AWS
+  };
+  const steps = [];
+  const ctx = { dashnet, step: (r, n) => { const s = { name: n }; steps.push(s); return (status, detail) => { s.status = status; s.detail = detail; }; }, save: () => {}, write: () => {}, pinBinary: (dir) => join(dir, 'dashnet') };
+  const devnets = createDevnets({ ctx, dirs, key: { path: '/k' }, pool: {}, getSettings: () => structuredClone(settings), region: 'us-west-2', log: () => {}, clients: { ec2: {}, r53: {}, ssm: { send: async () => ({ Parameter: { Value: 'ami-1' } }) } }, wait: async () => {} });
+  const request = { id: '6c8139ad-e92f-40da-943d-1e001efacc20', network: name, action: 'create-devnet', devnet: { validators: 13 } };
+  const op = (id, createdAt) => ({ id, network: name, createdAt, actor: { login: 'second-owner' }, request, steps: [] });
+
+  // The creation that built the deleted devnet cannot be resumed into the name,
+  // even with its reviewed plan still on disk.
+  writeFileSync(join(work, 'request.json'), '{}'); writeFileSync(join(work, 'ec2-plan.json'), JSON.stringify({ id: planId }));
+  await assert.rejects(devnets.executeCreate({ ...op('old-op', '2026-11-01T10:00:00.000Z'), review: { planId } }), /is deleted; this creation cannot resume/);
+  const fresh = op('new-op', '2026-11-12T10:00:00.000Z');
+  // A new creation that was never prepared must not run on the old files.
+  await assert.rejects(devnets.executeCreate({ ...fresh, review: { planId } }), /prepare this creation again/);
+  assert.equal(entry().status, 'deleted', 'nothing was changed by the refused runs');
+
+  await devnets.prepareCreate(fresh);
+  assert.deepEqual(steps[0], { name: 'Set aside the files of the deleted devnet of this name', status: 'ok', detail: 'kept, not reused' });
+  const kept = readdirSync(join(dirs.private, 'devnets-deleted'));
+  assert.equal(kept.length, 1); assert.match(kept[0], /^devnet-sakura-/);
+  assert.equal(readFileSync(join(dirs.private, 'devnets-deleted', kept[0], 'deployment.json'), 'utf8'), 'OLD', 'the old files are kept');
+  for (const f of ['deployment.json', 'bootstrap-plan.json', 'known_hosts', 'dashnet']) assert.equal(existsSync(join(work, f)), false, `${f} of the deleted devnet is not in the new work directory`);
+  assert.equal(JSON.parse(readFileSync(join(work, 'ec2-plan.json'), 'utf8')).id, planId);
+  assert.equal(existsSync(join(facts, 'config.json')), false, 'the old connection facts are no longer published');
+  assert.deepEqual(fresh.review.replaces, { deletedAt, createdBy: 'first-owner' });
+  assert.equal(entry().status, 'deleted', 'the name is taken only when the creation is confirmed and runs');
+  // Preparing again does not move the new files away.
+  await devnets.prepareCreate(fresh);
+  assert.equal(readdirSync(join(dirs.private, 'devnets-deleted')).length, 1);
+
+  await assert.rejects(devnets.executeCreate(fresh), /provision failed/);
+  assert.deepEqual(calls.at(-1), 'provision');
+  const now = entry();
+  assert.deepEqual([now.status, now.createdBy, now.operation], ['creating', 'second-owner', 'new-op']);
+  for (const k of ['readyAt', 'platform', 'walletAddress', 'promoCodes', 'upgradeScopes', 'deletedAt', 'filesSetAsideAt']) assert.equal(now[k], undefined, `${k} of the deleted devnet is not carried over`);
+  assert.deepEqual(now.previous, [{ createdAt: old.createdAt, createdBy: 'first-owner', deletedAt, operation: 'old-op', coreNetwork: name }]);
+  // Resuming the new creation continues it; the deleted devnet's operation cannot.
+  await assert.rejects(devnets.executeCreate(fresh), /provision failed/);
+  assert.equal(entry().previous.length, 1);
+  await assert.rejects(devnets.executeCreate({ ...op('old-op', '2026-11-01T10:00:00.000Z'), review: { planId } }), /belongs to another creation/);
 });

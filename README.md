@@ -75,7 +75,9 @@ while it is built. Each devnet's wallet host also runs:
 Console devnets can be upgraded (dash-network-go `upgrade-plan`/`upgrade`, Drive,
 DAPI, gateway, helper or Tenderdash, one validator at a time), have their services
 re-applied from Settings defaults, and be deleted (instances, disks, BYOIP
-addresses, DNS; the journal record keeps the name reserved).
+addresses, DNS). A deleted devnet's name can be used again: the new devnet starts from
+empty files and a new registry entry, and dash-network-go replaces the EC2 journal
+record only when that record shows the old network's addresses were released.
 
 **Platform wipe/redeploy** (admins, dashmate devnets including console-created dashnet deployments) follows the
 Platform reset rulebook: baseline and private backups on every HPMN and the seed,
