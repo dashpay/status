@@ -323,6 +323,67 @@ Controls are sent only after the receiver has announced them in an ACK, so an
 older receiver never sees an unknown envelope field. Deploy the receiver first;
 until then the buttons are disabled.
 
+## Upstream release compatibility tasks
+
+A network is built from three components: Dash Core, Platform and Tenderdash. A
+new release of any of them can break `dash-network-go` before anyone deploys
+it, so each published release becomes one task for the repair worker: check
+`dash-network-go` against that exact release and prepare a fix for review.
+
+| Repository | GitHub ID | Issue code |
+| --- | --- | --- |
+| `dashpay/platform` | 424232911 | `platform_release_compatibility` |
+| `dashpay/dash` | 19352450 | `core_release_compatibility` |
+| `dashpay/tenderdash` | 283521505 | `tenderdash_release_compatibility` |
+
+The worker host has no public ingress, so GitHub delivers to the status server:
+
+- `POST /api/webhooks/github/release` (the original
+  `/api/webhooks/github/platform-release` is the same handler and keeps
+  working). The signature (`X-Hub-Signature-256`) is checked over the raw body
+  with the secret in the file named by `GITHUB_RELEASE_WEBHOOK_SECRET_FILE`;
+  without it the endpoint answers 503. On each repository the webhook is:
+  that URL, content type `application/json`, the shared secret, **Releases**
+  events only.
+- Only `published` is acted on, for a repository whose name and ID both match
+  the table. Pre-releases count. A release promoted later, or redelivered, is
+  the same release and creates nothing new.
+- What is kept is repository, release ID, tag, pre-release flag and times, in
+  `data/release-inbox/<repository ID>-<release ID>.json`. **The title and
+  release notes are never stored or forwarded**: they are upstream free text
+  and must not reach an agent as instructions. The tag must look like a
+  version.
+- The incident sidecar turns each record into one `maintenance` issue (scope
+  `dash-network-go`, severity `info`) and sends it over the signed channel. No
+  six-hourly reminder: a release is one piece of work, not a recurring fault.
+  Core and Tenderdash tasks are sent only once the receiver announces
+  `releaseRepositories` in its acknowledgement, so a receiver that predates
+  them never rejects a batch. Until then their records wait in the inbox.
+
+The receiver accepts only these three repositories with their fixed IDs and
+codes, `mode: code-and-tests-only` and `liveChangesAllowed: false`. The
+instructions it gives the worker are written locally and name the component
+from that table, never from the event. They allow source, generator and test
+changes to `dash-network-go` in an isolated worktree and a draft pull request,
+and forbid deploying, upgrading, changing version pins, resetting, restarting,
+publishing or merging. The worker is told to test the release together with
+the other two components (the combination deployed now and the newest released
+one) and to keep the release lines still deployed working.
+
+A task is resolved only by a completion receipt carrying version-bound proof:
+`releaseId`, the release tag and its 40-hex commit, the tested
+`dash-network-go` commit, `result` (`compatible` or `fixed`), a report path
+and at least one passing test. Platform receipts use `platformTag` and
+`platformCommit`; Core and Tenderdash receipts name their `repository` and use
+`releaseTag` and `releaseCommit`. Anything else stays open as blocked or
+awaiting a complete report.
+
+All three share the scope `maintenance:dash-network-go`: one task per attempt,
+one session, and a separate budget of one admission an hour and four a day.
+They wait while dispatch is switched off, and a queue clear leaves them queued.
+
+Not covered: images with no GitHub release (nightlies, forks, patched tags).
+
 ## Remediation board
 
 `/remediation` shows unique issues, queued event revisions, active work, waiting

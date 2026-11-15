@@ -101,6 +101,8 @@ function hostProofs(row, network, settings, coreTip, platformTip, now) {
 }
 export const TITLES = {
   platform_release_compatibility: 'Platform release compatibility check and dash-network-go fix',
+  core_release_compatibility: 'Dash Core release compatibility check and dash-network-go fix',
+  tenderdash_release_compatibility: 'Tenderdash release compatibility check and dash-network-go fix',
   collector_stale: 'Network observations missing or stale', discovery_failed: 'Network discovery incomplete',
   host_health: 'Network host health check failed', endpoint_failed: 'Network endpoint check failed',
   reporter_missing: 'CI reporter has never reported', reporter_stale: 'CI reporter stopped reporting',

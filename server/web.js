@@ -78,7 +78,9 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
       res.json(r);
     } catch (e) { res.status(400).json({ error: e.message }); }
   });
-  app.post('/api/webhooks/github/platform-release', express.raw({ type: 'application/json', limit: '1mb' }), (req, res) => {
+  // One receiver for dashpay/dash, dashpay/platform and dashpay/tenderdash. The
+  // first path is the original Platform webhook and keeps working unchanged.
+  app.post(['/api/webhooks/github/platform-release', '/api/webhooks/github/release'], express.raw({ type: 'application/json', limit: '1mb' }), (req, res) => {
     try {
       const result = receiveRelease({ dataDir, secret: readSecret(process.env.GITHUB_RELEASE_WEBHOOK_SECRET_FILE), raw: req.body,
         signature: req.get('x-hub-signature-256'), event: req.get('x-github-event'), delivery: req.get('x-github-delivery'), now: clock() });

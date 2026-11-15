@@ -4,7 +4,7 @@ import { createHmac, randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { receiveRelease, loadReleaseInbox, reconcileReleaseTasks } from './release-webhook.js';
+import { receiveRelease, loadReleaseInbox, reconcileReleaseTasks, validCompatibility } from './release-webhook.js';
 import { createWeb } from './web.js';
 import { remediationView } from './remediation.js';
 
@@ -90,4 +90,68 @@ test('real HTTP route uses raw bytes, requires signature and creates no network 
   assert.equal(response.status, 202); assert.equal((await response.json()).releaseId, 123);
   assert.deepEqual(readdirSync(join(dataDir, 'requests')), []); assert.deepEqual(readdirSync(join(dataDir, 'ops')), []);
   assert.equal(JSON.parse(readFileSync(join(dataDir, 'release-inbox', '424232911-123.json'))).releaseId, 123);
+});
+
+const other = (name, id, tag, releaseId = 900) => { const p = payload(); p.repository = { id, full_name: name }; p.release.id = releaseId; p.release.tag_name = tag; return p; };
+const core = () => other('dashpay/dash', 19352450, 'v24.0.0'), tenderdash = () => other('dashpay/tenderdash', 283521505, 'v1.5.0-dev.3');
+
+test('Core and Tenderdash releases are stored under their own repository; a mismatched name and ID is refused', (t) => {
+  const dataDir = temp(t);
+  for (const p of [core(), tenderdash()]) assert.equal(receiveRelease({ ...signed(p), dataDir }).duplicate, false);
+  assert.match(receiveRelease({ ...signed(core()), dataDir }).task, /compatibility with Dash Core v24\.0\.0$/);
+  for (const [name, id] of [['dashpay/dash', 424232911], ['dashpay/platform', 19352450], ['dashpay/unknown', 19352450], ['__proto__', 1], ['constructor', 1]])
+    assert.throws(() => receiveRelease({ ...signed(other(name, id, 'v9.9.9', 901)), dataDir }), /Repository/);
+  assert.deepEqual(loadReleaseInbox(dataDir).map((r) => `${r.repository}@${r.tag}`).sort(), ['dashpay/dash@v24.0.0', 'dashpay/tenderdash@v1.5.0-dev.3']);
+  assert.deepEqual(readdirSync(join(dataDir, 'release-inbox')).sort(), ['19352450-900.json', '283521505-900.json']);
+  assert.equal(JSON.stringify(loadReleaseInbox(dataDir)).includes('UNTRUSTED'), false);
+});
+
+test('Core and Tenderdash tasks wait for a receiver that takes them, then carry their own code and proof', (t) => {
+  const dataDir = temp(t);
+  for (const p of [payload(), core(), tenderdash()]) receiveRelease({ ...signed(p), dataDir });
+  const records = loadReleaseInbox(dataDir), state = { issues: [], outbox: [], generatedAt: new Date(now).toISOString() };
+  reconcileReleaseTasks(state, records, now);
+  assert.deepEqual(state.issues.map((i) => i.code), ['platform_release_compatibility'], 'an older receiver is sent Platform tasks only');
+  state.delivery = { receiver: { releaseRepositories: ['dashpay/dash', 'dashpay/platform', 'dashpay/tenderdash'] } };
+  reconcileReleaseTasks(state, records, now + 1);
+  assert.deepEqual(state.issues.map((i) => i.code).sort(), ['core_release_compatibility', 'platform_release_compatibility', 'tenderdash_release_compatibility']);
+  assert.equal(state.outbox.length, 3); assert.equal(new Set(state.issues.map((i) => i.id)).size, 3);
+  const issue = state.issues.find((i) => i.code === 'core_release_compatibility'), release = records.find((r) => r.repository === 'dashpay/dash');
+  assert.equal(issue.target, 'Dash Core v24.0.0'); assert.equal(issue.evidence.repositoryId, 19352450);
+  assert.equal(issue.evidence.liveChangesAllowed, false); assert.equal(issue.scope, 'dash-network-go');
+
+  const proof = { releaseId: 900, repository: 'dashpay/dash', releaseTag: 'v24.0.0', releaseCommit: 'a'.repeat(40), dashnetCommit: 'b'.repeat(40), result: 'compatible', report: 'reports/core.md', tests: ['matrix passed'] };
+  assert.equal(validCompatibility(proof, release), true);
+  for (const wrong of [{ repository: 'dashpay/tenderdash' }, { repository: undefined }, { releaseTag: 'v24.0.1' }, { releaseCommit: 'abc' }, { releaseId: 901 }, { tests: [] }])
+    assert.equal(validCompatibility({ ...proof, ...wrong }, release), false);
+  assert.equal(validCompatibility({ ...proof, repository: undefined, platformTag: 'v24.0.0', platformCommit: 'a'.repeat(40) }, release), false, 'the Platform form never proves a Core release');
+  const platform = records.find((r) => r.repository === 'dashpay/platform');
+  assert.equal(validCompatibility({ ...proof, releaseId: 123, repository: 'dashpay/platform', releaseTag: platform.tag }, platform), true, 'a Platform report may use either form');
+
+  state.delivery.receiver = { ...state.delivery.receiver, workerAt: now / 1000, remediation: { schemaVersion: 1, generatedAt: new Date(now).toISOString(), enabled: true,
+    cases: [{ issueId: issue.id, workerState: 'completed', active: false, lastResponse: { outcome: 'resolved', compatibility: proof } }] } };
+  reconcileReleaseTasks(state, records, now + 2);
+  assert.equal(issue.status, 'resolved'); assert.equal(issue.resolutionEvidence.releaseCommit, 'a'.repeat(40));
+  state.outbox = [];
+  const shown = remediationView(state, { now }).cases.find((c) => c.id === issue.id);
+  assert.equal(shown.title, 'Check and fix dash-network-go compatibility with Dash Core v24.0.0');
+  assert.equal(shown.stageLabel, 'Compatibility verified'); assert.equal(shown.taskType, 'compatibility');
+});
+
+test('one signed route serves all three repositories; the original Platform path keeps working', async (t) => {
+  const dataDir = temp(t), secretFile = join(dataDir, 'hook-secret'); writeFileSync(secretFile, secret);
+  const previous = process.env.GITHUB_RELEASE_WEBHOOK_SECRET_FILE; process.env.GITHUB_RELEASE_WEBHOOK_SECRET_FILE = secretFile;
+  t.after(() => { if (previous === undefined) delete process.env.GITHUB_RELEASE_WEBHOOK_SECRET_FILE; else process.env.GITHUB_RELEASE_WEBHOOK_SECRET_FILE = previous; });
+  const app = createWeb({ dataDir, origin: 'http://localhost' });
+  const server = await new Promise((resolve) => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
+  t.after(() => { app.close(); server.close(); });
+  const post = (path, input, sign = true) => fetch(`http://127.0.0.1:${server.address().port}${path}`, { method: 'POST', body: input.raw,
+    headers: { 'content-type': 'application/json', 'x-github-event': 'release', 'x-github-delivery': input.delivery, ...(sign ? { 'x-hub-signature-256': input.signature } : {}) } });
+  assert.equal((await post('/api/webhooks/github/release', signed(tenderdash()), false)).status, 401);
+  assert.equal((await post('/api/webhooks/github/release', signed(tenderdash()))).status, 202);
+  assert.equal((await post('/api/webhooks/github/release', signed(core()))).status, 202);
+  assert.equal((await post('/api/webhooks/github/platform-release', signed())).status, 202);
+  assert.equal((await post('/api/webhooks/github/release', signed(other('dashpay/other', 1, 'v1.0.0')))).status, 403);
+  assert.deepEqual(readdirSync(join(dataDir, 'release-inbox')).sort(), ['19352450-900.json', '283521505-900.json', '424232911-123.json']);
+  assert.deepEqual(readdirSync(join(dataDir, 'requests')), []); assert.deepEqual(readdirSync(join(dataDir, 'ops')), []);
 });
