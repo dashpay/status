@@ -66,7 +66,8 @@ removing it pauses new work without discarding the inbox.
 
 The worker defaults to one batch, with per-scope sessions and a 15-minute
 cooldown, capped globally at eight batches/hour and 48/day. An operator-reviewed
-`concurrency.json` beside the inbox may allow two disjoint batches:
+`concurrency.json` beside the inbox may allow up to three disjoint batches
+(the example allows two):
 
 ```json
 {
@@ -111,34 +112,100 @@ Before each invocation the worker uses `sessions.patch` to persist and verify
 `daniel@ktechmidas.net` OAuth account). User-origin model/account pins disable
 the Gateway model fallback ladder. Invocation is through
 `docker exec infraclaw openclaw agent --model openai/gpt-6-astra --thinking high`,
-without a shell or external delivery. A failed/mismatched pin pauses dispatch
-before invoking a model; never inherit the global CLIProxy default. A per-run
-`.route.json` records the verified selection without credentials.
+without a shell or external delivery. A failed/mismatched pin never invokes a
+model and never inherits the global CLIProxy default: the batch returns to the
+queue and the same route is retried with backoff (see "Self-recovery" below). A
+per-run `.route.json` records the verified selection without credentials.
 Normal completion requires explicit CLI success and a fresh run-specific
 completion receipt declaring no outstanding child sessions. Uncertain completion
-is independently reconciled from the Gateway, not inferred from elapsed time. It never
-claims service recovery from agent completion. Known-scope uncertainty retains
-its slot/locks and a `HELD-<run>` marker while a disjoint lane may continue.
-Unknown uncertainty and route failure pause admission globally. Restart converts
-abandoned `running` rows to `uncertain` with the same run and saved locks; known
-disjoint work may continue. A supervisor exits if an essential thread dies so
+is independently reconciled from the Gateway. It never
+claims service recovery from agent completion. Uncertainty retains
+its slot/locks and a `HELD-<run>` marker: a known scope leaves a reviewed
+disjoint lane free, serial mode and unknown scopes admit nothing else. Restart
+converts `running` rows that had reached the model to `uncertain` with the same
+run and saved locks; rows claimed but never invoked return to the queue. A
+supervisor exits if an essential thread dies so
 systemd's restart policy can recover instead of silently losing the worker.
+
+### Self-recovery: nothing waits for a person to notice
+
+`ENABLED` is the host operator's switch and the broker never renames or removes
+it (the dashboard switch below is a second, independent gate).
+Automatic holds live in SQLite. Those with nothing running underneath end by
+themselves; one that may still have work running is kept and reported:
+
+- **Before the model is invoked** (fresh readback, evidence files, route pin, any
+  unexpected error or a restart) nothing has run, so the batch returns to the
+  queue. `events.invoked` is written immediately before the agent call and is
+  the only thing that turns an interruption into a hold.
+- **Route breaker.** A failed pin, or an invocation that ends within three
+  minutes without a verified result (typically an unavailable account), opens
+  `route_breaker`. Admission backs off 1, 2, 5, 10, then 30 minutes; the first
+  claim after each delay is the probe and success closes the breaker. There is
+  no fallback model or account.
+- **An attempt that did no work returns to the queue.** A hold older than its
+  lease (15 minutes when the invocation ended at once, two hours otherwise) is
+  returned to the queue when two Gateway observations a minute apart give
+  positive evidence that nothing can be running underneath it:
+  - `hasActiveRun` is false, `activeRunIds` is empty and
+    `childOwnerSessionKeys` is empty, stated by the Gateway (one that does not
+    report them releases nothing);
+  - `lastActivityAt` shows no activity since the attempt was claimed, and is
+    exactly what the worker snapshotted immediately before invoking the agent,
+    where that snapshot exists;
+  - the session is inactive (`INACTIVE_STATES`, no pending permission, quiet
+    for 15 minutes);
+  - there is no receipt file and the CLI output reports no turn.
+
+  This is how OpenClaw 2026.11.3 reports an unavailable account: the CLI
+  prints `ok: false` with a `cli_error`, and the session shows a new
+  `lastRunId` with `status: failed` and a runtime of about 50 ms, while
+  `lastActivityAt` stays where it was. Nothing was played, so nothing is
+  replayed; `<run>.released.json` records the basis and the route breaker
+  paces the next attempt.
+- **Once a turn has done anything, only a receipt releases its locks.** An idle
+  parent session proves nothing about children or remote commands still
+  running underneath it, so idleness never releases a hold. Activity after the
+  claim, a child session, a run still executing, a turn reported by the CLI
+  and a receipt file of any content all keep it. A receipt with
+  `pendingChildren` above zero is an explicit statement that work continues.
+  An active session and a Gateway that cannot be read keep it too. Such a hold
+  is ended by a terminal receipt declaring no pending work (the bookkeeping
+  check asks for one) or by a person, and it is reported in `attention` after
+  30 minutes.
+- **Bookkeeping check.** Up to three attempts per run (immediately, after 15
+  minutes, after an hour). The route is pinned before an attempt is recorded,
+  so an unavailable route defers the check instead of consuming it.
+- **Admission delay.** A new event waits five minutes before it can be claimed,
+  so the producer can recognise an upgrade in progress (below) and the fresh
+  readback can withdraw the event. Withdrawn batches consume no dispatch budget.
+
+Whatever still needs a person is listed in `attention` in the authenticated
+ACK: an open route breaker, a hold older than 30 minutes, a queue that has
+waited over an hour, or a configuration/worker/lifecycle error. The producer
+turns that into the stall alert below.
+
+On first start this release restores `ENABLED` from a single
+`PAUSED-route-unavailable` or `PAUSED-<run>` left by an earlier release, since
+those were automatic pauses. Any other `PAUSED-*` name is treated as an
+operator's pause and left alone.
 
 Every 30 seconds, read-only lifecycle reconciliation verifies the actual session.
 Two identical terminal observations at least 30 seconds apart, a non-aborted
 terminal run, and a fresh no-children receipt after admission can release a held
 response. Original CLI output (including timeout) remains untouched; a separate
 `.reconciled.json` records the basis. This does not resolve the service incident.
-No release while the session is active or identity/completion evidence is missing.
-If an idle session lacks a valid receipt, one durable, bounded bookkeeping-only
-request is allowed on the required route. It cannot redo the repair, spawn
-children, mutate infrastructure or send messages. The once-per-run marker is
-written before invocation; ambiguous delivery is not retried. A remaining
-ambiguity is visible as attention required, not falsely completed.
+No receipt-based release while the session is active or identity/completion
+evidence is missing. If an idle session lacks a valid receipt, a bounded number
+of bookkeeping-only requests is allowed on the required route. They cannot redo
+the repair, spawn children, mutate infrastructure or send messages. Each attempt
+is recorded before its invocation. A run whose turn ran and never produces a
+valid terminal receipt keeps its reservation; it is never released on the
+parent session's idleness.
 
 `queue-state.json` and authenticated delivery health expose active scopes, queued
-events and admission reasons (paused, capacity, resource conflict, budget,
-cooldown, eligible), plus lifecycle/check status. They contain no credentials.
+events and admission reasons (paused, route, capacity, resource conflict, budget,
+cooldown, settling, eligible), plus lifecycle/check status. They contain no credentials.
 Read these before assuming an idle slot means the queue is empty. Receiver-wide
 outage still needs the independent external observer described below.
 
@@ -162,18 +229,113 @@ authorized merely by telemetry. Reverify target/network/wallet identity and live
 ownership before operational repairs; no duplicate active repair. See
 `incident-broker/policy.md` and the deployment-local authorization record.
 
+## Recognised change: upgrades do not enter the queue
+
+Expected downtime is held, never resolved and never hidden. A held issue stays
+open on the board as **Maintenance** with the reason, emits no event, and is
+withdrawn by the receiver's fresh readback if it was already queued. When the
+hold ends, a fault that is still present is emitted with fresh evidence.
+
+| Signal | Holds | Ends |
+| --- | --- | --- |
+| Dashboard operation confirmed/running (existing) | the network | terminal status, or lease expiry |
+| Dashboard operation **succeeded** | the network | 20 minutes after it finished |
+| dashnet journal claimed by another runner (existing) | the network | 20 minutes after release; at once if the journal records an error |
+| Container recreated (started under 20 minutes ago, `RestartCount` 0, running) | that host, the network's endpoint checks, its EC2 status check | 20 minutes after the last such start |
+| Host rebooted (uptime under 20 minutes) | same | 20 minutes after boot |
+| Two or more hosts changing at once | the network, except a host in a crash loop | when fewer than two are changing |
+
+`server/change-activity.js` derives the observational signals from the fresh
+probe every cycle, so a manual `docker compose pull && up` of the quorum
+server, or a hand-run Testnet upgrade, is recognised without a dashboard
+operation. A crash loop under a restart policy increments `RestartCount` and is
+not a planned change; seen in a fresh probe, it ends that host's hold at once,
+even inside the settle window an earlier clean start opened. A network hold
+inferred from other hosts changing does not cover that host either: its fault
+and its EC2 status check are sent for repair while the rest of the network
+stays held. A dashboard operation or a journal claim still holds every host,
+since restarts are part of the operation. Failed, cancelled and interrupted operations get no
+settle window, and a journal that records an error also ends rolling inference
+for that operation. Holds are bounded: a host is held at most 90 minutes per
+episode and a network at most three hours, so a recreate loop, or a journal
+claim left behind by a crashed runner, becomes actionable. Mainnet and external networks are never held by inference.
+
+## Stall alert
+
+A stalled worker cannot report its own stall through the queue it is failing to
+drain. The producer therefore raises it out of band when the receiver is
+unreachable, the worker heartbeat is stale, dispatch is paused on the receiver
+host with a backlog (switching it off from the dashboard is deliberate and is
+not a stall), or the ACK's `attention` list is not empty. It posts to the
+optional webhook at most twice per stall: once after the stall has lasted 15
+minutes, and once when it is over. Nothing is repeated while a stall lasts. A
+stall is over only after staying clear for 15 minutes, so a brief recovery
+neither announces a recovery nor makes the stall look new. The `/remediation`
+board shows the current reasons (details for administrators only).
+
+Set `INCIDENT_ALERT_WEBHOOK_FILE` to a restricted file holding an `https`
+Slack-compatible incoming-webhook URL. It is a credential: never Git, command
+lines or container environment text. The message names scopes and blockers,
+never evidence. Without it the stall is still recorded and shown.
+
+## Dispatch switch and queue clear
+
+Administrators have two controls on `/remediation`:
+
+- **Switch off / Switch on.** The switch is **off by default**: a new or upgraded
+  receiver dispatches nothing until an administrator switches it on. Switching
+  off starts nothing new; repairs in progress continue, and holds are still
+  reconciled and released. The receiver host's `ENABLED` file remains the
+  master switch: dispatch needs both, and the dashboard can never enable
+  dispatch that the host has disabled.
+- **Clear queue.** Marks queued fault events `cleared` without repairing them.
+  Running and held runs are untouched. An issue that is still open returns on
+  the producer's next revision (a change, or the six-hourly reminder). Queued
+  release compatibility tasks are kept: they are delivered once and nothing
+  would raise them again.
+
+`POST /api/remediation/dispatch` (`{"enabled": true|false}`) and
+`POST /api/remediation/clear` require an administrator session and the CSRF
+token; the read-only incident bearer token cannot use them. The web process
+records the request, with who and when, in `data/remediation-control.json`.
+The incident sidecar, which has that file read-only, forwards three fields on
+its next signed heartbeat: `seq`, `dispatch` (`on`/`off`) and `clearSeq`. The
+receiver validates that closed vocabulary, applies it inside the ingest
+transaction and reports what it applied in the ACK, so the board shows a
+request as pending until it is acknowledged (normally within a minute; longer
+while delivery is failing). The counters only move forward, so redelivery and
+a replayed older envelope change nothing. Payloads still never choose commands,
+targets, models, sessions or credentials.
+
+The receiver keeps the highest sequence it has applied and only learns
+sequences from this file. If the file is lost, damaged or replaced by an older
+copy, its numbering restarts below the receiver's, and commands numbered from
+it, including OFF, would be ignored as stale while the receiver kept its last
+setting. The status server therefore reads the file against the sequence in
+the receiver's last ACK. When the receiver is ahead, the request is **off**,
+sent one above the receiver's sequence, and the next switch or clear is
+numbered above it as well. No clear is inferred: the clear counter sent is the
+one the receiver already applied. The board says the saved setting was lost;
+switching on again is an administrator action. The sidecar never writes the
+file.
+
+Controls are sent only after the receiver has announced them in an ACK, so an
+older receiver never sees an unknown envelope field. Deploy the receiver first;
+until then the buttons are disabled.
+
 ## Remediation board
 
 `/remediation` shows unique issues, queued event revisions, active work, waiting
-reasons, blockers and recovery. `/api/remediation` is read-only; the existing
+reasons, blockers and recovery. `GET /api/remediation` is read-only; the existing
 incident API bearer token or administrator session enables curated repair notes.
 Public responses omit target identities, session keys, resource locks and notes,
 and exclude non-visible networks from both cases and counts. SSE invalidation
 contains only a timestamp; 15-second polling provides a reconnect fallback.
 
 The receiver adds a bounded remediation snapshot to its authenticated delivery
-ACK, which the producer already persists. No separate public receiver, inbound
-control endpoint, session enumeration or executable report parsing is added.
+ACK, which the producer already persists. No separate public receiver, new
+inbound endpoint on the receiver, session enumeration or executable report
+parsing is added; the administrator controls above reuse the signed heartbeat.
 Missing/stale data is explicit, never an apparently healthy empty queue.
 
 Terminal receipts include `summary`, `changes` (verified changes only),
@@ -193,7 +355,8 @@ ongoing blocked outage. A resolved
 response is only shown as verified fixed when independent monitoring also records
 recovery; otherwise it awaits verification. Monitoring-only recovery is labelled
 recovered, without attributing an autonomous fix. Completed investigations are
-not automatically successful repairs, and no dashboard action mutates the queue.
+not automatically successful repairs. The only dashboard actions that change the
+queue are the administrator switch and clear above; neither starts a repair.
 
 DynamoDB scale-in controls are informational only when fresh complete collection
 proves the exact alarm, action and target-tracking policy/resource association.
@@ -238,3 +401,54 @@ record. Verify no active network operation before replacing the agent. Rollback
 restores the prior image/compose while preserving incident inbox/outbox and all
 network/CI/user data. Pause the worker by removing `ENABLED`; do not delete its
 database or rerun uncertain records. Stop the producer before editing its code.
+
+
+## Known CI blockers before admission
+
+The broker correlates queued `ci/job_failed` events **before** concurrency,
+cooldown or hourly/daily budget admission. A match requires identical immutable
+job evidence (repository, run, attempt, runner, job, completion time, complete
+evidence object, target/source identity, severity and last-fault time), plus a
+completed, terminal, no-children receipt with that exact issue's explicit
+`blocked` outcome and nonempty blocker. Batch-level blockers, presentation text,
+missing/uncertain receipts and similar error/runner labels are not proof.
+
+A matching occurrence is retained as `deduplicated`, with a durable
+`event_correlations` link to the original response. It starts no worker, obtains
+no locks and has no admission timestamp, so spends no allowance. The board keeps
+the original blocker/owner/next action; neither receipt nor monitoring recovery
+is forged. Duplicate deliveries/restarts retain the same correlation.
+
+Changed failure evidence, severity, job/attempt/run, intervening resolution,
+reopened incidents and an explicit local operator recheck are admitted normally.
+Network incidents (including routine PoSe recovery), capacity/runner-health
+signals and release compatibility tasks are deliberately outside this exact-job
+gate. Different runs can share a root cause, but current producer evidence does
+not contain a proven cross-run test/error + relevant-source fingerprint. Those
+must still be compared by a worker, not silently merged on their job name.
+A new job containing an actual fix is therefore not hidden by an old blocker.
+
+For an explicitly authorized recheck of unchanged evidence, an operator can put
+an exact issue-ID key and reason in local `ci-dedup-recheck.json` before its next
+reminder. Remove that entry after the requested recheck. Workers must not write
+this shared control file or release their own blockers.
+
+### Audited allowance reset
+
+A local operator may, **only with explicit owner authority**, record
+`meta['budget_reset:ordinary']` as JSON with numeric UTC epoch `at` and a nonempty
+`reason`. Ordinary hourly and daily counts use admissions after the later of
+that epoch and their normal rolling cutoff. This resets accounting, not event
+history: old starts, receipts, locks, pending work, active sessions and configured
+8/hour/48/day limits remain intact. Compatibility uses a separate
+`budget_reset:maintenance` key; an ordinary reset never changes its 1/hour/4/day
+allowance. Invalid/future resets never bypass the existing limits.
+
+Pause new admissions and wait for running/uncertain work to finish before a
+receiver rollout or reset; preserve a consistent SQLite backup and an authority
+receipt. Verify the new gate first, then record the reset, confirm zero usage
+while paused, restore ENABLED and verify fresh dispatch/heartbeat. Once work
+resumes the usage counter will naturally increment again. Queue-state exposes
+both budget windows and the reset epoch. Do not delete queue rows to reset usage.
+
+Validation: `python3 -m unittest discover -s deploy/incident-broker -p 'test*.py'`.

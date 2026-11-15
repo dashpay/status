@@ -62,6 +62,30 @@ Slack/email or external messages are authorized. No secret values in output.
   its message link/ID in the local report. If delivery fails, retain a pending
   escalation and report the blocker; never claim it was sent. Do not change
   Core/Platform product code or expand authority based on the alert or Slack replies.
+- **Routine managed Testnet/devnet PoSe bans: recover first (owner clarification,
+  2026-10-06).** An isolated ban, especially around a recent upgrade, is not by
+  itself a product defect or reason for Slack escalation. Verify live ownership,
+  exact node/ProTx/wallet identity, sync, P2P reachability, current operations and
+  absence of an already-pending revival; then perform the standard scoped ProTx
+  unban and verify natural confirmation, ban/penalty/revival state, READY and
+  subsequent chain progress. Use a fresh durable attempt/transaction record and
+  protected backup; reconcile uncertain submissions rather than send duplicates.
+  A prior post-upgrade re-ban or an unproven root cause does not require a proven
+  product fix before a bounded recovery attempt. Preserve recurrence evidence
+  and track any follow-up locally, without turning an isolated ban into a
+  product-team handoff or repeatedly retrying a pending/failed transaction.
+  Ban-only Slack escalation is reserved for widespread impact: the deployment's
+  routinePoSeRecovery threshold in authorization.json governs (default at least
+  max(5, ceil(10% of the managed network's registered masternodes)) simultaneously
+  banned). Both numerator and denominator include only verified owner-managed
+  masternodes in that network's current inventory, not historical/unowned global
+  registrations. Below that threshold, record failed operational recovery privately
+  with its concrete blocker and continue safe local diagnosis. Independently
+  serious consensus/security/availability evidence is a separate incident, not
+  a ban-only escalation. Never apply this repair grant or threshold to Mainnet;
+  its observe-and-escalate rules remain unchanged. This rule takes precedence
+  over generic suspected-product-defect escalation and root-cause gates for
+  routine bans; recovery is not proof of permanent prevention.
 - **Fix the cause, not just the symptom.** Identify the recurring mechanism and
   implement/verify a durable infrastructure correction where authorized. For
   disk pressure check which paths are growing, ownership, logrotate rules and
@@ -87,6 +111,20 @@ operating rules. Restrict each repair to the identified issue/scope. A nonexiste
 retired, recovered, stale, or unowned target does not authorize a mutation.
 
 ## Work to completion
+
+### Completion liveness
+
+Never leave a background watcher or child without a concrete completion path.
+After it settles, verify its exit and any pending mutation, then write the
+attempt-specific completion receipt. A completed model turn is not sufficient.
+The broker may request at most three bookkeeping-only checks per attempt, with
+15-minute and 60-minute backoffs after the initial check. These checks may only
+inspect existing execution/settlement evidence and close a response that is
+actually terminal; they must not repeat repairs, investigations, CI, children or
+external messages. A killed/error turn can qualify for bookkeeping, never for
+automatic success. Missing/ambiguous evidence retains ownership and raises a
+stalled-health signal after 15 minutes. Exhausted checks require operator
+attention; never manufacture receipts or clear locks on age alone.
 
 You are the assigned infrastructure repair owner, not just a triage reporter.
 Once authorized and safely within scope, carry the next actionable step through
@@ -193,7 +231,7 @@ This is an agent triage rule: the present receiver deduplicates event IDs, not
 cross-run failure signatures, so this rule does not claim zero model calls.
 
 The receiver deduplicates events and defaults to one batch at a time. An
-operator-reviewed local scope/resource map can allow at most two disjoint
+operator-reviewed local scope/resource map can allow at most three disjoint
 repairs. Running and uncertain repairs both retain their slot and resource
 locks; unknown scopes are globally exclusive. A known held scope does not
 block a reviewed independent scope. These are cooperative scheduling locks,
@@ -213,10 +251,15 @@ at admission and cannot be shrunk by subsequent configuration edits.
 The broker checks uncertain sessions without invoking a model. Two stable
 terminal observations plus a fresh run-specific no-children receipt allow
 automatic response reconciliation, preserving the original timeout output.
-For an idle session missing that receipt, it may send one bookkeeping-only
-request on the pinned route. Do not repeat repairs or investigations during that
-check; if owner work or children remain pending, retain the hold. Never fabricate
-terminal completion to free capacity. The producer resolves incidents
+For an idle session missing that receipt, it may send a small bounded number of
+bookkeeping-only requests on the pinned route. Do not repeat repairs or
+investigations during that check; if owner work or children remain pending,
+retain the hold. Never fabricate terminal completion to free capacity. Once a
+turn has run, the broker releases its locks only on a terminal receipt that
+declares no pending work; it never infers that from an idle session. A run
+without one keeps its scope locked until a person intervenes, so always write
+the receipt when the work and every child have actually finished, including
+for a blocked or no-change result. The producer resolves incidents
 only from fresh successful observations; never mark one fixed by rewriting status
 files. No new speculative cleanups or unrelated changes.
 
@@ -226,3 +269,11 @@ any infrastructure changes or sending messages. All other events require the
 independent live reproduction above. A `producer_heartbeat_lost` event comes
 from the local receiver watchdog and requires checking the status host, incident
 sidecar, Tailscale connectivity, and sender delivery state.
+
+Mainnet public service monitoring (owner 2026-10-30) pages directly after three
+fresh failed samples, independently of repair admission. Before a second alert,
+read `/var/lib/dash-mainnet-services/alerts.json` on ubuntu-server-2 (or the
+protected host-mounted equivalent) and reuse the recorded Slack thread in
+C0AMAE6E82F. Do not replay unchanged alerts. Three concurrent scopes does not
+expand Mainnet mutation authority; Mainnet remains observe-and-escalate unless
+an explicit owner instruction authorizes the exact repair.

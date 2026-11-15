@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createWeb } from './web.js';
@@ -290,7 +290,7 @@ test('issue API is additive, fails visibly when stale, and limits private detail
   } finally { w.close(); }
 });
 
-test('remediation board is read-only and its notes require administrator access', async () => {
+test('remediation board notes require administrator access', async () => {
   const w = await start();
   try {
     const at = new Date().toISOString();
@@ -307,6 +307,49 @@ test('remediation board is read-only and its notes require administrator access'
     assert.equal(full.public, false); assert.equal(full.cases[0].summary, 'PRIVATE-NOTE');
     assert.equal(full.cases[0].stage, 'blocked');
   } finally { w.close(); }
+});
+
+test('remediation switch and queue clear are administrator-only, CSRF-protected and default to off', async () => {
+  const post = (w, path, body, csrf) => w.req(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body),
+    headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(csrf ? { 'x-csrf-token': csrf } : {}) } });
+  const stored = (w) => JSON.parse(readFileSync(join(w.dataDir, 'remediation-control.json'), 'utf8'));
+  const w = await start();
+  try {
+    assert.equal((await post(w, '/api/remediation/dispatch', { enabled: true })).status, 401);
+    assert.equal((await post(w, '/api/remediation/clear')).status, 401);
+    const csrf = await w.login();
+    assert.equal((await (await w.req('/api/remediation')).json()).control.requested, 'off');
+    assert.equal((await post(w, '/api/remediation/dispatch', { enabled: true })).status, 403, 'a session without the CSRF token is refused');
+    assert.equal((await post(w, '/api/remediation/dispatch', { enabled: 'yes' }, csrf)).status, 400);
+    assert.equal((await post(w, '/api/remediation/dispatch', { enabled: true }, csrf)).status, 200);
+    assert.deepEqual([stored(w).seq, stored(w).dispatch, stored(w).updatedBy], [1, 'on', 'someone']);
+    assert.equal((await post(w, '/api/remediation/clear', undefined, csrf)).status, 200);
+    assert.deepEqual([stored(w).seq, stored(w).clearSeq, stored(w).dispatch], [2, 2, 'on']);
+    const view = await (await w.req('/api/remediation')).json();
+    assert.deepEqual([view.control.requested, view.control.applied, view.control.changedBy], ['on', null, 'someone']);
+    assert.equal((await post(w, '/api/remediation/dispatch', { enabled: false }, csrf)).status, 200);
+    assert.equal(stored(w).dispatch, 'off');
+    // The file is lost while the worker is on at a sequence the new file is far below.
+    mkdirSync(join(w.dataDir, 'incidents'), { recursive: true });
+    writeFileSync(join(w.dataDir, 'incidents', 'state.json'), JSON.stringify({ generatedAt: new Date().toISOString(), issues: [], sources: {}, outbox: [],
+      delivery: { lastAckAt: new Date().toISOString(), receiver: { control: { seq: 9, dispatch: 'on', clearSeq: 4, localEnabled: true } } } }));
+    rmSync(join(w.dataDir, 'remediation-control.json'));
+    const lost = (await (await w.req('/api/remediation')).json()).control;
+    assert.deepEqual([lost.requested, lost.reset], ['off', true], 'the board shows OFF and says the setting was lost');
+    assert.equal((await post(w, '/api/remediation/dispatch', { enabled: false }, csrf)).status, 200);
+    assert.deepEqual([stored(w).seq, stored(w).dispatch, stored(w).clearSeq], [11, 'off', 4], 'the command is numbered above the worker, and no clear rides along');
+    rmSync(join(w.dataDir, 'remediation-control.json'));
+    assert.equal((await post(w, '/api/remediation/clear', undefined, csrf)).status, 200);
+    assert.deepEqual([stored(w).seq, stored(w).dispatch, stored(w).clearSeq], [11, 'off', 11], 'a clear after the loss is not stale either, and does not switch on');
+    assert.equal((await (await w.req('/api/remediation')).json()).control.reset, false);
+  } finally { w.close(); }
+  const member = await start(42);
+  try {
+    const csrf = await member.login();
+    assert.equal((await post(member, '/api/remediation/dispatch', { enabled: true }, csrf)).status, 403);
+    assert.equal((await post(member, '/api/remediation/clear', undefined, csrf)).status, 403);
+    assert.equal((await (await member.req('/api/remediation')).json()).control.changedBy, undefined);
+  } finally { member.close(); }
 });
 
 test('Actions queue: signed org webhook in, public and member views out', async () => {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { operationMaintenance, OPERATION_LEASE_MS } from './operation-maintenance.js';
+import { operationMaintenance, OPERATION_LEASE_MS, OPERATION_SETTLE_MS } from './operation-maintenance.js';
 import { cycle } from './incident-service.js';
 import { loadIncidentState } from './incidents.js';
 import { DEFAULT_SETTINGS } from '../shared/settings.js';
@@ -19,9 +19,13 @@ function fixture(t) {
 }
 test('operation maintenance follows confirmed mutations only, ends on terminal state and expires abandoned records',t=>{
   const {root,settings,op,save}=fixture(t);
-  for(const status of ['queued','preparing','review','failed','cancelled','interrupted','succeeded']){
+  for(const status of ['queued','preparing','review','failed','cancelled','interrupted']){
     op.status=status;save();assert.deepEqual(operationMaintenance(root,settings,now),{},status);
   }
+  op.status='succeeded';op.finishedAt=at;save();
+  assert.deepEqual(operationMaintenance(root,settings,now).sakura.operations.map(o=>o.status),['settling'],'a finished operation settles before its aftermath is queued');
+  assert.deepEqual(operationMaintenance(root,settings,now+OPERATION_SETTLE_MS),{},'the settle window is bounded');
+  delete op.finishedAt;
   for(const status of ['confirmed','running']){
     op.status=status;save();assert.deepEqual(Object.keys(operationMaintenance(root,settings,now)),['sakura']);
   }

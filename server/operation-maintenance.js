@@ -7,6 +7,7 @@ import { readJSON } from '../shared/settings.js';
 const MUTATING = new Set(['platform-reset', 'upgrade', 'deploy', 'create-devnet', 'delete-devnet', 'devnet-services', 'devnet-platform']);
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 export const OPERATION_LEASE_MS = 35 * 60_000;
+export const OPERATION_SETTLE_MS = 20 * 60_000;
 
 export function operationMaintenance(dataDir, settings, now = Date.now()) {
   const dir = join(dataDir, 'ops'), result = {};
@@ -15,7 +16,18 @@ export function operationMaintenance(dataDir, settings, now = Date.now()) {
   for (const file of readdirSync(dir).filter((f) => f.endsWith('.json') && UUID.test(f.slice(0, -5)))) {
     const op = readJSON(join(dir, file));
     if (!op || op.id !== file.slice(0, -5) || !managed.has(op.network) || !MUTATING.has(op.request?.action)
-      || !['confirmed', 'running'].includes(op.status)) continue;
+      || !['confirmed', 'running', 'succeeded'].includes(op.status)) continue;
+    if (op.status === 'succeeded') {
+      // A finished upgrade is still converging (sync, DKG, quorum lists). Hold
+      // briefly so the aftermath is not queued as a fault. Failed, cancelled
+      // and interrupted operations get no settle window: their faults are real.
+      const finished = Date.parse(op.finishedAt || op.updatedAt);
+      if (!Number.isFinite(finished) || finished > now + 60_000 || now - finished >= OPERATION_SETTLE_MS) continue;
+      const settling = result[op.network] ??= { active:true, operations:[] };
+      settling.operations.push({ id:op.id, action:op.request.action, status:'settling', since:op.confirmedAt || new Date(finished).toISOString(),
+        expiresAt:new Date(finished + OPERATION_SETTLE_MS).toISOString() });
+      continue;
+    }
     const started = Date.parse(op.confirmedAt), updated = Date.parse(op.updatedAt);
     // Expire abandoned records rather than silently disabling alerts forever.
     // Long-running controllers renew updatedAt when saving stage/progress data.
