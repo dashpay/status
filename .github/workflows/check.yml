@@ -8,6 +8,8 @@ permissions:
 jobs:
   images:
     uses: ./.github/workflows/images.yml
+  core-compat:
+    uses: ./.github/workflows/core-compat.yml
   console:
     runs-on: ubuntu-latest
     timeout-minutes: 12
