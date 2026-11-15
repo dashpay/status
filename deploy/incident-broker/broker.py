@@ -480,7 +480,7 @@ def remediation_snapshot(db, root):
         presentations = {}
     if not isinstance(presentations, dict): presentations = {}
     cases = []
-    pending_releases = set()
+    retained_issues = set()
     scheduler_row = db.execute("select value from meta where key='scheduler'").fetchone()
     scheduler = json.loads(scheduler_row['value']) if scheduler_row else {}
     waits = {r['eventId']: r for r in scheduler.get('queued', [])}
@@ -491,9 +491,9 @@ def remediation_snapshot(db, root):
     for ident, rows in groups.items():
         latest = max(rows, key=lambda r: int(r['id'].split(':')[1]))
         issue = json.loads(latest['body'])['issue']
-        if issue['domain'] == 'maintenance' and issue['status'] == 'open':
-            pending_releases.add(ident)
         active = [r for r in rows if r['status'] in {'running', 'uncertain'}]
+        if active or any(r['status'] == 'queued' for r in rows) or (issue['domain'] == 'maintenance' and issue['status'] == 'open'):
+            retained_issues.add(ident)
         current = max(active, key=lambda r: r['started'] or 0) if active else latest
         finished = [r for r in rows if r['status'] == 'completed' and r['result']]
         correlation = db.execute('select * from event_correlations where event_id=?', (current['id'],)).fetchone()
@@ -527,11 +527,11 @@ def remediation_snapshot(db, root):
                                        'nextAction': bounded(detail.get('nextAction')),
                                        'changes': [bounded(x, 300) for x in detail.get('changes', [])[:8] if isinstance(x, str)] if isinstance(detail.get('changes'), list) else []}
                                       if receipt else None})
-    # Release tasks emit no reminders. Retain their completion channel until
-    # the producer sends the resolved revision acknowledging the receipt.
+    # Never trim current ownership or queued work out of the board. Release
+    # tasks also retain their completion channel until producer acknowledgement.
     recent = cases[-1000:]
     shown = {c['issueId'] for c in recent}
-    retained = [c for c in cases if c['issueId'] in pending_releases and c['issueId'] not in shown] + recent
+    retained = [c for c in cases if c['issueId'] in retained_issues and c['issueId'] not in shown] + recent
     return {'schemaVersion': 1, 'generatedAt': stamp(time.time()), 'enabled': (root / 'ENABLED').exists() and dispatch_on(db),
             'maxActive': scheduler.get('maxActive'), 'progress': progress_health(db), 'cases': retained, 'truncated': len(cases) > len(retained)}
 

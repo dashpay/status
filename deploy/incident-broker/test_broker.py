@@ -632,6 +632,26 @@ class Tests(unittest.TestCase):
         self.assertEqual(len(snapshot['cases']), 1000)
         self.assertNotIn('b'*24, [c['issueId'] for c in snapshot['cases']])
 
+    def test_board_retains_old_queued_and_held_issues_beyond_history_limit(self):
+        root = pathlib.Path(self.temp.name)
+        queued = event(); held = event()
+        held['eventId'] = 'b'*24+':1'; held['issue']['id'] = 'b'*24
+        b.ingest(self.db, envelope(queued, held))
+        self.db.execute("update events set status='uncertain',started=?,finished=?,result=? where id=?", (time.time()-1800, time.time()-1200, '1'*24, held['eventId']))
+        self.db.commit()
+        for start in range(0, 1000, 50):
+            batch = []
+            for n in range(start, start + 50):
+                e = event(transition='resolved'); ident = hashlib.sha256(str(n).encode()).hexdigest()[:24]
+                e['eventId'] = ident+':1'; e['issue']['id'] = ident; batch.append(e)
+            b.ingest(self.db, envelope(*batch))
+        snapshot = b.remediation_snapshot(self.db, root)
+        cases = {c['issueId']: c for c in snapshot['cases']}
+        self.assertEqual(len(cases), 1002)
+        self.assertEqual(cases['a'*24]['pendingEvents'], 1)
+        self.assertTrue(cases['b'*24]['active'])
+        self.assertTrue(cases['b'*24]['attentionRequired'])
+
     def test_an_attempt_that_did_no_work_returns_to_the_queue_after_its_lease(self):
         root,run,now,failed=self.unstarted_run()
         def broken(_): raise OSError('gateway unavailable')

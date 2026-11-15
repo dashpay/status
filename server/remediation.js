@@ -2,6 +2,7 @@
 import { TITLES } from './incidents.js';
 import { RELEASE_CODES } from './release-webhook.js';
 import { stallReasons } from './stall-alert.js';
+import { activityHidden } from './remediation-activity.js';
 
 const fresh = (at, now) => Number.isFinite(Date.parse(at)) && Date.parse(at) <= now + 60_000 && now - Date.parse(at) <= 180_000;
 const text = (value, size = 800) => typeof value === 'string' ? value.slice(0, size) : null;
@@ -31,7 +32,9 @@ export function remediationView(state, { full = false, visibleNetworks = [], now
   const workerFresh = feed?.schemaVersion === 1 && fresh(feed.generatedAt, now) && fresh(workerAt, now) && Array.isArray(feed.cases);
   const observations = new Map((Array.isArray(feed?.cases) ? feed.cases : []).map((c) => [c.issueId, c]));
   const visible = new Set(visibleNetworks);
-  const cases = (state?.issues || []).filter((i) => full || i.domain !== 'network' || visible.has(i.scope)).map((issue) => {
+  const visibleIssues = (state?.issues || []).filter((i) => full || i.domain !== 'network' || visible.has(i.scope));
+  const displayedIssues = visibleIssues.filter((i) => !activityHidden(i, observations.get(i.id), state));
+  const cases = displayedIssues.map((issue) => {
     const response = observations.get(issue.id);
     const last = response?.lastResponse;
     let stage = 'unknown', reason = 'Waiting for remediation status';
@@ -96,12 +99,16 @@ export function remediationView(state, { full = false, visibleNetworks = [], now
     ...(full ? { reset: requested?.recovered === true, changedAt: iso(requested?.updatedAt), changedBy: text(requested?.updatedBy, 39), clearedAt: iso(requested?.clearedAt), clearedBy: text(requested?.clearedBy, 39) } : {}) };
   return { schemaVersion: 1, public: !full, generatedAt: iso(state?.generatedAt), workerAt, control,
     stalled: attention.length > 0, attention: full ? attention : undefined, stalledSince: full ? iso(state?.stall?.since) : undefined,
-    stale: !producerFresh || !workerFresh, producerFresh, workerFresh, truncated: feed?.truncated === true,
+    stale: !producerFresh || !workerFresh, producerFresh, workerFresh,
+    truncated: feed?.truncated === true && displayedIssues.some((i) => !observations.has(i.id)),
+    activityHistory: { clearedAt: iso(state?.activityHistory?.clearedAt), hidden: visibleIssues.length - displayedIssues.length,
+      ...(full ? { clearedBy: text(state?.activityHistory?.clearedBy, 39) } : {}) },
     dispatch: !workerFresh ? 'unknown' : feed.enabled ? 'enabled' : 'paused',
     execution: !workerFresh || typeof feed.progress?.attentionRequired !== 'boolean' ? 'unknown' : feed.progress.attentionRequired ? 'stalled' : 'healthy',
     stalledRuns: workerFresh && Number.isSafeInteger(feed.progress?.stalledRuns) ? feed.progress.stalledRuns : null,
     maxActive: Number.isSafeInteger(feed?.maxActive) ? feed.maxActive : null,
     delivery: { pending: full ? state?.outbox?.length || 0 : null, failed: !!state?.delivery?.error, lastAckAt: iso(state?.delivery?.lastAckAt) },
     maintenance: Object.entries(state?.maintenance || {}).filter(([name]) => full || visible.has(name)).map(([network, value]) => ({ network, operations:full ? value.operations : undefined })),
-    counts, queuedEvents: cases.reduce((sum, c) => sum + c.pendingEvents, 0), cases };
+    counts, queuedEvents: full && Number.isSafeInteger(state?.delivery?.receiver?.counts?.queued)
+      ? state.delivery.receiver.counts.queued : cases.reduce((sum, c) => sum + c.pendingEvents, 0), cases };
 }

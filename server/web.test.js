@@ -317,9 +317,11 @@ test('remediation switch and queue clear are administrator-only, CSRF-protected 
   try {
     assert.equal((await post(w, '/api/remediation/dispatch', { enabled: true })).status, 401);
     assert.equal((await post(w, '/api/remediation/clear')).status, 401);
+    assert.equal((await post(w, '/api/remediation/activity/clear')).status, 401);
     const csrf = await w.login();
     assert.equal((await (await w.req('/api/remediation')).json()).control.requested, 'off');
     assert.equal((await post(w, '/api/remediation/dispatch', { enabled: true })).status, 403, 'a session without the CSRF token is refused');
+    assert.equal((await post(w, '/api/remediation/activity/clear')).status, 403);
     assert.equal((await post(w, '/api/remediation/dispatch', { enabled: 'yes' }, csrf)).status, 400);
     assert.equal((await post(w, '/api/remediation/dispatch', { enabled: true }, csrf)).status, 200);
     assert.deepEqual([stored(w).seq, stored(w).dispatch, stored(w).updatedBy], [1, 'on', 'someone']);
@@ -342,12 +344,19 @@ test('remediation switch and queue clear are administrator-only, CSRF-protected 
     assert.equal((await post(w, '/api/remediation/clear', undefined, csrf)).status, 200);
     assert.deepEqual([stored(w).seq, stored(w).dispatch, stored(w).clearSeq], [11, 'off', 11], 'a clear after the loss is not stale either, and does not switch on');
     assert.equal((await (await w.req('/api/remediation')).json()).control.reset, false);
+    const beforeHistoryClear = stored(w);
+    const beforeIssues = readFileSync(join(w.dataDir, 'incidents', 'state.json'), 'utf8');
+    assert.equal((await post(w, '/api/remediation/activity/clear', undefined, csrf)).status, 200);
+    assert.deepEqual(stored(w), beforeHistoryClear, 'activity clear never changes dispatch or the queue');
+    assert.equal(readFileSync(join(w.dataDir, 'incidents', 'state.json'), 'utf8'), beforeIssues);
+    assert.equal((await (await w.req('/api/remediation')).json()).activityHistory.clearedBy, 'someone');
   } finally { w.close(); }
   const member = await start(42);
   try {
     const csrf = await member.login();
     assert.equal((await post(member, '/api/remediation/dispatch', { enabled: true }, csrf)).status, 403);
     assert.equal((await post(member, '/api/remediation/clear', undefined, csrf)).status, 403);
+    assert.equal((await post(member, '/api/remediation/activity/clear', undefined, csrf)).status, 403);
     assert.equal((await (await member.req('/api/remediation')).json()).control.changedBy, undefined);
   } finally { member.close(); }
 });
