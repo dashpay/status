@@ -68,7 +68,14 @@ export function recognizeActivity({ settings, states, previous, now = Date.now()
       // A crash loop drops the hold and its history; the fault is actionable now.
       // It is also named, so a rolling change inferred from other hosts of the
       // network cannot hold this host's fault with theirs.
-      const crashing = hostCrashing(h, now);
+      const probeAt = Date.parse(h.probe?.at);
+      const observed = h.probe?.ok === true && !h.probe.skipped && object(h.probe.data)
+        && Array.isArray(h.probe.data.containers) && h.probe.data.containers.length > 0
+        && Number.isFinite(probeAt) && probeAt <= now + 60_000 && now - probeAt <= 180_000;
+      // A failed/empty probe cannot retract an observed crash while other
+      // hosts still hold the network. A fresh observation can clear it.
+      const crashing = hostCrashing(h, now) || (!observed && previous?.crashing?.includes(key)
+        && previous?.networks?.[n.name]?.held === true && previous.networks[n.name].reason === 'rolling');
       if (crashing) result.crashing.push(key);
       const entry = crashing ? null : episode(old, signals.length ? Math.max(...signals.map((x) => x.at)) : null, now, HOST_HOLD_MAX_MS);
       if (!entry) continue;

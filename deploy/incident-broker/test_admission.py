@@ -17,7 +17,7 @@ class AdmissionTests(unittest.TestCase):
         self.db = b.connect(self.root / 'inbox.sqlite'); self.addCleanup(self.db.close)
         self.run = '1' * 24
         self.first = event()
-        self.first['issue'].update(domain='ci', scope='mac-runner-brian', code='job_failed',
+        self.first['issue'].update(domain='ci', scope='mac-host-brian', code='job_failed',
             target='dashpay/platform/123/mac-runner-brian/start', sourceKey='ci:job:immutable',
             lastFaultAt='2026-10-05T01:00:00Z', evidence={'repo': 'dashpay/platform', 'runId': 123,
                 'attempt': 1, 'runner': 'mac-runner-brian', 'jobName': 'Swift SDK tests', 'end': '2026-10-05T01:00:00Z'})
@@ -46,13 +46,14 @@ class AdmissionTests(unittest.TestCase):
             b.ingest(self.db,envelope(e))
             self.db.execute("update events set status='completed',started=? where id=?",(self.started-i-1,e['eventId']))
         self.db.commit()
-        before=b.budget_usage(self.db,'ci:mac-runner-brian')
+        before=b.budget_usage(self.db,'ci:mac-host-brian')
         self.assertEqual(before['windows'][1]['used'],48)
-        b.ingest(self.db,envelope(self.reminder()))
+        reminder = self.reminder()
+        b.ingest(self.db,envelope(reminder))
         self.assertEqual(b.claim(self.db,root=self.root,cooldown=0),[])
         r=self.db.execute('select * from events where id=?',('a'*24+':2',)).fetchone()
         self.assertEqual(r['status'],'deduplicated');self.assertIsNone(r['started']);self.assertIsNone(r['session_key'])
-        self.assertEqual(b.budget_usage(self.db,'ci:mac-runner-brian'),before)
+        self.assertEqual(b.budget_usage(self.db,'ci:mac-host-brian'),before)
         self.assertEqual(self.db.execute('select count(*) from event_locks').fetchone()[0],0)
         self.assertEqual(self.db.execute('select source_event from event_correlations').fetchone()[0],self.first['eventId'])
         case=b.remediation_snapshot(self.db,self.root)['cases']
@@ -61,7 +62,7 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(case['waitReason'],'known_blocker');self.assertEqual(case['lastResponse']['blocker'],'Known fixture locking, existing owner')
         self.assertFalse(case['active'])
         # Durable replay/restart is idempotent; the incident has not been marked resolved.
-        b.ingest(self.db,envelope(self.reminder()))
+        b.ingest(self.db,envelope(reminder))
         db=b.connect(self.root/'inbox.sqlite')
         try:
             self.assertEqual(b.claim(db,root=self.root,cooldown=0),[])
@@ -135,7 +136,7 @@ class AdmissionTests(unittest.TestCase):
         before=[tuple(r) for r in self.db.execute('select * from events')]
         self.assertTrue(b.budget_exhausted(self.db,'maintenance:dash-network-go'))
         with self.db:self.db.execute('insert or replace into meta values(?,?)',('budget_reset:ordinary',json.dumps({'at':time.time(),'reason':'Explicit owner reset after verified dedup rollout'})))
-        self.assertEqual([w['used'] for w in b.budget_usage(self.db,'ci:mac-runner-brian')['windows']],[0,0])
+        self.assertEqual([w['used'] for w in b.budget_usage(self.db,'ci:mac-host-brian')['windows']],[0,0])
         self.assertTrue(b.budget_exhausted(self.db,'maintenance:dash-network-go'))
         self.assertEqual(before,[tuple(r) for r in self.db.execute('select * from events')])
         b.ingest(self.db,envelope(self.reminder()))
@@ -143,12 +144,12 @@ class AdmissionTests(unittest.TestCase):
         with self.db:self.db.execute('delete from events where id=?',('a'*24+':2',))
         e=self.reminder();e['issue']['evidence']['attempt']=2;b.ingest(self.db,envelope(e))
         self.assertEqual(len(b.claim(self.db,root=self.root,cooldown=0)),1)
-        self.assertEqual([w['used'] for w in b.budget_usage(self.db,'ci:mac-runner-brian')['windows']],[1,1])
+        self.assertEqual([w['used'] for w in b.budget_usage(self.db,'ci:mac-host-brian')['windows']],[1,1])
 
     def test_invalid_or_future_reset_never_bypasses_existing_usage(self):
         for value in ['oops','[]','null',json.dumps({'at':time.time()+100,'reason':'future'}),json.dumps({'at':float('nan'),'reason':'NaN'}),json.dumps({'at':time.time(),'reason':''})]:
             with self.db:self.db.execute('insert or replace into meta values(?,?)',('budget_reset:ordinary',value))
-            self.assertEqual(b.budget_usage(self.db,'ci:mac-runner-brian')['windows'][1]['used'],1)
+            self.assertEqual(b.budget_usage(self.db,'ci:mac-host-brian')['windows'][1]['used'],1)
 
 
 if __name__=='__main__':unittest.main()

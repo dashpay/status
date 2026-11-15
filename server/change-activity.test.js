@@ -102,3 +102,16 @@ test('a crash loop is named while other hosts roll, so the network hold cannot c
   assert.equal(state.hosts['testnet/i-mn-3'], undefined);
   assert.deepEqual(recognise([host('mn-1', [container('core', 60_000)]), host('mn-2')]).crashing, []);
 });
+
+test('a rolling crash exemption survives failed and empty probes until fresh evidence clears it', () => {
+  const rolling = (at) => [host('mn-1', [container('core', 60_000, {}, at)], {}, at), host('mn-2', [container('core', 30_000, {}, at)], {}, at)];
+  const first = recognise([...rolling(now), host('mn-3', [container('core', 5_000, { restarts: 4 })])]);
+  for (const probe of [{ ok: false, at: iso(now + 60_000) }, { ok: true, at: iso(now + 60_000), data: {} }]) {
+    const gap = recognise([...rolling(now + 60_000), host('mn-3', [], { probe })], first, now + 60_000);
+    assert.deepEqual(gap.crashing, ['testnet/i-mn-3']);
+    assert.equal(gap.hosts['testnet/i-mn-3'], undefined);
+    const recovered = recognise([...rolling(now + 120_000), host('mn-3', [container('core', 1_000, {}, now + 120_000)], {}, now + 120_000)], gap, now + 120_000);
+    assert.deepEqual(recovered.crashing, []);
+    assert.equal(recovered.hosts['testnet/i-mn-3'].held, true);
+  }
+});
