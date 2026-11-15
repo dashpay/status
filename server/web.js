@@ -15,6 +15,7 @@ import { loadIncidentState, publicIssues, apiAuthorized, readSecret } from './in
 import { remediationView } from './remediation.js';
 import { receiveRelease } from './release-webhook.js';
 import { againstReceiver, loadControl, requestClear, setDispatch } from './remediation-control.js';
+import { clearActivity, loadActivity } from './remediation-activity.js';
 import { publicInventory } from './aws-public.js';
 import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, loadSettings, memberOf, operatorFor, readJSON, saveSettings, validateSettings, writeAtomic } from '../shared/settings.js';
 import { expectations } from '../shared/monitoring.js';
@@ -142,7 +143,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     reloadSettings();
     const full = isAdmin(req) || apiAuthorized(req.get('authorization'), readSecret(process.env.INCIDENT_API_TOKEN_FILE));
     const incidents = loadIncidentState(dataDir);
-    res.json(remediationView({ ...incidents, maintenance:operationMaintenance(dataDir, settings, clock()), control: againstReceiver(loadControl(dataDir), incidents?.delivery?.receiver?.control) }, { full, visibleNetworks: visible(req).map((n) => n.name), now: clock() }));
+    res.json(remediationView({ ...incidents, activityHistory: loadActivity(dataDir), maintenance:operationMaintenance(dataDir, settings, clock()), control: againstReceiver(loadControl(dataDir), incidents?.delivery?.receiver?.control) }, { full, visibleNetworks: visible(req).map((n) => n.name), now: clock() }));
   });
   app.get('/api/me', (req, res) => {
     const u = user(req);
@@ -388,6 +389,11 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     controlled(res, setDispatch(dataDir, req.body.enabled, req.session.user.login, clock(), acknowledged()));
   });
   app.post('/api/remediation/clear', ...adminWrite, (req, res) => controlled(res, requestClear(dataDir, req.session.user.login, clock(), acknowledged())));
+  app.post('/api/remediation/activity/clear', ...adminWrite, (req, res) => {
+    const activityHistory = clearActivity(dataDir, loadIncidentState(dataDir), req.session.user.login, clock());
+    push('remediation', { at: new Date(clock()).toISOString() });
+    res.json({ activityHistory });
+  });
 
   // Infrastructure pages: full detail for any account with access; before
   // sign-in a sanitized view (statistics and spend, nothing identifying).

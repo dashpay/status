@@ -55,6 +55,7 @@ export default function Remediation() {
       </div>
       <p className="text-dim text-[11px] mt-2">Counts are unique issues. {data.queuedEvents} queued events may include repeat updates. A completed investigation is not a verified fix.</p>
       <Section title="Issue activity" right={<span className="text-dim text-[12px]">{cases.length} shown</span>}>
+        {data.activityHistory?.clearedAt && <p className="text-dim text-[12px] mb-3">Activity cleared {ago(data.activityHistory.clearedAt, now)} ago · {data.activityHistory.hidden} older entries hidden. New events and queued or active repairs remain visible. Monitoring findings are unchanged.</p>}
         <div className="flex flex-wrap gap-2 items-center mb-3">
           <label className="sr-only" htmlFor="remediation-search">Filter remediation issues</label>
           <input id="remediation-search" className="input flex-1 min-w-40" placeholder="Filter issues…" value={search} onChange={(e) => setSearch(e.target.value)} />
@@ -91,6 +92,8 @@ function Controls({ data, now, reload }) {
           : `Switch autonomous repair on? ${data.queuedEvents} queued event(s) become eligible for the repair agent.`)}>{on ? 'Switch off' : 'Switch on'}</button>
       <button className="btn btn-danger" disabled={busy || !c.supported}
         onClick={() => run('/api/remediation/clear', undefined, `Clear the repair queue? ${data.queuedEvents} queued event(s) are removed without being repaired. Repairs in progress and release compatibility tasks are not affected. Issues that are still open return on their next monitoring update.`)}>Clear queue</button>
+      <button className="btn" disabled={busy}
+        onClick={() => run('/api/remediation/activity/clear', undefined, 'Clear the displayed issue activity? Older entries are hidden without marking issues fixed. Queued work and active or held repairs remain visible; new events appear normally.')}>Clear activity</button>
       <span className="text-dim">{!c.supported ? 'The repair worker has not announced these controls yet; they become available once it runs this release.'
         : c.applied == null ? 'Worker acknowledgement is unavailable; the requested setting is not yet confirmed.'
           : c.pending || c.applied !== c.requested ? 'Waiting for the repair worker to acknowledge (about a minute).' : 'Acknowledged by the repair worker.'}</span>
