@@ -8,11 +8,16 @@ const sameImage = (container, reference) => {
   return digest ? container.digest === digest || container.image?.endsWith('@' + digest) : container.image?.replace(/^(index\.)?docker\.io\//, '') === reference.replace(/^(index\.)?docker\.io\//, '');
 };
 export function expectations(operations = [], now = Date.now()) {
-  const targets = {};
-  for (const op of [...operations].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))) {
-    if (op.confirmedAt && op.status === 'succeeded' && op.request?.action === 'create-devnet' && op.review?.images) {
-      targets['*'] = op.review.images;
+  const appliedAt = (op) => Date.parse(op.finishedAt || op.confirmedAt || op.createdAt) || 0;
+  const ordered = [...operations].sort((left, right) => appliedAt(left) - appliedAt(right)
+    || String(left.createdAt).localeCompare(String(right.createdAt)) || String(left.id).localeCompare(String(right.id)));
+  let targets = {}, generationStart = 0;
+  for (const op of ordered) {
+    if (op.confirmedAt && op.status === 'succeeded' && op.request?.action === 'create-devnet') {
+      generationStart = Date.parse(op.createdAt || op.confirmedAt);
+      targets = op.review?.images ? { '*': op.review.images } : {};
     }
+    if (Date.parse(op.createdAt || op.confirmedAt) < generationStart) continue;
     if (!op.confirmedAt || !op.progress || !['running', 'succeeded', 'failed', 'interrupted', 'cancelled'].includes(op.status)) continue;
     const age = now - Date.parse(op.updatedAt);
     const active = op.status === 'running' && age >= 0 && age < 15 * 60_000;

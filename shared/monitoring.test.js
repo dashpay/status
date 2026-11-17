@@ -61,6 +61,26 @@ test('interrupted native reset pins only verified hosts; earlier-stage progress 
   assert.deepEqual(expectations([{ ...operation, progress: { ...operation.progress, phase: 'apply' } }], now), {});
 });
 
+test('a recreated devnet cannot inherit the previous incarnation’s image pins', () => {
+  const stamp = (seconds) => new Date(now + seconds * 1000).toISOString();
+  const reset = { createdAt: stamp(1), confirmedAt: stamp(2), finishedAt: stamp(3), status: 'succeeded', progress: {},
+    request: { action: 'platform-reset' }, review: { native: true, targetImages: { 'hp-1': { drive: 'drive:old' } } } };
+  const create = { createdAt: stamp(4), confirmedAt: stamp(5), finishedAt: stamp(6), status: 'succeeded',
+    request: { action: 'create-devnet' }, review: { images: { drive: { ref: 'drive:new' } } } };
+  assert.deepEqual(expectations([create, reset], now), { '*': create.review.images });
+  assert.deepEqual(expectations([reset, { ...create, review: {} }], now), {});
+  assert.equal(expectations([reset, { ...create, status: 'failed' }], now)['hp-1'].drive.to, 'drive:old');
+});
+
+test('applied order takes precedence over the order in which operations were requested', () => {
+  const stamp = (seconds) => new Date(now + seconds * 1000).toISOString();
+  const reset = { createdAt: stamp(2), confirmedAt: stamp(3), finishedAt: stamp(4), status: 'succeeded', progress: {},
+    request: { action: 'platform-reset' }, review: { native: true, targetImages: { 'hp-1': { drive: 'drive:reset' } } } };
+  const upgrade = { ...reset, createdAt: stamp(1), confirmedAt: stamp(5), finishedAt: stamp(6), request: { action: 'upgrade' },
+    review: { changes: [{ node: 'hp-1', component: 'drive', to: 'drive:upgraded' }] } };
+  for (const history of [[reset, upgrade], [upgrade, reset]]) assert.equal(expectations(history, now)['hp-1'].drive.to, 'drive:upgraded');
+});
+
 test('missing/idle evidence never counts as success, stale payouts never prove InstantSend', () => {
   const h=host(now); h.probe.data.dapi.query=null;
   h.probe.data.faucet={payouts:[{time:now/1000-90000,instantlock:true,confirmations:100}]};
