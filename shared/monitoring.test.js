@@ -40,6 +40,27 @@ test('only confirmed executed changes establish image intent; active rollout is 
   assert.equal(convergence(h,{containers:[{...c,digest:null}]},{},expectations([op],now+3000),{'dashpay/dashd':'core'})[0].status,'awaiting-sample');
 });
 
+test('partial upgrade accepts committed phases, not plans for the failed phase', () => {
+  const stamp = new Date(now).toISOString();
+  const core = { node: 'hp-1', component: 'core', to: 'core:new' };
+  const drive = { node: 'hp-1', component: 'drive', to: 'drive:new' };
+  const operation = { createdAt: stamp, confirmedAt: stamp, status: 'failed', request: { action: 'upgrade' },
+    progress: { phase: 'platform', current: 'hp-1', completed: [] }, review: { changes: [core, drive] },
+    artifacts: { phases: [{ changes: [core] }, { changes: [drive] }] }, done: ['phase-0'] };
+  assert.deepEqual(Object.keys(expectations([operation], now)['hp-1']), ['core']);
+  assert.equal(expectations([operation], now)['hp-1'].core.to, 'core:new');
+  assert.deepEqual(expectations([{ ...operation, done: [] }], now), {});
+});
+
+test('interrupted native reset pins only verified hosts; earlier-stage progress is not verification', () => {
+  const stamp = new Date(now).toISOString();
+  const operation = { createdAt: stamp, confirmedAt: stamp, status: 'interrupted', request: { action: 'platform-reset' },
+    progress: { phase: 'verify', completed: ['hp-1'] }, review: { native: true,
+      targetImages: { 'hp-1': { drive: 'drive:new' }, 'hp-2': { drive: 'drive:new' } } } };
+  assert.deepEqual(Object.keys(expectations([operation], now)), ['hp-1']);
+  assert.deepEqual(expectations([{ ...operation, progress: { ...operation.progress, phase: 'apply' } }], now), {});
+});
+
 test('missing/idle evidence never counts as success, stale payouts never prove InstantSend', () => {
   const h=host(now); h.probe.data.dapi.query=null;
   h.probe.data.faucet={payouts:[{time:now/1000-90000,instantlock:true,confirmations:100}]};

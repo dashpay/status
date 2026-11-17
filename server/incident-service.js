@@ -1,7 +1,7 @@
 // Single writer. No cloud, SSH, Docker or OpenClaw credentials in this process.
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { operationMaintenance, heldByOperation } from './operation-maintenance.js';
+import { operationMaintenance, operationRecords, heldByOperation } from './operation-maintenance.js';
 import { createCi } from './ci.js';
 import { loadReleaseInbox, reconcileReleaseTasks } from './release-webhook.js';
 import { loadSettings, readJSON } from '../shared/settings.js';
@@ -15,12 +15,13 @@ export async function cycle({ dataDir, ci, destination, secret, alertUrl = null,
   const states = Object.fromEntries(settings.networks.map((n) => [n.name, readJSON(join(dataDir, 'state', `${n.name}.json`))]));
   const aws = readJSON(join(dataDir, 'aws', 'inventory.json'));
   if (aws) aws.health = readJSON(join(dataDir, 'aws', 'health.json'));
-  const maintenance = operationMaintenance(dataDir, settings, now);
+  const operations = operationRecords(dataDir);
+  const maintenance = operationMaintenance(dataDir, settings, now, operations);
   const previous = loadIncidentState(dataDir);
   // Upgrades, redeploys and reboots seen in live observations are held like
   // dashboard operations, so their expected downtime never reaches the queue.
   const activity = recognizeActivity({ settings, states, previous: previous?.activity, now });
-  const derived = deriveIssues({ settings, states, maintenance, activity, ci: (ci || createCi({ dataDir })).summary({ admin: true }), aws, now });
+  const derived = deriveIssues({ settings, states, operations, maintenance, activity, ci: (ci || createCi({ dataDir })).summary({ admin: true }), aws, now });
   const state = reconcile(previous, derived, now);
   state.maintenance = maintenance;
   state.activity = activity;

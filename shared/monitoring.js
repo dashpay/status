@@ -14,12 +14,15 @@ export function expectations(operations = [], now = Date.now()) {
       targets['*'] = op.review.images;
     }
     if (!op.confirmedAt || !op.progress || !['running', 'succeeded', 'failed', 'interrupted', 'cancelled'].includes(op.status)) continue;
-    const active = op.status === 'running' && now - Date.parse(op.updatedAt) < 15 * 60_000;
+    const age = now - Date.parse(op.updatedAt);
+    const active = op.status === 'running' && age >= 0 && age < 15 * 60_000;
+    const usePlan = active || op.status === 'succeeded';
     // Native reset reviews resolve the manifest to each host's architecture.
     // The registry retains the manifest pin; comparing that to a running child
     // digest falsely reports drift after a successfully verified reset.
     if (op.request?.action === 'platform-reset' && op.review?.native) {
       for (const [node, images] of Object.entries(op.review.targetImages || {})) {
+        if (!usePlan && !(op.progress.phase === 'verify' && Array.isArray(op.progress.completed) && op.progress.completed.includes(node))) continue;
         for (const component of ['drive', 'dapi', 'tenderdash', 'gateway']) {
           if (typeof images[component] !== 'string') continue;
           targets[node] ??= {};
@@ -27,7 +30,9 @@ export function expectations(operations = [], now = Date.now()) {
         }
       }
     }
-    for (const c of [...(op.review?.changes || []), ...(op.artifacts?.phases || []).flatMap((p) => p.changes || [])]) {
+    const phases = op.artifacts?.phases || [];
+    const appliedChanges = phases.flatMap((phase, index) => usePlan || (op.request?.action === 'upgrade' && Array.isArray(op.done) && op.done.includes(`phase-${index}`)) ? phase.changes || [] : []);
+    for (const c of [...(usePlan ? op.review?.changes || [] : []), ...appliedChanges]) {
       if (typeof c.to !== 'string' || !c.node || !c.component) continue;
       targets[c.node] ??= {};
       targets[c.node][c.component] = { to: c.to, from: c.from, active, since: op.finishedAt || op.confirmedAt };

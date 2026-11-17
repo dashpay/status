@@ -9,13 +9,18 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 export const OPERATION_LEASE_MS = 35 * 60_000;
 export const OPERATION_SETTLE_MS = 20 * 60_000;
 
-export function operationMaintenance(dataDir, settings, now = Date.now()) {
-  const dir = join(dataDir, 'ops'), result = {};
-  if (!existsSync(dir)) return result;
+export function operationRecords(dataDir) {
+  const dir = join(dataDir, 'ops');
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir).filter((file) => file.endsWith('.json') && UUID.test(file.slice(0, -5)))
+    .map((file) => { const op = readJSON(join(dir, file)); return op?.id === file.slice(0, -5) ? op : null; }).filter(Boolean);
+}
+
+export function operationMaintenance(dataDir, settings, now = Date.now(), operations = operationRecords(dataDir)) {
+  const result = {};
   const managed = new Set(settings.networks.filter((n) => n.chainType !== 'mainnet' && n.kind !== 'external').map((n) => n.name));
-  for (const file of readdirSync(dir).filter((f) => f.endsWith('.json') && UUID.test(f.slice(0, -5)))) {
-    const op = readJSON(join(dir, file));
-    if (!op || op.id !== file.slice(0, -5) || !managed.has(op.network) || !MUTATING.has(op.request?.action)
+  for (const op of operations) {
+    if (!managed.has(op.network) || !MUTATING.has(op.request?.action)
       || !['confirmed', 'running', 'succeeded'].includes(op.status)) continue;
     if (op.status === 'succeeded') {
       // A finished upgrade is still converging (sync, DKG, quorum lists). Hold
