@@ -3,6 +3,7 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { evaluateNetwork, explorerReadiness } from '../shared/evaluate.js';
+import { expectations } from '../shared/monitoring.js';
 import { readJSON, writeAtomic } from '../shared/settings.js';
 import { dynamoScaleInControl } from '../shared/aws-alarm-semantics.js';
 import { activityKey } from './change-activity.js';
@@ -114,7 +115,7 @@ export const TITLES = {
   idle_address: 'Unassociated public address requires ownership review',
 };
 
-export function deriveIssues({ settings, states, ci, aws, maintenance = {}, activity = null, now = Date.now() }) {
+export function deriveIssues({ settings, states, ci, aws, operations = [], maintenance = {}, activity = null, now = Date.now() }) {
   const issues = [], sources = {}, checks = {}, samples = {}, suppressions = {}, heldInstances = new Set();
   const source = (key, at, complete, max) => {
     sources[key] = { observedAt: Number.isFinite(Date.parse(at)) ? at : null, fresh: fresh(at, now, max), complete: complete === true, maxAgeMs: max };
@@ -183,7 +184,7 @@ export function deriveIssues({ settings, states, ci, aws, maintenance = {}, acti
     if (!discoveryOk) add('network', n.name, 'discovery', 'discovery_failed', 'warning', `${key}:monitor`,
       { error: String(s.discovery?.error || 'stale discovery').slice(0, 300) }, iso(now), identity);
     let evaluation;
-    try { evaluation = evaluateNetwork({ ...n, lifecycle: undefined }, s, settings, now); }
+    try { evaluation = evaluateNetwork({ ...n, lifecycle: undefined }, s, settings, now, {}, expectations(operations.filter((op) => op.network === n.name), now)); }
     catch {
       // A malformed nested report cannot turn a previously failing fleet green.
       sources[key].complete = false; checks[idFor('network', n.name, 'collector', 'collector_stale', identity)].clear = false;

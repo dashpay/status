@@ -8,18 +8,26 @@ const sameImage = (container, reference) => {
   return digest ? container.digest === digest || container.image?.endsWith('@' + digest) : container.image?.replace(/^(index\.)?docker\.io\//, '') === reference.replace(/^(index\.)?docker\.io\//, '');
 };
 export function expectations(operations = [], now = Date.now()) {
-  const targets = {};
-  for (const op of [...operations].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))) {
-    if (op.confirmedAt && op.status === 'succeeded' && op.request?.action === 'create-devnet' && op.review?.images) {
-      targets['*'] = op.review.images;
+  const appliedAt = (op) => Date.parse(op.finishedAt || op.confirmedAt || op.createdAt) || 0;
+  const ordered = [...operations].sort((left, right) => appliedAt(left) - appliedAt(right)
+    || String(left.createdAt).localeCompare(String(right.createdAt)) || String(left.id).localeCompare(String(right.id)));
+  let targets = {}, generationStart = 0;
+  for (const op of ordered) {
+    if (op.confirmedAt && op.status === 'succeeded' && op.request?.action === 'create-devnet') {
+      generationStart = Date.parse(op.createdAt || op.confirmedAt);
+      targets = op.review?.images ? { '*': op.review.images } : {};
     }
+    if (Date.parse(op.createdAt || op.confirmedAt) < generationStart) continue;
     if (!op.confirmedAt || !op.progress || !['running', 'succeeded', 'failed', 'interrupted', 'cancelled'].includes(op.status)) continue;
-    const active = op.status === 'running' && now - Date.parse(op.updatedAt) < 15 * 60_000;
+    const age = now - Date.parse(op.updatedAt);
+    const active = op.status === 'running' && age >= 0 && age < 15 * 60_000;
+    const usePlan = active || op.status === 'succeeded';
     // Native reset reviews resolve the manifest to each host's architecture.
     // The registry retains the manifest pin; comparing that to a running child
     // digest falsely reports drift after a successfully verified reset.
     if (op.request?.action === 'platform-reset' && op.review?.native) {
       for (const [node, images] of Object.entries(op.review.targetImages || {})) {
+        if (!usePlan && !(op.progress.phase === 'verify' && Array.isArray(op.progress.completed) && op.progress.completed.includes(node))) continue;
         for (const component of ['drive', 'dapi', 'tenderdash', 'gateway']) {
           if (typeof images[component] !== 'string') continue;
           targets[node] ??= {};
@@ -27,7 +35,9 @@ export function expectations(operations = [], now = Date.now()) {
         }
       }
     }
-    for (const c of [...(op.review?.changes || []), ...(op.artifacts?.phases || []).flatMap((p) => p.changes || [])]) {
+    const phases = op.artifacts?.phases || [];
+    const appliedChanges = phases.flatMap((phase, index) => usePlan || (op.request?.action === 'upgrade' && Array.isArray(op.done) && op.done.includes(`phase-${index}`)) ? phase.changes || [] : []);
+    for (const c of [...(usePlan ? op.review?.changes || [] : []), ...appliedChanges]) {
       if (typeof c.to !== 'string' || !c.node || !c.component) continue;
       targets[c.node] ??= {};
       targets[c.node][c.component] = { to: c.to, from: c.from, active, since: op.finishedAt || op.confirmedAt };
