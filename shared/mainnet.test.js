@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { validateMainnetReport } from './mainnet.js';
-import { evaluateNetwork } from './evaluate.js';
+import { evaluateNetwork, projectNetwork } from './evaluate.js';
 import { DEFAULT_SETTINGS, validateSettings } from './settings.js';
 
 const now = Date.parse('2026-09-30T08:00:00Z');
@@ -51,4 +51,65 @@ test('mainnet-support cannot enter EC2 discovery, even with malformed legacy set
   assert.equal(calls, 0);
   const bad = structuredClone(DEFAULT_SETTINGS); bad.networks[bad.networks.findIndex((n) => n.name === 'mainnet')] = forbidden;
   assert.throws(() => validateSettings(bad), /separate report observer/);
+});
+
+test('private Evo fills dashboard metrics without disclosing source identity in state or projection', () => {
+  const r = fixture(); r.evo = true; r.core.difficulty = 123.25;
+  const privateValue = 'PRIVATE-NODE-IDENTITY';
+  r.publicIp = privateValue;
+  r.core.masternode = { state: 'READY', type: 'Evo', posePenalty: 0, proTxHash: privateValue,
+    service: privateValue, lastPaidHeight: 123456, registeredHeight: 123456 };
+  Object.assign(r.platform, { protocolApp: 13, validatorSetSize: 100, peers: 8, nodeId: privateValue, proTxHash: privateValue, proposer: privateValue });
+  r.dapi = { ok: true, height: 200, dapiVersion: '4.1.1', driveVersion: '4.1.2', chainId: 'evo1', error: privateValue,
+    tls: { issuer: privateValue }, query: { ok: true, epoch: 300, protocol: 13, error: privateValue } };
+  r.components = { drive: { version: '4.1.2', running: true, restarts: 0, name: privateValue } };
+  const normalized = validateMainnetReport(r, now);
+  const publicView = projectNetwork(DEFAULT_SETTINGS.networks.find((n) => n.name === 'mainnet'), evaluate(r), normalized, false);
+  assert.doesNotMatch(JSON.stringify([normalized, publicView]), /PRIVATE-NODE-IDENTITY|123456/);
+  assert.equal(publicView.summary.core.difficulty, 123.25);
+  assert.equal(publicView.summary.mainnet.bigBans, 876);
+  assert.equal(publicView.summary.mainnet.quorumCount, 20);
+  assert.equal(publicView.summary.mainnet.coreStall, false);
+  assert.equal(publicView.summary.platform.protocol, 13);
+  assert.equal(publicView.summary.platform.validatorSet, 100);
+  assert.deepEqual(publicView.summary.masternodes, { ready: 1, total: 1, pose: 0 });
+  assert.deepEqual(publicView.summary.dapi, { ok: 1, total: 1 });
+  assert.equal(publicView.summary.versions.drive['4.1.2'], 1);
+  assert.equal(publicView.hosts[0].publicIp, null);
+});
+
+test('configured private Evo failure cannot manufacture readiness or DAPI health from fallback', () => {
+  const r = fixture(); r.evo = true;
+  const view = evaluate(r);
+  assert.equal(view.level, 'down');
+  assert.equal(view.summary.masternodes.ready, 0);
+  assert.equal(view.summary.dapi.ok, 0);
+  assert.equal(view.summary.core.height, 100);
+  assert.equal(view.summary.platform.height, 200);
+});
+
+test('private text in allowed-looking fields is rejected before persistence', () => {
+  const r = fixture(); r.evo = true;
+  r.core.subversion = 'PRIVATE-NODE-IDENTITY'; r.platform.version = '192.0.2.123';
+  r.core.masternode = { state: 'PRIVATE-NODE-IDENTITY', type: '192.0.2.123' };
+  r.dapi = { driveVersion: 'PRIVATE-NODE-IDENTITY', chainId: 'PRIVATE-NODE-IDENTITY' };
+  r.components = { drive: { version: '192.0.2.123', running: true } };
+  assert.doesNotMatch(JSON.stringify(validateMainnetReport(r, now)), /PRIVATE-NODE-IDENTITY|192\.0\.2\.123/);
+});
+
+test('service projection allowlists identity, fails stale/missing samples, preserves unknown', () => {
+  const r = fixture();
+  r.serviceChecks = { at: now/1000, services: [{ id: 'insight', ok: true, ms: 3, height: 100, password: 'SECRET' },
+    { id: 'quorums', ok: false, reason: 'stale-data', url: 'https://SECRET' }, { id: 'observer', ok: null, reason: 'SECRET' }] };
+  let endpoints = validateMainnetReport(r,now).endpoints;
+  assert.equal(endpoints.find(e=>e.label.startsWith('Insight ·')).ok,true);
+  assert.equal(endpoints.find(e=>e.label.startsWith('Quorums ·')).ok,false);
+  assert.equal(endpoints.find(e=>e.label.startsWith('Independent')).ok,null);
+  assert.equal(endpoints.find(e=>e.label.startsWith('Platform seed 1')).ok,false);
+  assert.doesNotMatch(JSON.stringify(endpoints),/SECRET/);
+  assert.ok(endpoints.every(e=>typeof e.url==='string' && e.url.startsWith('https://')));
+  assert.equal(endpoints.find(e=>e.label.startsWith('Insight ·')).status,'OK');
+  r.serviceChecks.at -= 241;
+  endpoints = validateMainnetReport(r,now).endpoints;
+  assert.ok(endpoints.every(e=>e.ok===false));
 });

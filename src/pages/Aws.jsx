@@ -12,7 +12,7 @@ const EIP_MONTH = 3.65, GP_GIB_MONTH = 0.08, SNAP_GIB_MONTH = 0.05, ECR_GB_MONTH
 export default function Aws() {
   const session = useSession();
   const now = useNow(5000);
-  // Signed out (or without access) the server sends spend and breakdowns only.
+  // Signed out: resource aggregates only. Costs require a server-verified session.
   const { data, error } = useResource(session.loaded ? `/api/aws?as=${session.user?.id || 'public'}` : null, (t) => t === 'aws');
   const [bind, tip] = useTip();
   if (!session.loaded) return <div className="mt-6 text-dim">Loading…</div>;
@@ -108,9 +108,9 @@ function Inventory({ inv, now, bind, tip }) {
   );
 }
 
-// Before sign-in: what runs and what it costs, as totals and breakdowns.
+// Resource aggregates remain public; dollar amounts are only shown after sign-in.
 function PublicInventory({ inv, now, bind, tip, signedIn }) {
-  const c = inv.costs;
+  const c = signedIn ? inv.costs : null;
   const s = inv.storage;
   const breakdown = (title, rows) => (
     <Section title={title}>
@@ -127,11 +127,11 @@ function PublicInventory({ inv, now, bind, tip, signedIn }) {
         <h1 className="text-[16px] font-semibold">AWS</h1>
         <span className="text-dim text-[12px]">what DCG runs for Dash networks, across {inv.regionsInUse} regions · updated <span title={clock(inv.at)}>{ago(inv.at, now)} ago</span></span>
       </div>
-      <div className="mt-2 text-[12px] text-dim">Public view: totals and breakdowns only. {signedIn ? 'Your account has no access to more.' : 'Sign in for the full inventory.'}</div>
-      <div className="mt-3 grid gap-2 grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
+      <div className="mt-2 text-[12px] text-dim">{signedIn ? 'Summary view: resource totals and costs. Detailed inventory requires additional access.' : 'Public view: resource totals and breakdowns. Sign in to view costs.'}</div>
+      <div className={`mt-3 grid gap-2 grid-cols-2 ${signedIn ? 'md:grid-cols-3 xl:grid-cols-6' : 'xl:grid-cols-4'}`}>
         <Stat label="Instances running" value={inv.instances.running} sub={`${inv.instances.vcpus.toLocaleString('en-US')} vCPU · ${inv.instances.memoryGiB.toLocaleString('en-US')} GiB`} />
-        <Stat label="Cost · month to date" value={usd(c?.monthToDate)} sub={c ? `last month ${usd(c.lastMonth)}` : '—'} />
-        <Stat label="Month-end estimate" value={usd(c?.monthEndEstimate)} sub={c ? 'Cost Explorer forecast' : ''} />
+        {signedIn && <Stat label="Cost · month to date" value={usd(c?.monthToDate)} sub={c ? `last month ${usd(c.lastMonth)}` : '—'} />}
+        {signedIn && <Stat label="Month-end estimate" value={usd(c?.monthEndEstimate)} sub={c ? 'Cost Explorer forecast' : ''} />}
         <Stat label="Block storage" value={`${(s.ebsGiB / 1024).toFixed(1)} TiB`} sub={`${s.volumes} EBS volumes`} />
         <Stat label="Container images" value={bytes(s.ecrBytes)} sub={`${s.ecrImages.toLocaleString('en-US')} images`} />
         <Stat label="Edge and network" value={`${inv.network.loadBalancers} LB · ${inv.network.cloudfront} CDN`} sub={`${inv.network.elasticIps} Elastic IPs · ${inv.network.natGateways} NAT`} />

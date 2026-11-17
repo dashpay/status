@@ -246,7 +246,7 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
     dapi: { ok: validatorRows.filter((r) => r.data.dapi?.ok).length, total: validatorRows.filter((r) => r.host.state === 'running').length },
   };
   if (network.chainType !== 'mainnet') summary.monitoring = monitoringSummary(rows, state?.endpoints || [], now);
-  const mainnetRow = rows.find((r) => r.host.role === 'fullnode' && r.data.mainnet);
+  const mainnetRow = rows.find((r) => ['fullnode', 'validator'].includes(r.host.role) && r.data.mainnet);
   if (network.chainType === 'mainnet' && mainnetRow) {
     const m = mainnetRow.data.mainnet || {};
     summary.mainnet = {

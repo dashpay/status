@@ -239,17 +239,48 @@ test('CI: admins issue reporter tokens; reporters post with them; infrastructure
       costs: { at: 'now', month: '2026-09', monthToDate: 3270.85, monthEndEstimate: 3503.4, lastMonth: 3109.17, byService: [{ service: 'EC2 - Other', amount: 1178.9 }], daily: [] } }));
     assert.equal((await (await w.req('/api/aws')).json()).at, 'now');
     assert.equal((await (await w.req('/api/aws')).json()).instances[0].publicIp, '192.0.2.9', 'members see the inventory');
+    assert.equal((await (await w.req('/api/aws')).json()).costs.monthToDate, 3270.85, 'members retain costs');
     assert.equal((await w.req(`/api/ci/reporters/${id}`, { method: 'DELETE', headers: { 'x-csrf-token': csrf } })).status, 200);
-    // Signed out: spend and breakdowns, nothing that names or locates a resource.
+    // Signed out: resource aggregates, no spend or resource identity.
     await w.req('/api/auth/logout', { method: 'POST', headers: { 'x-csrf-token': csrf } });
     const pub = await (await w.req('/api/aws')).json();
     assert.equal(pub.public, true);
     assert.deepEqual(pub.byNetwork, [{ label: 'testnet', count: 1, vcpus: 2, memoryGiB: 2 }]);
-    assert.equal(pub.costs.monthToDate, 3270.85);
+    assert.equal(pub.costs, undefined);
     const text = JSON.stringify(pub);
-    for (const leak of ['192.0.2.9', 'i-0123456789abcdef0', 'dn-testnet-masternode-1', 'testnet-alb', 'elb.amazonaws', 'killdate', 'rs-dapi', 'quorums.testnet', 'dash-terraform-state', 'vol-1'])
+    for (const leak of ['3270.85', '3503.4', '3109.17', '1178.9', '192.0.2.9', 'i-0123456789abcdef0', 'dn-testnet-masternode-1', 'testnet-alb', 'elb.amazonaws', 'killdate', 'rs-dapi', 'quorums.testnet', 'dash-terraform-state', 'vol-1'])
       assert.ok(!text.includes(leak), `leaked ${leak}`);
     assert.equal((await post(`Bearer ${token}`)).status, 401);
+  } finally { w.close(); }
+});
+
+test('AWS costs require a valid session, including after cache warmup and logout', async () => {
+  const w = await start(42); // Signed-in user without inventory membership.
+  try {
+    const costs = { monthToDate: 1234.56, monthEndEstimate: 2345.67, lastMonth: 3456.78,
+      byService: [{ service: 'Fixture service', amount: 456.78 }], daily: [{ day: '2026-10-01', amount: 567.89 }] };
+    writeFileSync(join(w.dataDir, 'aws', 'inventory.json'), JSON.stringify({ at: 'fixture', regions: [],
+      instances: [], volumes: [], addresses: [], natGateways: [], loadBalancers: [], lambda: [],
+      dynamodb: [], ecr: [], snapshots: [], cloudfront: [], s3: [], costs }));
+    const anonymous = async (path = '/api/aws', options) => {
+      const response = await w.req(path, options);
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get('cache-control'), 'no-store');
+      assert.match(response.headers.get('vary'), /Cookie/i);
+      const body = await response.json();
+      assert.equal(body.public, true);
+      assert.equal(Object.hasOwn(body, 'costs'), false);
+      for (const amount of [1234.56, 2345.67, 3456.78, 456.78, 567.89])
+        assert.ok(!JSON.stringify(body).includes(String(amount)));
+    };
+    await anonymous('/api/aws?as=9920871'); // Claimed identity never grants costs.
+    const csrf = await w.login();
+    const signedIn = await (await w.req('/api/aws?as=public')).json();
+    assert.equal(signedIn.public, true, 'sign-in does not grant detailed inventory');
+    assert.deepEqual(signedIn.costs, costs, 'signed-in summaries retain all costs');
+    await anonymous('/api/aws?as=42', { headers: { cookie: 'dash-session=invalid' } });
+    assert.equal((await w.req('/api/auth/logout', { method: 'POST', headers: { 'x-csrf-token': csrf } })).status, 200);
+    await anonymous(); // Same inventory timestamp must not reuse signed-in costs.
   } finally { w.close(); }
 });
 

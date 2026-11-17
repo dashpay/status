@@ -9,6 +9,7 @@ import Settings from './pages/Settings.jsx';
 import NewDevnet from './pages/NewDevnet.jsx';
 import ResetPlatform from './pages/ResetPlatform.jsx';
 import CI from './pages/CI.jsx';
+import Websites from './pages/Websites.jsx';
 import Queue from './pages/Queue.jsx';
 import Aws from './pages/Aws.jsx';
 import Remediation from './pages/Remediation.jsx';
@@ -28,6 +29,7 @@ export default function App() {
   else if (parts[0] === 'settings') page = <Settings />;
   else if (parts[0] === 'ci' && parts[1] === 'queue') page = <Queue />;
   else if (parts[0] === 'ci') page = <CI />;
+  else if (parts[0] === 'websites') page = <Websites />;
   else if (parts[0] === 'aws') page = <Aws />;
   else if (parts[0] === 'remediation') page = <Remediation />;
   else if (parts[0] === 'devnets' && parts[1] === 'new') page = <NewDevnet />;
@@ -60,6 +62,7 @@ function Header({ networks, active, session }) {
           {<>
             <span className="w-px h-4 bg-line mx-1 shrink-0" aria-hidden="true" />
             <Link to="/ci" className={`px-2.5 py-1 rounded whitespace-nowrap ${active === 'ci' ? 'bg-panel-2 text-fg' : 'text-dim hover:text-fg'}`}>CI</Link>
+            <Link to="/websites" className={`px-2.5 py-1 rounded whitespace-nowrap ${active === 'websites' ? 'bg-panel-2 text-fg' : 'text-dim hover:text-fg'}`}>Websites</Link>
             <Link to="/aws" className={`px-2.5 py-1 rounded whitespace-nowrap ${active === 'aws' ? 'bg-panel-2 text-fg' : 'text-dim hover:text-fg'}`}>AWS</Link>
             <Link to="/remediation" className={`px-2.5 py-1 rounded whitespace-nowrap ${active === 'remediation' ? 'bg-panel-2 text-fg' : 'text-dim hover:text-fg'}`}>Remediation</Link>
           </>}

@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch, openSync, readSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { websiteReport } from './websites.js';
 import { createAuth } from './auth.js';
 import { createCi } from './ci.js';
 import { createOrgQueue } from './ci-queue.js';
@@ -138,6 +139,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     res.status(stale ? 503 : 200).json({ ...body, stale });
   });
 
+  app.get('/api/websites', (req, res) => res.json(websiteReport(dataDir, clock())));
   app.get('/api/health', (req, res) => res.json({ service: 'dash-status', status: 'ok' }));
   app.get('/api/remediation', (req, res) => {
     reloadSettings();
@@ -423,7 +425,10 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   app.get('/api/aws', (req, res) => {
     const inv = readJSON(join(awsDir, 'inventory.json'));
     if (!inv) return res.status(404).json({ error: 'No AWS inventory yet; the agent collects it every 10 minutes' });
-    res.json(memberOf(settings, user(req)) ? inv : cached(`aws|${inv.at}`, () => publicInventory(inv)));
+    const viewer = user(req);
+    // Cost visibility follows the authenticated session, never query parameters.
+    // Keep signed-in summaries separate from the anonymous projection cache.
+    res.vary('Cookie').json(memberOf(settings, viewer) ? inv : cached(`aws|${viewer ? 'signed-in' : 'public'}|${inv.at}`, () => publicInventory(inv, { includeCosts: !!viewer })));
   });
 
   // GitHub account lookup so admins can grant access by login.
