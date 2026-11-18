@@ -7,6 +7,9 @@ const enumeration = (v, allowed) => allowed.includes(v) ? v : null;
 const boolean = (v) => typeof v === 'boolean' ? v : null;
 const timestamp = (v) => typeof v === 'string' && Number.isFinite(Date.parse(v)) ? new Date(v).toISOString() : null;
 
+// Every state Dash Core's `masternode status` can report.
+const MASTERNODE_STATES = ['READY', 'WAITING_FOR_PROTX', 'POSE_BANNED', 'REMOVED', 'OPERATOR_KEY_CHANGED', 'PROTX_IP_CHANGED', 'ERROR', 'UNKNOWN'];
+
 const SERVICES = {
   quorums: ['Quorums · fresh Core comparison', 'https://quorums.mainnet.networks.dash.org/quorums'],
   insight: ['Insight · indexed block/transaction', 'https://insight.dash.org/insight/'],
@@ -28,7 +31,7 @@ export function serviceEndpoints(input, now) {
     const reason = enumeration(s?.reason, ['healthy', 'reference-unavailable', 'stale-data', 'certificate-expiring', 'probe-failed', 'consensus-signal']);
     return { label, url, kind: 'mainnet-service', ok: s ? boolean(s.ok) : false,
       status: s?.ok === true ? 'OK' : null, ms: finite(s?.ms), height: integer(s?.height),
-      error: s?.ok === true ? null : reason || 'monitor sample missing or stale' };
+      error: s?.ok === true ? null : reason || (s && boolean(s.ok) === null ? 'not observed' : 'monitor sample missing or stale') };
   });
 }
 
@@ -57,7 +60,7 @@ export function validateMainnetReport(input, now = Date.now()) {
   const evo = input.evo === true;
   const mn = input.core?.masternode;
   if (core && evo && mn) core.masternode = {
-    state: enumeration(mn.state, ['READY', 'WAITING_FOR_PROTX', 'POSE_BANNED', 'REMOVED', 'ERROR']),
+    state: enumeration(mn.state, MASTERNODE_STATES),
     type: enumeration(mn.type, ['Evo']), posePenalty: integer(mn.posePenalty),
   };
   const d = input.dapi;

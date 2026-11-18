@@ -105,11 +105,32 @@ test('service projection allowlists identity, fails stale/missing samples, prese
   assert.equal(endpoints.find(e=>e.label.startsWith('Insight ·')).ok,true);
   assert.equal(endpoints.find(e=>e.label.startsWith('Quorums ·')).ok,false);
   assert.equal(endpoints.find(e=>e.label.startsWith('Independent')).ok,null);
+  assert.equal(endpoints.find(e=>e.label.startsWith('Independent')).error,'not observed');
+  assert.equal(endpoints.find(e=>e.label.startsWith('Quorums ·')).error,'stale-data');
+  assert.equal(endpoints.find(e=>e.label.startsWith('Platform seed 1')).error,'monitor sample missing or stale');
   assert.equal(endpoints.find(e=>e.label.startsWith('Platform seed 1')).ok,false);
   assert.doesNotMatch(JSON.stringify(endpoints),/SECRET/);
   assert.ok(endpoints.every(e=>typeof e.url==='string' && e.url.startsWith('https://')));
   assert.equal(endpoints.find(e=>e.label.startsWith('Insight ·')).status,'OK');
   r.serviceChecks.at -= 241;
   endpoints = validateMainnetReport(r,now).endpoints;
-  assert.ok(endpoints.every(e=>e.ok===false));
+  assert.ok(endpoints.every(e=>e.ok===false && e.error==='monitor sample missing or stale'));
+});
+
+test('every Dash Core masternode state survives normalization', () => {
+  for (const state of ['READY', 'WAITING_FOR_PROTX', 'POSE_BANNED', 'REMOVED', 'OPERATOR_KEY_CHANGED', 'PROTX_IP_CHANGED', 'ERROR', 'UNKNOWN']) {
+    const r = fixture(); r.evo = true; r.core.masternode = { state, type: 'Evo', posePenalty: 0 };
+    assert.equal(validateMainnetReport(r, now).hosts[0].probe.data.core.masternode.state, state);
+  }
+});
+
+test('a stale Evo report is unreachable and says so on the observer row', () => {
+  const r = fixture(); r.evo = true; r.core.masternode = { state: 'READY', type: 'Evo', posePenalty: 0 };
+  const mainnet = DEFAULT_SETTINGS.networks.find((n) => n.name === 'mainnet'), state = validateMainnetReport(r, now);
+  assert.equal(state.hosts[0].role, 'validator');
+  assert.ok(!evaluateNetwork(mainnet, state, DEFAULT_SETTINGS, now).rows[0].reasons.some((x) => /stale/.test(x.text)));
+  const view = evaluateNetwork(mainnet, state, DEFAULT_SETTINGS, now + 181_000);
+  assert.equal(view.level, 'unreachable');
+  assert.equal(view.rows[0].level, 'unreachable');
+  assert.ok(view.rows[0].reasons.some((x) => x.level === 'unreachable' && x.text === 'mainnet observer report is stale'));
 });

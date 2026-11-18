@@ -1,7 +1,12 @@
 import { LEVEL_LABEL, linkProps } from './lib.js';
 
-export function Dot({ level, className = '' }) {
-  return <span className={`dot bg-lv-${level} ${className}`} title={LEVEL_LABEL[level]} />;
+export function Dot({ level, className = '', title = LEVEL_LABEL[level] }) {
+  return <span className={`dot bg-lv-${level} ${className}`} title={title} />;
+}
+
+// ok === null means the check was not observed: neutral, never down.
+export function EndpointDot({ ok }) {
+  return ok == null ? <Dot level="stopped" title="not observed" /> : <Dot level={ok ? 'ok' : 'down'} />;
 }
 
 export function Level({ level }) {

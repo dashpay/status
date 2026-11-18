@@ -218,7 +218,7 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
     const stale = !Number.isFinite(observed) || now - observed > maxAge || observed > now + 60_000;
     reportStale = stale;
     if (stale) {
-      const row = rows.find((r) => r.host.role === 'fullnode');
+      const row = rows.find((r) => ['fullnode', 'validator'].includes(r.host.role));
       if (row) { row.level = 'unreachable'; row.reasons.push({ level: 'unreachable', text: 'mainnet observer report is stale' }); }
     }
   }

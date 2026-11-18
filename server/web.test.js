@@ -4,7 +4,7 @@ import { createHmac } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createWeb } from './web.js';
+import { createWeb, ttlCache } from './web.js';
 import { DEFAULT_SETTINGS } from '../shared/settings.js';
 
 async function start(userId = 9920871, extraUsers = [], options = {}) {
@@ -474,4 +474,20 @@ test('a deleted devnet no longer blocks its name in the new-devnet form', async 
     assert.equal(existing.includes('devnet-sakura'), false);
     assert.ok(existing.includes('devnet-bonsai') && existing.includes('devnet-stuck') && existing.includes('testnet'));
   } finally { w.close(); }
+});
+
+test('public projection cache keeps its 15 s lifetime and evicts expired keys on insert', () => {
+  let now = 0, calls = 0;
+  const cached = ttlCache(() => now);
+  for (const at of ['a', 'b']) for (const view of ['public', 'signed-in']) cached(`aws|${view}|${at}`, () => ++calls);
+  assert.equal(cached('aws|public|a', () => ++calls), 1, 'a live entry is reused');
+  now = 14_999;
+  assert.equal(cached('ci', () => ++calls), 5);
+  assert.equal(cached.size(), 5, 'nothing is evicted before it expires');
+  now = 15_000;
+  assert.equal(cached('aws|public|c', () => ++calls), 6);
+  assert.equal(cached.size(), 2, 'entries from the previous inventory are gone');
+  assert.equal(cached('ci', () => ++calls), 5);
+  cached.delete('ci');
+  assert.equal(cached('ci', () => ++calls), 7);
 });
