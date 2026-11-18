@@ -424,6 +424,32 @@ test('a devnet moves to a newer dashnet only when its plans bind the same node a
   writeFileSync(join(root, 'current'), fake(V('20260927T000000Z', 'd'), 'n1'), { mode: 0o755 });
   await d.doctor(r).catch(() => {});
   assert.match(readFileSync(join(dir, 'dashnet'), 'utf8'), /20260928T120000Z/, 'no downgrade');
+  // A newer build on another node recipe that lists this devnet's as accepted
+  // operates its plans: adopt it. The bootstrap recipe must still be the same.
+  const accepting = (version, bootstrap) => `#!/bin/sh\ncase "$1" in version) echo ${version};; recipes) echo '{"node":"n2","nodeAccepts":"n0,n1","bootstrap":"${bootstrap}"}';; upgrade-plan) echo 'or core (Core only, every node)' >&2;; *) exit 0;; esac\n`;
+  writeFileSync(join(root, 'current'), accepting(V('20260930T000000Z', 'e'), 'other'), { mode: 0o755 });
+  await d.doctor(r).catch(() => {});
+  assert.match(readFileSync(join(dir, 'dashnet'), 'utf8'), /20260928T120000Z/, 'another bootstrap recipe not adopted');
+  writeFileSync(join(root, 'current'), accepting(V('20260930T000000Z', 'e'), 'b'), { mode: 0o755 });
+  await d.doctor(r).catch(() => {});
+  assert.match(readFileSync(join(dir, 'dashnet'), 'utf8'), /20260930T000000Z/, 'accepting newer binary adopted');
+  assert.ok(logs.some((l) => /accepts this devnet's node recipe/.test(l)));
+  assert.match(JSON.parse(readFileSync(join(root, 'devnets.json'), 'utf8'))['devnet-x'].dashnet, /^20260930T000000Z/);
+});
+
+test('a recipe is accepted when it is the build\'s own or one the build lists', async () => {
+  const { recipeAccepted } = await import('./devnets.js');
+  const rec = { node: 'n2', nodeAccepts: 'n0,n1', upgrade: 'u2', upgradeAccepts: '' };
+  assert.equal(recipeAccepted(rec, 'node', 'n2'), true);
+  assert.equal(recipeAccepted(rec, 'node', 'n1'), true);
+  assert.equal(recipeAccepted(rec, 'node', 'n3'), false);
+  assert.equal(recipeAccepted(rec, 'upgrade', 'u2'), true);
+  // An empty list accepts nothing, and neither does a missing or malformed one.
+  for (const digest of ['u1', '', undefined, null]) assert.equal(recipeAccepted(rec, 'upgrade', digest), false);
+  assert.equal(recipeAccepted({ node: 'n2' }, 'node', 'n1'), false);
+  assert.equal(recipeAccepted({ node: 'n2', nodeAccepts: ['n1'] }, 'node', 'n1'), false);
+  assert.equal(recipeAccepted({ node: 'n2', nodeAccepts: 'n1' }, 'node', 'n'), false);
+  assert.equal(recipeAccepted(null, 'node', 'n1'), false);
 });
 
 test('a resumed upgrade moves to a newer dashnet only when the reviewed plan still accepts it', async () => {
@@ -452,6 +478,10 @@ test('a resumed upgrade moves to a newer dashnet only when the reviewed plan sti
   writeFileSync(binary, fake(V('20260929T000000Z', 'b'), 'u1'), { mode: 0o755 });
   await d.executeUpgrade(r());
   assert.match(used.pop(), /20260929T000000Z/);
+  // A still newer build on another upgrade recipe that lists the plan's as accepted.
+  writeFileSync(binary, `#!/bin/sh\ncase "$1" in version) echo ${V('20260930T000000Z', 'c')};; recipes) echo '{"node":"n1","bootstrap":"b","upgrade":"u3","upgradeAccepts":"u1"}';; *) exit 0;; esac\n`, { mode: 0o755 });
+  await d.executeUpgrade(r());
+  assert.match(used.pop(), /20260930T000000Z/);
 });
 
 test('service images are prebuilt on the wallet host without the chain, best effort', async () => {
