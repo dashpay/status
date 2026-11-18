@@ -6,6 +6,10 @@ toggle. The toggle stages a policy; it does not stop anything while editing or
 reviewing a plan. Review shows the plan-bound maximum and exact mining hosts.
 Mining automatically resumes on success, failure and cancellation.
 
+The forms start at four nodes at once on a devnet and at one (serial) on
+Testnet; either can be changed before the plan is prepared. An API request
+that omits the policy keeps the old serial behavior.
+
 Legacy Testnet controls the two discovered, tagged, instance-pinned `miner-1`
 and `miner-2` services. Native devnets use the mining host in their deployment
 plan; Core handles it last, on its own. An unsafe validator batch is reduced to

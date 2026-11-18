@@ -2,7 +2,7 @@ import RolloutOptions from '../RolloutOptions.jsx';
 import { useEffect, useMemo, useState } from 'react';
 import { api, canOperate, navigate, useResource, useSession, ROLE_LABEL, ago } from '../lib.js';
 import { Dot, Empty, Err, Link, Section } from '../ui.jsx';
-import { COMPONENTS, OPERABLE, REPOS, cmp, helperFor, imageTag, newestRelease, reported } from '../releases.js';
+import { COMPONENTS, OPERABLE, REPOS, cmp, defaultConcurrency, helperFor, imageTag, newestRelease, reported } from '../releases.js';
 
 // Plain-language actions; the dashnet command runs underneath (shown in the header).
 const ACTIONS = [
@@ -22,7 +22,9 @@ export default function Deploy({ name }) {
   const [picked, setPicked] = useState(params.get('nodes') ? new Set(params.get('nodes').split(',').filter(Boolean)) : null);
   const [components, setComponents] = useState(new Set(params.get('components')?.split(',').filter(Boolean) || []));
   const [images, setImages] = useState({});
-  const [concurrency, setConcurrency] = useState(1);
+  // No explicit choice yet means the network's default, known once it loads.
+  const [chosenConcurrency, setConcurrency] = useState(null);
+  const concurrency = chosenConcurrency ?? defaultConcurrency(n);
   const [pauseMining, setPauseMining] = useState(false);
   const [window, setWindow] = useState('');
   const [timeout, setTimeoutValue] = useState('');
