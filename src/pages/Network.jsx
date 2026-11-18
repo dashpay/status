@@ -1,3 +1,4 @@
+import RolloutOptions from '../RolloutOptions.jsx';
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { ago, api, bytes, canOperate, canSee, clock, dash, duration, navigate, num, short, span, useNow, useResource, useSession, ROLE_LABEL } from '../lib.js';
 import { Delta, Dot, Empty, EndpointDot, Err, Level, Link, Meter, Section, Stat } from '../ui.jsx';
@@ -419,6 +420,8 @@ function Updates({ n }) {
   const [state, setState] = useState({ network: null, updates: [] });
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [concurrency, setConcurrency] = useState(1);
+  const [pauseMining, setPauseMining] = useState(false);
   const native = n.kind === 'dashnet';
   const hosts = n.hosts.filter((h) => OPERABLE.includes(h.role) && !h.duplicate && h.state === 'running' && h.level !== 'unreachable');
   const key = hosts.map((h) => h.name + COMPONENTS.map((c) => reported(h, c)).join()).join('|');
@@ -445,7 +448,7 @@ function Updates({ n }) {
   const upgrade = async () => {
     setBusy(true); setError(null);
     try {
-      const r = await api(`/api/networks/${n.name}/ops`, { method: 'POST', body: { action: 'upgrade', nodes, components: updates.map((u) => u.c), images: Object.fromEntries(updates.map((u) => [u.c, `${REPOS[u.c]}:${u.to}`])), options: { autoRun: true } } });
+      const r = await api(`/api/networks/${n.name}/ops`, { method: 'POST', body: { action: 'upgrade', nodes, components: updates.map((u) => u.c), images: Object.fromEntries(updates.map((u) => [u.c, `${REPOS[u.c]}:${u.to}`])), options: { autoRun: true, concurrency, pauseMining } } });
       navigate(`/n/${n.name}/ops/${r.id}`);
     } catch (e) { setError(e); setBusy(false); }
   };
@@ -453,7 +456,8 @@ function Updates({ n }) {
     <div className="panel mt-3 px-3 py-2 text-[12px] flex flex-wrap items-center gap-x-4 gap-y-2">
       <span className="label">updates available</span>
       {updates.map((u) => <span key={u.c}><span className="font-medium">{u.c}</span> <span className="mono text-dim">{u.from}</span> → <span className="mono">{u.to}</span></span>)}
-      <span className="text-dim">{native ? 'every node, Core first, then Platform' : `${nodes.length} healthy node(s), one at a time`}</span>
+      <span className="text-dim">{native ? 'every node, Core first, then Platform' : `${nodes.length} healthy node(s), up to ${concurrency} at once`}</span>
+      <RolloutOptions concurrency={concurrency} setConcurrency={setConcurrency} pauseMining={pauseMining} setPauseMining={setPauseMining} native={native} miningEnabled={native || n.chainType === 'testnet'} />
       <span className="ml-auto flex gap-2">
         <Link to={`/n/${n.name}/deploy`} className="btn !py-0.5">Review first…</Link>
         <button className="btn btn-primary !py-0.5" disabled={busy} onClick={upgrade}>{busy ? 'Starting…' : 'Upgrade now'}</button>

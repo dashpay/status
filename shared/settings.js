@@ -211,7 +211,7 @@ export function devnetEntry(name, reg) {
     upgradeScopes: reg.upgradeScopes || ['platform', 'tenderdash'],
     // The images it runs now; with dashmate set, the helper is the dashmate
     // release that renders its services.
-    images: reg.images || null, dashmate: !!reg.dashmate,
+    images: reg.images || null, hostImages: reg.hostImages || null, minerImage: reg.minerImage || null, dashmate: !!reg.dashmate,
     description: '',
     endpoints: [
       dns.insight && { label: 'Insight', url: `https://${dns.insight.host}/insight-api/status` },

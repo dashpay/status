@@ -1,3 +1,4 @@
+import { reviewedRollout, rolloutArgs, rolloutFor, trackRollout } from '../shared/rollout.js';
 // New devnets from the console, using the dash-network-go lifecycle:
 //
 //   network.yaml -> resolve -> provision-plan        (prepare; nothing billable)
@@ -179,7 +180,7 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     if (!binary || !existsSync(binary) || !r.artifacts.bin || !dep) return;
     const p = spawnSync(binary, ['recipes'], { encoding: 'utf8', timeout: 10_000 });
     let rec; try { rec = JSON.parse(p.stdout); } catch { return; }
-    if (rec.upgrade !== plan.recipeSha256 || rec.node !== dep.recipeSha256) return;
+    if (rec.upgrade !== plan.recipeSha256 || rec.node !== dep.recipeSha256 || (plan.rollout?.miningRecipe && rec.mining !== plan.rollout.miningRecipe)) return;
     const [was, now] = [versionOf(r.artifacts.bin), versionOf(binary)];
     if (!dated(now) || (dated(was) && dated(was) >= dated(now))) return;
     copyFileSync(binary, `${r.artifacts.bin}.next`); chmodSync(`${r.artifacts.bin}.next`, 0o700); renameSync(`${r.artifacts.bin}.next`, r.artifacts.bin);
@@ -211,7 +212,8 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
   function runtimeOf(dir) {
     const file = existsSync(join(dir, 'network-current.yaml')) ? 'network-current.yaml' : 'network.yaml';
     const images = existsSync(join(dir, file)) ? imagesOf(readFileSync(join(dir, file), 'utf8')) : {};
-    return { images, dashmate: readJSON(join(dir, 'deployment.json'))?.profile === DASHMATE_PROFILE };
+    const runtime = readJSON(join(dir, 'runtime-images.json'));
+    return { images, hostImages: runtime?.nodes || null, minerImage: runtime?.miner || null, dashmate: readJSON(join(dir, 'deployment.json'))?.profile === DASHMATE_PROFILE };
   }
   for (const [name, reg] of Object.entries(registry())) {
     if (reg.status === 'deleted' || reg.images) continue;
@@ -509,13 +511,13 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
   // runtime that rollout recorded.
   const PLATFORM = ['drive', 'dapi', 'gateway', 'helper', 'tenderdash'];
   const phasesOf = (components) => [
-    ...(components.includes('core') ? [{ scope: 'core', components: ['core'] }] : []),
-    ...(components.some((c) => PLATFORM.includes(c)) ? [{ scope: components.every((c) => c === 'tenderdash' || c === 'core') ? 'tenderdash' : 'platform', components: components.filter((c) => PLATFORM.includes(c)) }] : []),
+    ...(components.some((c) => c === 'core' || c === 'miner') ? [{ scope: 'core', components: components.filter((c) => c === 'core' || c === 'miner') }] : []),
+    ...(components.some((c) => PLATFORM.includes(c)) ? [{ scope: components.every((c) => c === 'tenderdash' || c === 'core' || c === 'miner') ? 'tenderdash' : 'platform', components: components.filter((c) => PLATFORM.includes(c)) }] : []),
   ];
 
   function candidate(dir, base, components, images) {
     let yaml = readFileSync(base, 'utf8');
-    for (const c of components) {
+    for (const c of components.filter((c) => c !== 'miner')) {
       const ref = images[c].startsWith('docker.io/') ? images[c] : `docker.io/${images[c]}`;
       const re = new RegExp(`^(  ${c}: ).*$`, 'm');
       if (!re.test(yaml)) throw new Error(`network definition has no ${c} image`);
@@ -532,33 +534,61 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     await run(r, 'resolve', ['resolve', '--network', join(dir, a.candidate), '--out', join(dir, a.lock)], { timeoutMs: 5 * 60_000, bin: r.artifacts.bin });
     done('ok', phase.components.map((c) => `${c} ${r.request.images[c]}`).join(', '));
     done = step(r, `Upgrade plan, scope ${phase.scope} (dashnet upgrade-plan)`);
-    await run(r, 'upgrade-plan', ['upgrade-plan', '--deployment-plan', join(dir, 'deployment.json'), '--network', join(dir, a.candidate), '--lock', join(dir, a.lock), '--scope', phase.scope, '--out', join(dir, a.plan)], { timeoutMs: 5 * 60_000, bin: r.artifacts.bin });
+    const args = ['upgrade-plan', '--deployment-plan', join(dir, 'deployment.json'), '--network', join(dir, a.candidate), '--lock', join(dir, a.lock), '--scope', phase.scope, '--out', join(dir, a.plan)];
+    args.push(...rolloutArgs(rolloutFor(r.request)));
+    if (r.request.nodes?.length) args.push('--nodes', r.request.nodes.join(','), '--components', phase.components.join(','));
+    if (phase.components.includes('miner')) args.push('--miner-image', r.request.images.miner);
+    if (phase.scope !== 'core' && r.request.options?.allowCoreConfigRestart) args.push('--allow-core-config-restart');
+    await run(r, 'upgrade-plan', args, { timeoutMs: 5 * 60_000, bin: r.artifacts.bin });
     const plan = readJSON(join(dir, a.plan));
+    const miners = (plan.deployment?.targets || []).filter((t) => ['wallet', 'miner'].includes(t.role)).map((t) => t.name);
+    const rollout = reviewedRollout(plan, rolloutFor(r.request), miners);
     const changes = [];
     for (const [node, to] of Object.entries(plan.to || {})) for (const [component, pin] of Object.entries(to)) {
       const from = plan.from?.[node]?.[component];
       if (from !== pin) changes.push({ node, component, from, to: pin, requested: r.request.images[component] || null, dependency: !phase.components.includes(component), phase: phase.scope });
     }
+    if (plan.fromMinerImage !== plan.toMinerImage) changes.push({ node: plan.deployment?.targets?.find((t) => t.role === 'wallet' || t.role === 'miner')?.name, component: 'miner', from: plan.fromMinerImage, to: plan.toMinerImage, requested: r.request.images.miner || null, phase: phase.scope });
+    if (r.request.nodes?.length && changes.some((c) => !r.request.nodes.includes(c.node))) throw new Error('native plan changes an unselected host');
+    if (r.request.nodes?.length && changes.some((c) => !phase.components.includes(c.component))) throw new Error('native plan changes an unselected image component');
     done('ok', `${changes.length} container change(s)`);
-    return { ...phase, ...a, planId: plan.id, changes };
+    return { ...phase, ...a, planId: plan.id, changes, ...(rollout ? { rollout } : {}) };
   }
 
   async function prepareUpgrade(r) {
     const name = r.network, dir = workDir(name);
     if (!existsSync(join(dir, 'deployment.json'))) throw new Error('devnet is not deployed yet');
+    const dep = readJSON(join(dir, 'deployment.json'));
+    if (r.request.nodes?.length) {
+      const known = new Set((dep.targets || []).map((t) => t.name));
+      if (r.request.nodes.some((n) => !known.has(n))) throw new Error('selected host is not in this deployment');
+    }
     adoptCompatible(r, name);
+    if (rolloutFor(r.request) && (!supports(name, 'upgrade-plan', 'concurrency') || !supports(name, 'upgrade-plan', 'pause-mining'))) throw new Error('this devnet executor does not support rollout controls; a compatible dashnet update is required');
+    if (r.request.nodes?.length && !supports(name, 'upgrade-plan', 'nodes')) throw new Error('this devnet binary does not support host-scoped upgrades');
+    if (r.request.options?.allowCoreConfigRestart && !supports(name, 'upgrade-plan', 'allow-core-config-restart')) throw new Error('this devnet binary does not support coordinated Core config restarts');
+    if (r.request.components.includes('miner') && !supports(name, 'upgrade-plan', 'miner-image')) throw new Error('this devnet binary does not support separate miner pins');
     r.status = 'preparing'; r.artifacts = { ts: stamp() };
     // The upgrade executes with exactly the binary that planned it, even if the
     // devnet adopts a newer one meanwhile (upgrade plans bind its recipe).
     r.artifacts.bin = join(dir, `dashnet.upgrade-${r.artifacts.ts}`);
     copyFileSync(join(dir, 'dashnet'), r.artifacts.bin); chmodSync(r.artifacts.bin, 0o700);
     save(r);
-    const phases = phasesOf(r.request.components);
+    // A selected validator's combined migration is one native host unit:
+    // target helper render -> Core config/image -> Platform images.
+    const combined = r.request.options?.allowCoreConfigRestart === true
+      && r.request.components.includes('core') && r.request.components.includes('helper');
+    if (combined && (!r.request.nodes?.length || r.request.components.includes('miner')
+      || r.request.nodes.some((name) => dep.targets.find((t) => t.name === name)?.role !== 'validator'))) {
+      throw new Error('combined Core/Platform migration requires named validators only');
+    }
+    const phases = combined ? [{ scope: 'platform', components: r.request.components }]
+      : phasesOf(r.request.components);
     // The first phase is planned exactly now; a later one after its predecessor.
     const first = await planPhase(r, dir, phases[0], 0);
     r.artifacts.phases = [first, ...phases.slice(1)];
     const later = phases.slice(1).map((p) => ({ scope: p.scope, components: p.components, images: Object.fromEntries(p.components.map((c) => [c, r.request.images[c]])) }));
-    r.review = { planId: first.planId, operation: 'upgrade', scope: phases.map((p) => p.scope).join(' + '), changes: first.changes, then: later,
+    r.review = { ...(first.rollout ? { rollout: first.rollout } : {}), planId: first.planId, operation: 'upgrade', scope: phases.map((p) => p.scope).join(' + '), changes: first.changes, then: later,
       targets: [...new Set(first.changes.map((c) => c.node))], preparedAt: new Date().toISOString() };
   }
 
@@ -574,23 +604,27 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
       const plan = readJSON(join(dir, phase.plan));
       if (!plan || plan.id !== phase.planId || (n === 0 && plan.id !== r.review?.planId)) throw new Error('reviewed upgrade plan missing');
       refreshSnapshot(r, dir, plan);
-      const who = plan.scope === 'core' ? 'every node one at a time (Core: validators, then the mining node)' : 'validators one at a time';
+      const who = plan.rollout ? `batches of up to ${plan.rollout.concurrency} nodes (miner last, separately)` : r.request.nodes?.length ? `selected hosts: ${r.request.nodes.join(', ')}` : plan.scope === 'core' ? 'every node one at a time (Core: validators, then the mining node)' : 'validators one at a time';
       const done = step(r, `Upgrade ${who} (dashnet upgrade, scope ${plan.scope})`);
       r.progress = { phase: plan.scope, completed: [], current: null }; save(r);
       // A Core rollout visits every node and may wait up to a DKG cycle for its
       // quiet window; every node's health check needs two samples.
-      const d = readJSON(join(dir, 'request.json')), nodes = readJSON(join(dir, 'deployment.json'))?.targets?.length || 14;
+      const d = readJSON(join(dir, 'request.json')), nodes = r.request.nodes?.length || readJSON(join(dir, 'deployment.json'))?.targets?.length || 14;
       const window = observeSeconds(d);
       const minutes = plan.scope === 'core' ? Math.max(240, Math.ceil((nodes * (26 * blockSeconds(d) + 420 + window)) / 60)) : Math.max(110, Math.ceil((nodes * (2 * window + 180)) / 60));
       await run(r, 'upgrade', ['upgrade', '--plan', join(dir, phase.plan), '--confirm', plan.id, ...access(dir), '--observation-window', `${window}s`, '--timeout', `${minutes}m`, '--out', join(dir, `upgrade-result.${stamp()}.json`)], {
         timeoutMs: (minutes + 1) * 60_000, bin: r.artifacts.bin,
         onLine: (line) => {
-          const m = /((?:validators|wallet|miner|fullnodes?)-\d+)/.exec(line);
+          trackRollout(r.progress, line, true);
+          save(r);
+          const m = plan.rollout ? null : /((?:validators|wallet|miner|fullnodes?)-\d+)/.exec(line);
           if (m && /appl|withdraw|replac|upgrad/i.test(line)) { r.progress.current = m[1]; if (/complete|done|verified|upgraded/i.test(line) && !r.progress.completed.includes(m[1])) r.progress.completed.push(m[1]); save(r); }
         },
       });
-      // The network file now carries this phase's images for later operations.
-      writeFileSync(join(dir, 'network-current.yaml'), readFileSync(join(dir, phase.candidate)), { mode: 0o600 });
+      // A scoped candidate is NOT a fleet default. The native runtime journal
+      // retains exact host pins; publish the reviewed successful per-host map.
+      if (!r.request.nodes?.length) writeFileSync(join(dir, 'network-current.yaml'), readFileSync(join(dir, phase.candidate)), { mode: 0o600 });
+      writeAtomic(join(dir, 'runtime-images.json'), JSON.stringify({ nodes: plan.to, miner: plan.toMinerImage || null, operation: r.id, planId: plan.id }));
       register(name, runtimeOf(dir));
       r.done.push(`phase-${n}`); save(r);
       done('ok');

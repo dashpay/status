@@ -138,3 +138,9 @@ test('maintenance is visible without claiming recovery or hiding already-running
   assert.deepEqual(publicView.maintenance,[{network:'testnet',operations:undefined}]);
   assert.ok(!JSON.stringify(publicView).includes('private'));
 });
+
+test('excluded CI hosts stay out of public and administrator remediation views', () => {
+  const data = state([issue('excluded', { domain: 'ci', scope: 'strix-pasta', remediationExcluded: true }), issue('retained')], []);
+  for (const full of [true, false]) assert.deepEqual(remediationView(data, { ...options, full }).cases.map((c) => c.id), ['retained']);
+  assert.equal(data.issues.length, 2);
+});

@@ -70,7 +70,7 @@ export default function Operation({ name, id }) {
         <Section title="Rollout">
           <div className="panel px-3 py-2 text-[12px] flex flex-wrap gap-x-6 gap-y-1">
             <span>phase <span className="mono">{op.progress.phase}</span></span>
-            {op.progress.current && <span>withdrawn <span className="mono lv-warn">{op.progress.current}</span></span>}
+            {(op.progress.active?.length || op.progress.current) && <span>in flight <span className="mono lv-warn">{op.progress.active?.length ? op.progress.active.join(', ') : op.progress.current}</span></span>}
             <span>applied <span className="mono">{op.progress.completed.length}/{review?.targets?.length ?? '?'}</span> {op.progress.completed.length ? <span className="text-dim mono">({op.progress.completed.join(', ')})</span> : null}</span>
             {op.progress.starting && <span className="lv-warn mono">waiting for node to start: {op.progress.starting}</span>}
             {op.progress.waiting && <span className="lv-warn mono">waiting for fleet health: {op.progress.waiting}</span>}
@@ -95,6 +95,10 @@ export default function Operation({ name, id }) {
       {review?.kind === 'delete-devnet' && <DeleteReview op={op} review={review} operator={operator} pending={pending} act={act} />}
       {review && !review.kind && (
         <Section title={`Plan ${short(review.planId, 16)} · ${review.scope ? `${review.scope} · ` : ''}${review.changes.length} container change(s)`} right={op.autoConfirmed ? <span className="text-dim text-[12px]">confirmed automatically for {op.confirmedBy?.login} (run as soon as ready)</span> : op.status === 'review' && <span className="text-dim text-[12px]">expires in {Math.max(0, Math.round(expiresIn / 60))} min</span>}>
+          {review.rollout && <div className="panel p-3 mb-2 text-[12px]" data-rollout-review>
+            Up to <span className="mono">{review.rollout.concurrency}</span> nodes at once · readiness-driven health checks.
+            {review.rollout.pauseMining ? <> Stop mining on <span className="mono">{review.rollout.miners.join(', ')}</span> before replacement; automatically resume on completion, failure or cancellation.</> : ' Mining remains enabled (native Core upgrades retain their DKG safety pauses).'}
+          </div>}
           <div className="panel scroll-x">
             <table className="grid"><thead><tr><th>node</th><th>component</th><th>from</th><th>to (pinned)</th><th /></tr></thead>
               <tbody className="[&_tr]:!cursor-default">
@@ -268,8 +272,9 @@ function ResetReview({ op, review, operator, pending, act }) {
           <div><span className="text-dim">Images now </span><span className="mono">{review.current.map(img).join(' | ')}</span></div>
           <div><span className="text-dim">Images after </span><span className="mono">{img(review.next)}</span> · <span className="text-dim">seed Tenderdash now </span><span className="mono">{review.seedImages.join(', ')}</span></div>
           {review.native && <details><summary>Immutable pins for every target</summary>{Object.entries(review.targetImages || {}).map(([name, pins]) => <div key={name} className="mono mt-2">{name}: {img(pins)}</div>)}</details>}
+          {review.platformVersion && <div><span className="text-dim">Initial Platform version (PV) </span><span className="mono">{review.platformVersion.current.filter((v) => v != null).join(', ') || 'installed'} → {review.platformVersion.next ?? 'preserved'}</span></div>}
           <div><span className="text-dim">Epoch </span><span className="mono">{review.epoch.current.join(', ')} → {review.epoch.next} s</span> · <span className="text-dim">dashmate </span><span className="mono">{review.dashmate.join(', ')}</span> · <span className="text-dim">config format </span><span className="mono">{review.configFormat.join(', ')}</span> · <span className="text-dim">Tor enabled </span><span className="mono">{review.tor.map(String).join(', ')}</span></div>
-          <div className="pt-1"><span className="text-dim">Canary </span><span className="mono">{`epochTime ${review.canary.epochTime}, env ${review.canary.epochEnv}, ${review.canary.coreMigration?.length ? 'Core configuration migration included' : `Core config unchanged ${review.canary.coreSectionUnchanged}`} , anchor ${review.canary.anchor}${review.canary.nodeKeyUnchanged ? `, node key preserved, genesis ${review.canary.genesisChainId} (only anchor changes)` : ''}`}</span></div>
+          <div className="pt-1"><span className="text-dim">Canary </span><span className="mono">{`epochTime ${review.canary.epochTime}, env ${review.canary.epochEnv}, ${review.canary.coreMigration?.length ? 'Core configuration migration included' : `Core config unchanged ${review.canary.coreSectionUnchanged}`} , anchor ${review.canary.anchor}${review.canary.nodeKeyUnchanged ? `, node key preserved, genesis ${review.canary.genesisChainId} (${review.canary.genesisOnlyAnchorChanged === false ? `anchor and PV ${review.canary.genesisProtocolVersion} selected` : 'only anchor changes'})` : ''}`}</span></div>
           <div className="text-dim">Renders only: <span className="mono">{review.rendered.join(', ')}</span></div>
         </div>
       </Section>

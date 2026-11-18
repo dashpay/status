@@ -48,7 +48,7 @@ export function devnetFacts({ name, reg = {}, plan, record, lock, reset }) {
       seeds: [...hosts.filter((h) => h.role === 'wallet'), ...validators].filter((h) => h.publicIp).slice(0, 4).map((h) => `${h.publicIp}:${ports.coreP2P}`),
     },
     platform: {
-      chainId: plan.platformChainId, initialProtocolVersion: plan.initialProtocolVersion, epochSeconds: plan.platformEpochSeconds || 3600,
+      chainId: plan.platformChainId, initialProtocolVersion: reset?.genesisProtocolVersion ?? plan.initialProtocolVersion, epochSeconds: plan.platformEpochSeconds || 3600,
       genesisTime: plan.genesisTime, quorums: PROFILE.quorums, tenderdashP2P: ports.tenderdashP2P,
       gatewayTls: plan.gatewayTls ? 'letsencrypt' : 'self-signed',
       dapi: validators.filter((h) => h.publicIp).map((h) => `https://${h.publicIp}:${ports.gateway}`),

@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { span, useResource } from '../lib.js';
+import { canOperate, span, useResource, useSession } from '../lib.js';
 import { Empty, Err, Section, Stat } from '../ui.jsx';
+import DevnetKeys from './DevnetKeys.jsx';
 
 function copy(text) { navigator.clipboard?.writeText(text).catch(() => {}); }
 function download(name, text) {
@@ -20,6 +21,7 @@ function CopyButton({ text, label = 'copy' }) {
 export default function Connect({ name }) {
   const { data, error } = useResource(`/api/networks/${name}/config`, (t, d) => t === 'network' && (d.name === name || d.name === '*'));
   const [file, setFile] = useState(0);
+  const session = useSession();
   if (error) return <div className="mt-4">{error.status === 404 ? <Empty>{error.message}</Empty> : <Err error={error} />}</div>;
   if (!data) return <div className="mt-4 text-dim">Loading…</div>;
   const { facts: f, files } = data;
@@ -36,17 +38,17 @@ export default function Connect({ name }) {
         <Stat label="Spork address" value={f.core.sporkAddress || '—'} title={f.core.sporkAddress || ''} />
       </div>
 
-      <div className="grid gap-x-4 xl:grid-cols-[minmax(0,7fr)_minmax(0,5fr)]">
-        <Section title="Files" right={<span className="flex items-center gap-3"><CopyButton text={current.text} /><button type="button" className="text-dim hover:text-fg text-[11px]" onClick={() => download(current.name, current.text)}>download</button></span>}>
+      <div className="grid grid-cols-1 gap-x-4 xl:grid-cols-[minmax(0,7fr)_minmax(0,5fr)]">
+        <Section className="min-w-0" title="Files" right={<span className="flex items-center gap-3"><CopyButton text={current.text} /><button type="button" className="text-dim hover:text-fg text-[11px]" onClick={() => download(current.name, current.text)}>download</button></span>}>
           <div className="panel">
-            <div className="flex gap-1 px-2 pt-2 border-b border-line">
+            <div className="flex gap-1 px-2 pt-2 border-b border-line overflow-x-auto">
               {files.map((x, i) => (
                 <button key={x.name} type="button" onClick={() => setFile(i)} className={`px-2.5 py-1 text-[12px] rounded-t mono ${i === file ? 'bg-panel-2 text-fg' : 'text-dim hover:text-fg'}`}>{x.name}</button>
               ))}
             </div>
             <pre className="p-3 text-[11.5px] mono overflow-auto max-h-[560px] whitespace-pre">{current.text}</pre>
           </div>
-          <div className="mt-1.5 text-faint text-[11px]">Public facts only, like the legacy dash-network-configs outputs. Operator, spork and faucet private keys stay on the hosts.</div>
+          <div className="mt-1.5 text-faint text-[11px]">These connection files contain no private keys. Devnet operators can reveal and download keys separately below.</div>
         </Section>
 
         <div className="min-w-0">
@@ -66,6 +68,8 @@ export default function Connect({ name }) {
           </Section>
         </div>
       </div>
+
+      {canOperate(session, name) && <DevnetKeys key={`${name}:${session.user.id}`} name={name} />}
 
       <Section title={`Evo masternodes (${validators.length})`}>
         <div className="panel overflow-x-auto">

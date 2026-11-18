@@ -54,14 +54,14 @@ export function convergence(host, data, network, expected, componentOf) {
     const pin = pins[component];
     const baseline = expected['*']?.[component];
     const locked = normalize(baseline?.ref) === normalize(network.images?.[component]) ? baseline?.digests?.[host.arch] : null;
-    const target = pin?.to || (locked ? `${network.images[component].split(/[@:]/)[0]}@${locked}` : network.images?.[component]);
+    const target = pin?.to || network.hostImages?.[host.name]?.[component] || (locked ? `${network.images[component].split(/[@:]/)[0]}@${locked}` : network.images?.[component]);
     if (!target) { checks.push({ component, status: 'unknown' }); continue; }
     const match = sameImage(c, target);
     const status = match === null ? 'unknown' : match ? 'matched' : pin && Date.parse(host.probe?.at) < Date.parse(pin.since) ? 'awaiting-sample'
       : pin?.active && (!pin.from || sameImage(c, pin.from)) ? 'rolling' : 'drift';
     checks.push({ component, status, expected: target });
   }
-  for (const [component, pin] of Object.entries(pins)) if (!checks.some((c) => c.component === component)) checks.push({ component, status: !host.probe?.ok ? 'unknown' : pin.active ? 'rolling' : 'missing', expected: pin.to });
+  for (const [component, pin] of Object.entries(pins)) if (!(network.dashmate && component === 'helper') && !checks.some((c) => c.component === component)) checks.push({ component, status: !host.probe?.ok ? 'unknown' : pin.active ? 'rolling' : 'missing', expected: pin.to });
   return checks;
 }
 const count = (values) => ({ observed: values.filter((v) => v != null).length, total: values.length, failed: values.filter((v) => v === false).length });

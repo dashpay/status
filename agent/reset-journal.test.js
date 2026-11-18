@@ -8,7 +8,7 @@ import { resetSidecars } from './reset-images.js';
 const pin = (repo, char='a') => `index.docker.io/dashpay/${repo}@sha256:${char.repeat(64)}`;
 const beforeImages = {core:pin('dashd'), drive:pin('drive'), dapi:pin('rs-dapi'), tenderdash:pin('tenderdash'), gateway:pin('envoy'), helper:pin('dashmate-helper')};
 const preservation = { coreId:'a'.repeat(64),coreStarted:'2026-10-06T00:00:00Z',coreConfig:'b'.repeat(64),coreGenesis:'c'.repeat(64),containers:Object.fromEntries(['drive','dapi','gateway','tenderdash'].map((c)=>[c,'d'.repeat(64)])),restarts:{drive:0,dapi:0,gateway:0,tenderdash:0} };
-const plan = {id:'d'.repeat(64),profile:'devnet-dashmate-compose',bootstrap:{compute:{id:'e'.repeat(64),network:{metadata:{name:'devnet-test'},aws:{region:'us-west-2',accountId:'123456789012',provision:{stateTable:'networks'}}}}},targets:[{name:'validator-1',role:'validator',architecture:'arm64',images:Object.entries(beforeImages).map(([component,pinned])=>({component,pinned}))},{name:'wallet-1',role:'wallet',architecture:'amd64',images:['core','helper'].map((component)=>({component,pinned:beforeImages[component]}))}]};
+const plan = {id:'d'.repeat(64),profile:'devnet-dashmate-compose',bootstrap:{compute:{id:'e'.repeat(64),network:{nodes:[{role:'validator',architecture:'arm64'}],images:beforeImages,metadata:{name:'devnet-test'},aws:{region:'us-west-2',accountId:'123456789012',provision:{stateTable:'networks'}}}}},targets:[{name:'validator-1',role:'validator',architecture:'arm64',images:Object.entries(beforeImages).map(([component,pinned])=>({component,pinned}))},{name:'wallet-1',role:'wallet',architecture:'amd64',images:['core','helper'].map((component)=>({component,pinned:beforeImages[component]}))}]};
 const observed = Object.fromEntries(plan.targets.map((t)=>[t.name,{ images:Object.fromEntries([...t.images].reverse().map((i)=>[i.component,i.pinned])),previousId:'',preservation }]));
 const original = {revision:4,deployment:{planId:plan.id,phase:'network-ready',sidecars:[],genesisCoreHeight:100}};
 function setup(t) {
@@ -109,4 +109,19 @@ test('prepare again preserves previous immutable artifacts and resume uses the s
   await journal.begin(r);
   await journal.begin(r);
   assert.equal(JSON.parse(item().Data.S).upgrade.planId,r.nativePlanId);
+});
+
+test('reset PV is bound into native transition identity and verified Connect receipt',async(t)=>{
+  const {journal,r,work,item}=setup(t);
+  r.genesisProtocolVersion=15;
+  await journal.prepare(r,{});
+  const pv15=r.nativePlanId;
+  r.genesisProtocolVersion=16;
+  await journal.prepare(r,{});
+  assert.notEqual(r.nativePlanId,pv15);
+  journal.seal(r,observed,[]);
+  r.review={platformVersion:{next:16}};
+  await journal.begin(r); await journal.complete(r);
+  assert.equal(JSON.parse(readFileSync(join(work,'platform-reset.json'),'utf8')).genesisProtocolVersion,16);
+  assert.equal(item().Owner,undefined);
 });

@@ -13,7 +13,7 @@ async function start(userId = 9920871, extraUsers = [], options = {}) {
   writeFileSync(join(dataDir, 'state', 'testnet.json'), JSON.stringify({ generatedAt: new Date().toISOString(), hosts: [
     { name: 'seed-2', role: 'seed', state: 'running', publicIp: '192.0.2.2', instanceId: 'i-0eb19958115adb5d0', probe: { ok: true, at: new Date().toISOString(), data: { core: { chain: 'test', blocks: 10 }, containers: [] } } },
   ] }));
-  if (extraUsers.length) writeFileSync(join(dataDir, 'settings.json'), JSON.stringify({ ...structuredClone(DEFAULT_SETTINGS), operators: [...DEFAULT_SETTINGS.operators, ...extraUsers] }));
+  writeFileSync(join(dataDir, 'settings.json'), JSON.stringify({ ...structuredClone(DEFAULT_SETTINGS), operators: [...DEFAULT_SETTINGS.operators, ...extraUsers] }));
   const github = async (url) => url.includes('access_token') ? Response.json({ access_token: 't' })
     : url.includes('/users/octocat') ? Response.json({ id: 583231, login: 'octocat', name: 'The Octocat', type: 'User', avatar_url: 'https://avatars.githubusercontent.com/u/583231' })
       : url.includes('/users/') ? new Response('{}', { status: 404 }) : Response.json({ id: userId, login: 'someone' });
@@ -239,48 +239,17 @@ test('CI: admins issue reporter tokens; reporters post with them; infrastructure
       costs: { at: 'now', month: '2026-09', monthToDate: 3270.85, monthEndEstimate: 3503.4, lastMonth: 3109.17, byService: [{ service: 'EC2 - Other', amount: 1178.9 }], daily: [] } }));
     assert.equal((await (await w.req('/api/aws')).json()).at, 'now');
     assert.equal((await (await w.req('/api/aws')).json()).instances[0].publicIp, '192.0.2.9', 'members see the inventory');
-    assert.equal((await (await w.req('/api/aws')).json()).costs.monthToDate, 3270.85, 'members retain costs');
     assert.equal((await w.req(`/api/ci/reporters/${id}`, { method: 'DELETE', headers: { 'x-csrf-token': csrf } })).status, 200);
-    // Signed out: resource aggregates, no spend or resource identity.
+    // Signed out: resource breakdowns only; the live board keeps costs private.
     await w.req('/api/auth/logout', { method: 'POST', headers: { 'x-csrf-token': csrf } });
     const pub = await (await w.req('/api/aws')).json();
     assert.equal(pub.public, true);
     assert.deepEqual(pub.byNetwork, [{ label: 'testnet', count: 1, vcpus: 2, memoryGiB: 2 }]);
     assert.equal(pub.costs, undefined);
     const text = JSON.stringify(pub);
-    for (const leak of ['3270.85', '3503.4', '3109.17', '1178.9', '192.0.2.9', 'i-0123456789abcdef0', 'dn-testnet-masternode-1', 'testnet-alb', 'elb.amazonaws', 'killdate', 'rs-dapi', 'quorums.testnet', 'dash-terraform-state', 'vol-1'])
+    for (const leak of ['192.0.2.9', 'i-0123456789abcdef0', 'dn-testnet-masternode-1', 'testnet-alb', 'elb.amazonaws', 'killdate', 'rs-dapi', 'quorums.testnet', 'dash-terraform-state', 'vol-1'])
       assert.ok(!text.includes(leak), `leaked ${leak}`);
     assert.equal((await post(`Bearer ${token}`)).status, 401);
-  } finally { w.close(); }
-});
-
-test('AWS costs require a valid session, including after cache warmup and logout', async () => {
-  const w = await start(42); // Signed-in user without inventory membership.
-  try {
-    const costs = { monthToDate: 1234.56, monthEndEstimate: 2345.67, lastMonth: 3456.78,
-      byService: [{ service: 'Fixture service', amount: 456.78 }], daily: [{ day: '2026-10-01', amount: 567.89 }] };
-    writeFileSync(join(w.dataDir, 'aws', 'inventory.json'), JSON.stringify({ at: 'fixture', regions: [],
-      instances: [], volumes: [], addresses: [], natGateways: [], loadBalancers: [], lambda: [],
-      dynamodb: [], ecr: [], snapshots: [], cloudfront: [], s3: [], costs }));
-    const anonymous = async (path = '/api/aws', options) => {
-      const response = await w.req(path, options);
-      assert.equal(response.status, 200);
-      assert.equal(response.headers.get('cache-control'), 'no-store');
-      assert.match(response.headers.get('vary'), /Cookie/i);
-      const body = await response.json();
-      assert.equal(body.public, true);
-      assert.equal(Object.hasOwn(body, 'costs'), false);
-      for (const amount of [1234.56, 2345.67, 3456.78, 456.78, 567.89])
-        assert.ok(!JSON.stringify(body).includes(String(amount)));
-    };
-    await anonymous('/api/aws?as=9920871'); // Claimed identity never grants costs.
-    const csrf = await w.login();
-    const signedIn = await (await w.req('/api/aws?as=public')).json();
-    assert.equal(signedIn.public, true, 'sign-in does not grant detailed inventory');
-    assert.deepEqual(signedIn.costs, costs, 'signed-in summaries retain all costs');
-    await anonymous('/api/aws?as=42', { headers: { cookie: 'dash-session=invalid' } });
-    assert.equal((await w.req('/api/auth/logout', { method: 'POST', headers: { 'x-csrf-token': csrf } })).status, 200);
-    await anonymous(); // Same inventory timestamp must not reuse signed-in costs.
   } finally { w.close(); }
 });
 
@@ -340,6 +309,47 @@ test('remediation board notes require administrator access', async () => {
   } finally { w.close(); }
 });
 
+test('private keys require network operator and CSRF, not admin; grants reload immediately', async () => {
+  for (const role of ['operator', 'viewer']) {
+    let reads = 0;
+    const w = await start(777, [{ id: 777, login: 'keys', role, networks: ['devnet-sakura'] }], { keyReader: async () => { reads++; return { fixturePrivateKey: 'fixture-only' }; } });
+    try {
+      writeFileSync(join(w.dataDir, 'devnets.json'), JSON.stringify({ 'devnet-sakura': { status: 'ready' }, 'devnet-other': { status: 'ready' } }));
+      const path = '/api/networks/devnet-sakura/keys';
+      assert.equal((await w.req(path, { method: 'POST' })).status, 401);
+      const csrf = await w.login(), headers = { 'x-csrf-token': csrf };
+      assert.equal((await w.req(path, { method: 'POST' })).status, 403);
+      assert.equal((await w.req('/api/networks/devnet-other/keys', { method: 'POST', headers })).status, 403);
+      assert.equal((await w.req(path, { method: 'POST', headers: { ...headers, origin: 'https://evil.example' } })).status, 403);
+      const response = await w.req(path, { method: 'POST', headers });
+      assert.equal(response.status, role === 'operator' ? 200 : 403);
+      assert.equal(reads, role === 'operator' ? 1 : 0);
+      if (role === 'operator') {
+        assert.equal(response.headers.get('cache-control'), 'private, no-store');
+        assert.equal((await response.json()).fixturePrivateKey, 'fixture-only');
+        const settings = JSON.parse(readFileSync(join(w.dataDir, 'settings.json')));
+        settings.operators = settings.operators.filter(x => x.id !== 777);
+        writeFileSync(join(w.dataDir, 'settings.json'), JSON.stringify(settings));
+        assert.equal((await w.req(path, { method: 'POST', headers })).status, 403);
+        assert.equal(reads, 1);
+      }
+    } finally { w.close(); }
+  }
+});
+
+test('key route excludes Mainnet/Testnet and suppresses internal errors', async () => {
+  let reads = 0;
+  const w = await start(9920871, [], { keyReader: async () => { reads++; throw Error('secret fixture must never escape'); } });
+  try {
+    const csrf = await w.login(), headers = { 'x-csrf-token': csrf };
+    for (const network of ['mainnet', 'testnet']) assert.equal((await w.req(`/api/networks/${network}/keys`, { method: 'POST', headers })).status, 404);
+    assert.equal(reads, 0);
+    writeFileSync(join(w.dataDir, 'devnets.json'), JSON.stringify({ 'devnet-sakura': { status: 'ready' } }));
+    const response = await w.req('/api/networks/devnet-sakura/keys', { method: 'POST', headers });
+    assert.equal(response.status, 503); assert.ok(!(await response.text()).includes('secret fixture'));
+  } finally { w.close(); }
+});
+
 test('remediation switch and queue clear are administrator-only, CSRF-protected and default to off', async () => {
   const post = (w, path, body, csrf) => w.req(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body),
     headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(csrf ? { 'x-csrf-token': csrf } : {}) } });
@@ -348,11 +358,9 @@ test('remediation switch and queue clear are administrator-only, CSRF-protected 
   try {
     assert.equal((await post(w, '/api/remediation/dispatch', { enabled: true })).status, 401);
     assert.equal((await post(w, '/api/remediation/clear')).status, 401);
-    assert.equal((await post(w, '/api/remediation/activity/clear')).status, 401);
     const csrf = await w.login();
     assert.equal((await (await w.req('/api/remediation')).json()).control.requested, 'off');
     assert.equal((await post(w, '/api/remediation/dispatch', { enabled: true })).status, 403, 'a session without the CSRF token is refused');
-    assert.equal((await post(w, '/api/remediation/activity/clear')).status, 403);
     assert.equal((await post(w, '/api/remediation/dispatch', { enabled: 'yes' }, csrf)).status, 400);
     assert.equal((await post(w, '/api/remediation/dispatch', { enabled: true }, csrf)).status, 200);
     assert.deepEqual([stored(w).seq, stored(w).dispatch, stored(w).updatedBy], [1, 'on', 'someone']);
@@ -375,19 +383,12 @@ test('remediation switch and queue clear are administrator-only, CSRF-protected 
     assert.equal((await post(w, '/api/remediation/clear', undefined, csrf)).status, 200);
     assert.deepEqual([stored(w).seq, stored(w).dispatch, stored(w).clearSeq], [11, 'off', 11], 'a clear after the loss is not stale either, and does not switch on');
     assert.equal((await (await w.req('/api/remediation')).json()).control.reset, false);
-    const beforeHistoryClear = stored(w);
-    const beforeIssues = readFileSync(join(w.dataDir, 'incidents', 'state.json'), 'utf8');
-    assert.equal((await post(w, '/api/remediation/activity/clear', undefined, csrf)).status, 200);
-    assert.deepEqual(stored(w), beforeHistoryClear, 'activity clear never changes dispatch or the queue');
-    assert.equal(readFileSync(join(w.dataDir, 'incidents', 'state.json'), 'utf8'), beforeIssues);
-    assert.equal((await (await w.req('/api/remediation')).json()).activityHistory.clearedBy, 'someone');
   } finally { w.close(); }
   const member = await start(42);
   try {
     const csrf = await member.login();
     assert.equal((await post(member, '/api/remediation/dispatch', { enabled: true }, csrf)).status, 403);
     assert.equal((await post(member, '/api/remediation/clear', undefined, csrf)).status, 403);
-    assert.equal((await post(member, '/api/remediation/activity/clear', undefined, csrf)).status, 403);
     assert.equal((await (await member.req('/api/remediation')).json()).control.changedBy, undefined);
   } finally { member.close(); }
 });

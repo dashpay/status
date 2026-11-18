@@ -24,7 +24,10 @@ const IMAGE = Object.fromEntries(Object.entries(REPOS).map(([c, repo]) => [c, ne
 export function validateReset(settings, q) {
   const n = settings.networks.find((x) => x.name === q.network);
   if (!n || n.chainType !== 'devnet' || n.kind === 'external') throw new Error('Platform reset applies to dashmate-managed devnets');
+  const pv = q.options?.genesisProtocolVersion;
+  if (pv != null && (!Number.isInteger(pv) || pv < 1 || pv > 0xffffffff)) throw new Error('Platform version (PV) must be an integer from 1 to 4294967295');
   if (n.kind === 'dashnet') {
+    for (const key of ['requireUnchangedCore', 'preserveExplorer']) if (q.options?.[key] != null && typeof q.options[key] !== 'boolean') throw new Error(`${key} must be boolean`);
     if (q.options?.epochSeconds != null) throw new Error('native reset preserves epoch settings');
     const images = q.images || {};
     for (const [c, ref] of Object.entries(images)) if (!RESET_COMPONENTS.includes(c) || !IMAGE[c].test(ref)) throw Error(`${c}: invalid Platform image reference`);
@@ -51,7 +54,7 @@ export function createReset({ ctx, dirs, pool, getSettings, journalImpl, explore
     const dir = join(dirs.private, 'resets', r.execId || r.id);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     // A re-prepare gets a new execution id, so the baseline is retaken.
-    const base = { config: r.network, exec: r.execId || r.id, coreChain: r.review?.coreChain || r.coreChain, images: r.request.images, epochSeconds: r.epoch, ...extra };
+    const base = { config: r.network, exec: r.execId || r.id, coreChain: r.review?.coreChain || r.coreChain, genesisProtocolVersion:r.genesisProtocolVersion ?? r.request.options?.genesisProtocolVersion, requireUnchangedCore:r.request.options?.requireUnchangedCore === true, images: r.request.images, epochSeconds: r.epoch, ...extra };
     r.stages ??= {};
     r.stages[name] ??= {};
     const results = await mapLimit(hosts, parallel, async (h) => {
@@ -83,6 +86,7 @@ export function createReset({ ctx, dirs, pool, getSettings, journalImpl, explore
   async function prepareReset(r) {
     const { network, epoch, images } = validateReset(getSettings(), r.request);
     r.native = network.kind === 'dashnet';
+    r.genesisProtocolVersion = r.request.options?.genesisProtocolVersion;
     r.epoch = epoch; r.coreChain = network.coreNetwork;
     r.status = 'preparing'; save(r);
     const all = targets(r.network);
@@ -123,6 +127,7 @@ export function createReset({ ctx, dirs, pool, getSettings, journalImpl, explore
     const canary = canaries[0];
     if (r.native) {
       r.coreMigrations = Object.fromEntries(hpmns.map((h,i) => [h.name, canaries[i].result.checks.coreMigration || []]));
+      if (r.request.options?.requireUnchangedCore && Object.values(r.coreMigrations).some((c) => c.length)) throw Error('Core migration forbidden by reset preservation gate');
       if (Object.values(r.coreMigrations).some((c) => c.length)) {
         const miners = nativePlan.targets.filter((t) => t.role === 'miner' || t.role === 'wallet');
         if (miners.length !== 1) throw Error('automatic Core migration requires one identified native mining host');
@@ -134,7 +139,7 @@ export function createReset({ ctx, dirs, pool, getSettings, journalImpl, explore
     }
     if (r.native) {
       const wallet = nativePlan.targets.find((t) => t.role === 'wallet');
-      if (wallet) {
+      if (wallet && !r.request.options?.preserveExplorer) {
         const done = step(r, 'Check managed Explorer ownership and database');
         r.explorer = await explorer({ pool, target:wallet, network:r.network, chain:nativePlan.platformChainId || `dash-${r.coreChain}`, checkOnly:true });
         done('ok', r.explorer?.installed ? 'Old index will be backed up and rebuilt for the new chain' : 'No managed Explorer installed');
@@ -145,7 +150,8 @@ export function createReset({ ctx, dirs, pool, getSettings, journalImpl, explore
     const sb = base.filter((_, i) => all[i].resetRole === 'seed').map((x) => x.result);
     const uniq = (xs) => [...new Set(xs.map((x) => JSON.stringify(x ?? null)))].map((x) => JSON.parse(x));
     r.review = {
-      kind: 'platform-reset', planId: `reset-${r.id}-${r.anchor.height}`, preparedAt: new Date().toISOString(), coreChain: network.coreNetwork,
+      kind: 'platform-reset', genesisProtocolVersion:r.request.options?.genesisProtocolVersion, requireUnchangedCore:r.request.options?.requireUnchangedCore === true, preserveExplorer:r.request.options?.preserveExplorer === true, planId: `reset-${r.id}-${r.anchor.height}`, preparedAt: new Date().toISOString(), coreChain: network.coreNetwork,
+      platformVersion: { current: uniq(hb.map((x) => x.genesisProtocolVersion)), next: canary.result.checks.genesisProtocolVersion ?? r.genesisProtocolVersion ?? null },
       targets: r.targets, hpmns: hpmns.length, seeds: seeds.length, anchor: r.anchor, previousAnchor: uniq(hb.map((x) => x.anchor)),
       explorer: r.explorer, native: r.native, coreMigrationMode: r.native ? 'parallel-v1' : undefined, coreMigrations: r.coreMigrations, targetImages: r.nativeImages, requested: r.resolvedChoices, current: uniq(hb.map((x) => x.images)), next: r.native ? r.nativeImages[hpmns[0].name] : r.request.images, epoch: { current: uniq(hb.map((x) => x.epochTime)), next: r.native ? hb[0].epochTime : epoch },
       dashmate: uniq(hb.map((x) => x.dashmate)), configFormat: uniq(hb.map((x) => x.configFormatVersion)), tor: uniq(hb.map((x) => x.tor?.enabled)),
@@ -204,6 +210,7 @@ export function createReset({ ctx, dirs, pool, getSettings, journalImpl, explore
   }
 
   async function executeReset(r) {
+    if (r.request.options?.requireUnchangedCore && (r.minerTarget || Object.values(r.coreMigrations || {}).some((c) => c.length))) throw Error('Core migration or miner pause forbidden by reset preservation gate');
     const discovered = targets(r.network);
     const all = r.native ? discovered : discovered.filter((h) => r.targets.some((t) => t.name === h.name));
     if (all.length !== r.targets.length || all.some((h) => !r.targets.some((t) => t.name === h.name && t.ip === h.publicIp && (!t.instanceId || t.instanceId === h.instanceId) && t.role === h.resetRole))) throw new Error(`targets changed since review: expected ${r.targets.map((t) => t.name).join(', ')}`);
@@ -283,7 +290,7 @@ export function createReset({ ctx, dirs, pool, getSettings, journalImpl, explore
     if (r.native) {
       const plan = readJSON(join(dirs.private, 'devnets', r.network, 'deployment.json'));
       const wallet = plan.targets.find((t) => t.role === 'wallet');
-      if (wallet) {
+      if (wallet && !r.request.options?.preserveExplorer) {
         const done = step(r, 'Reconcile Explorer index with the new Platform chain');
         try {
           r.result.explorer = await explorer({ pool, target:wallet, network:r.network, chain:plan.platformChainId || `dash-${r.coreChain}`, anchor:r.anchor.height });

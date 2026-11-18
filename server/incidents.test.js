@@ -441,3 +441,29 @@ test('a crash loop stays actionable while a rolling change on other hosts holds 
   assert.equal(journal.networks.testnet.reason, 'journal');
   assert.deepEqual(emitted(reconcile(null, deriveIssues({ settings, states: { testnet: claimed }, activity: journal, now }), now), 'host_health'), []);
 });
+
+test('CI remediation exclusions retain observations, retire pending delivery, and are reversible', () => {
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  const ci = { reporters: [{ id: 'strix-pasta' }, { id: 'other' }], hosts: [], runners: [], recent: [] };
+  let d = deriveIssues({ settings, states: {}, ci, now });
+  let s = reconcile(null, d, now);
+  const id = s.issues.find((i) => i.scope === 'strix-pasta').id;
+  settings.remediation = { excludedCiHosts: ['strix-pasta'] };
+  d = deriveIssues({ settings, states: {}, ci, now: now + 60_000 });
+  assert.ok(d.issues.some((i) => i.id === id), 'observations retained');
+  s = reconcile(s, d, now + 60_000);
+  assert.equal(s.issues.find((i) => i.id === id).status, 'open');
+  assert.equal(s.issues.find((i) => i.id === id).suppressed, true);
+  assert.equal(s.issues.find((i) => i.id === id).remediationExcluded, true);
+  assert.ok(!s.outbox.some((e) => e.issue.scope === 'strix-pasta'));
+  assert.ok(s.quarantined.some((e) => e.event.issue.id === id));
+  assert.ok(s.outbox.some((e) => e.issue.scope === 'other'));
+  const count = s.quarantined.length;
+  s = reconcile(JSON.parse(JSON.stringify(s)), d, now + 120_000);
+  assert.equal(s.quarantined.length, count);
+  settings.remediation.excludedCiHosts = [];
+  d = deriveIssues({ settings, states: {}, ci, now: now + 180_000 });
+  s = reconcile(s, d, now + 180_000);
+  assert.equal(s.issues.find((i) => i.id === id).remediationExcluded, false);
+  assert.ok(s.outbox.some((e) => e.issue.id === id));
+});

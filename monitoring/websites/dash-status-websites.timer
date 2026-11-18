@@ -1,0 +1,10 @@
+[Unit]
+Description=Collect Dash website response timing every five minutes
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=5min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

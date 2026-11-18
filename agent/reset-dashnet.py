@@ -2,7 +2,7 @@
 """Platform-only reset of a dashnet-owned dashmate deployment.
 
 Renders the reviewed target release before wiping; the controller owns the
-fenced dashnet journal transition. Epoch and protocol settings are preserved. Only the two chain-data volumes are
+fenced dashnet journal transition. Epoch settings are preserved; genesis PV can be selected explicitly. Only the two chain-data volumes are
 removed; Core, Tor, logs, certificates and all non-Platform containers stay.
 """
 import base64
@@ -84,6 +84,13 @@ class Reset:
         self.state = state_root / q['exec']
         self.config = self.home / self.node
         self.td = self.config / 'platform/drive/tenderdash'
+
+    def genesis_protocol(self, genesis):
+        version = self.q.get('genesisProtocolVersion')
+        if version is not None:
+            need(type(version) is int and 1 <= version <= 0xffffffff, 'invalid Platform version (PV)')
+            genesis['consensus_params']['version']['app_version'] = str(version)
+        return genesis
 
     def all_containers(self):
         ids = run(['docker', 'ps', '-aq']).split()
@@ -213,7 +220,7 @@ class Reset:
         images.update({k: owned[s]['Config']['Image'] for k, s in components.items() if s in owned})
         marker = read(self.root / 'upgrade.json') if (self.root / 'upgrade.json').exists() else None
         need(not marker or marker.get('phase') == 'applied', 'unfinished native upgrade on host')
-        return {'images': images, 'previousId': marker.get('id', '') if marker else '', 'preservation': {
+        return {'images': images, 'previousId': marker.get('id', '') if marker else '', 'markerEvidence': {'phase': marker.get('phase'), 'images': marker.get('to')} if marker else None, 'preservation': {
             'coreId': core['Id'], 'coreStarted': core['State']['StartedAt'],
             'coreConfig': hashlib.sha256(self.normalized(path, path.read_bytes(), doc)).hexdigest(),
             'coreGenesis': self.rpc('getblockhash', 1),
@@ -252,7 +259,7 @@ class Reset:
             return b
         b = {'project': owned['core']['Config']['Labels']['com.docker.compose.project'], 'coreServices': {name: {'id': v['Id'], 'image': v['Config']['Image'], 'mounts': v['Mounts']} for name, v in owned.items() if name in ['core', 'core_tor']}, 'preserve': self.snapshot(), 'volumes': self.data_volumes(owned), 'height': info['blocks'],
              'platform': {s: {'id': c['Id'], 'image': c['Config']['Image']} for s, c in owned.items() if s in PLATFORM},
-             'images': images, 'epochTime': epoch, 'anchor': read(self.td / 'genesis.json')['initial_core_chain_locked_height'],
+             'images': images, 'genesisProtocolVersion': int(read(self.td / 'genesis.json')['consensus_params']['version']['app_version']), 'epochTime': epoch, 'anchor': read(self.td / 'genesis.json')['initial_core_chain_locked_height'],
              'dashmate': (self.home / '.version').read_text().strip(), 'configFormatVersion': doc.get('configFormatVersion'),
              'tor': {'enabled': c['core']['tor']['enabled']}, 'configHash': digest(self.home / 'config.json'),
              'helper': images['helper'], 'journal': self.journal_baseline()}
@@ -334,16 +341,26 @@ class Reset:
     @staticmethod
     def core_compatibility_options(old, new):
         # Comments/spacing are not configuration changes. Everything outside
-        # release-owned RPC compatibility directives must remain identical.
+        # release-owned compatibility directives must remain identical. beta.5
+        # adds exactly this loopback onion listener; never allow arbitrary bind
+        # changes, removals or duplicate listeners through the RPC migration gate.
         semantic = lambda data: [line.strip() for line in data.splitlines() if line.strip() and not line.lstrip().startswith(b'#')]
         strip = lambda data: [line for line in semantic(data) if not line.startswith((b'rpcwhitelist=', b'deprecatedrpc='))]
-        need(strip(old) == strip(new), 'Core migration changed preserved chain, data, credentials or network settings')
+        previous, desired = strip(old), strip(new)
+        onion = b'bind=127.0.0.1=onion'
+        changes = []
+        if previous.count(onion) != desired.count(onion):
+            need(previous.count(onion) == 0 and desired.count(onion) == 1,
+                 'Core migration changed preserved chain, data, credentials or network settings')
+            desired = [line for line in desired if line != onion]
+            changes.append({'option': 'bind', 'added': ['127.0.0.1=onion'], 'removed': []})
+        need(previous == desired, 'Core migration changed preserved chain, data, credentials or network settings')
         options = lambda data: sorted(line.decode().partition('=')[2] for line in semantic(data) if line.startswith(b'deprecatedrpc='))
         before, after = options(old), options(new)
         if before == after:
-            return []
+            return changes
         need(all(re.fullmatch('[a-zA-Z0-9_,.-]+', value) for value in after), 'invalid Core compatibility option')
-        return [{'option': 'deprecatedrpc', 'added': sorted(set(after) - set(before)), 'removed': sorted(set(before) - set(after))}]
+        return changes + [{'option': 'deprecatedrpc', 'added': sorted(set(after) - set(before)), 'removed': sorted(set(before) - set(after))}]
 
     def miner(self):
         need(self.q['role'] in ['wallet', 'miner'], 'mining control requires the deployment mining node')
@@ -587,6 +604,7 @@ class Reset:
             entry['docker']['image'] = self.desired()[component]
         c['platform']['drive']['abci']['epochTime'] = b['epochTime']
         c['platform']['drive']['tenderdash']['genesis']['initial_core_chain_locked_height'] = self.q['anchorHeight']
+        self.genesis_protocol(c['platform']['drive']['tenderdash']['genesis'])
         write(stage / 'config.json', doc)
         self.helper(stage, 'render')
         need(read(stage / 'config.json') == doc, 'renderer changed configured target')
@@ -606,10 +624,11 @@ class Reset:
         rel = Path(self.node) / 'platform/drive/tenderdash'
         old, new = read(self.td / 'genesis.json'), read(stage / rel / 'genesis.json')
         old['initial_core_chain_locked_height'] = self.q['anchorHeight']
-        need(old == new, 'genesis changed beyond the anchor')
+        self.genesis_protocol(old)
+        need(old == new, 'genesis changed beyond reviewed anchor/protocol')
         need(digest(self.td / 'node_key.json') == digest(stage / rel / 'node_key.json'), 'node identity changed')
         # Hashes use dashnet's exact Platform service/content fingerprint
-        # algorithm; migrate Core/Tor fingerprints only for reviewed RPC changes.
+        # algorithm; migrate Core/Tor fingerprints only for reviewed compatibility changes.
         overrides = read(stage / '.dashnet-compose.json')
         for service, ref in self.q.get('sidecars', {}).items():
             need(service in overrides['services'], 'unknown sidecar')
@@ -623,7 +642,7 @@ class Reset:
             if name in live:
                 need(services[name] == live[name], 'target release changes Core Compose service')
         # Keep salted credentials byte-identical; only the target release's
-        # reviewed RPC access/compatibility lines may change in Core's config.
+        # reviewed compatibility lines may change in Core's config.
         core_files = []
         for path in (self.config / 'core').rglob('*'):
             if path.is_file():
@@ -637,7 +656,8 @@ class Reset:
                     need(path.name == 'dash.conf', 'unexpected Core file migration')
                     # Release templates also select Core RPC compatibility flags
                     # (beta.2 restores deprecated masternode service/port fields).
-                    # No chain, wallet, image, auth or network directive may move.
+                    # The exact beta.5 loopback onion addition is also reviewed;
+                    # all other chain, wallet, image, auth and network lines stay.
                     release['coreMigration'].extend(self.core_compatibility_options(old_bytes, new_bytes))
                     auth = [line for line in path.read_bytes().splitlines(keepends=True) if line.startswith(b'rpcauth=')]
                     lines = iter(auth)
@@ -665,14 +685,15 @@ class Reset:
                 entry.append(fingerprints['core'])
             fingerprints[name] = hashlib.sha256(json.dumps(entry, sort_keys=True).encode()).hexdigest()
             overrides['services'][name]['labels']['dashnet.config'] = fingerprints[name]
+        need(not self.q.get('requireUnchangedCore') or not release['coreMigration'], 'Core migration forbidden by reset preservation gate')
         if not release['coreMigration']:
             for name in ['core', 'core_tor']:
                 if name in live:
                     need(fingerprints[name] == live[name]['labels']['dashnet.config'], 'preserved Core fingerprint differs')
         write(stage / '.dashnet-compose.json', overrides)
         self.preserved(b)
-        write(self.state / 'prepared.json', {'anchor': self.q['anchorHeight'], 'coreMigration': release['coreMigration'], 'coreFiles': core_files, 'coreFingerprints': {s: fingerprints[s] for s in ['core', 'core_tor'] if s in fingerprints}, 'images': self.desired(), 'platform': {s: {'image': services[s]['image']} for s in b['platform']}, 'files': {str(p.relative_to(stage)): digest(p) for p in stage.rglob('*') if p.is_file()}})
-        return {'checks': {'coreSectionUnchanged': not bool(release['coreMigration']), 'coreChainPreserved': True, 'coreMigration': release['coreMigration'], 'nodeKeyUnchanged': True, 'genesisOnlyAnchorChanged': True,
+        write(self.state / 'prepared.json', {'anchor': self.q['anchorHeight'], 'genesisProtocolVersion': self.q.get('genesisProtocolVersion'), 'coreMigration': release['coreMigration'], 'coreFiles': core_files, 'coreFingerprints': {s: fingerprints[s] for s in ['core', 'core_tor'] if s in fingerprints}, 'images': self.desired(), 'platform': {s: {'image': services[s]['image']} for s in b['platform']}, 'files': {str(p.relative_to(stage)): digest(p) for p in stage.rglob('*') if p.is_file()}})
+        return {'checks': {'coreSectionUnchanged': not bool(release['coreMigration']), 'coreChainPreserved': True, 'coreMigration': release['coreMigration'], 'nodeKeyUnchanged': True, 'genesisOnlyAnchorChanged': self.q.get('genesisProtocolVersion') is None, 'genesisProtocolVersion': int(new['consensus_params']['version']['app_version']),
                            'anchor': self.q['anchorHeight'], 'epochTime': b['epochTime'], 'epochEnv': b['epochTime'], 'genesisChainId': new['chain_id']}, 'images': self.desired(), 'rendered': ['Target release Platform configuration and Compose templates', 'dashnet reset anchor and identity record']}
 
     def prewipe(self):
@@ -683,6 +704,8 @@ class Reset:
             self.preserved(b)
         need((self.state / 'prepared.json').is_file(), 'canary missing')
         prepared = read(self.state / 'prepared.json')
+        need(not self.q.get('requireUnchangedCore') or not prepared.get('coreMigration'), 'Core migration forbidden by reset preservation gate')
+        need(prepared.get('genesisProtocolVersion', self.q.get('genesisProtocolVersion')) == self.q.get('genesisProtocolVersion'), 'reviewed Platform version changed')
         need(prepared['images'] == self.desired(), 'reviewed target images changed')
         for rel, value in prepared['files'].items():
             need(digest(self.state / 'render' / rel) == value, 'prepared files changed')
@@ -718,6 +741,7 @@ class Reset:
         stage = self.state / 'render'
         prepared = read(self.state / 'prepared.json')
         need(not prepared.get('coreMigration') or (self.state / 'baseline-effective.json').exists(), 'required Core migration has not completed')
+        need(prepared.get('genesisProtocolVersion', self.q.get('genesisProtocolVersion')) == self.q.get('genesisProtocolVersion'), 'reviewed Platform version changed')
         need(prepared['anchor'] == self.q['anchorHeight'], 'prepared anchor changed')
         for rel, value in prepared['files'].items():
             need(digest(stage / rel) == value, 'prepared files changed')
@@ -734,6 +758,7 @@ class Reset:
                 dst.write_bytes((stage / rel).read_bytes())
         inputs = read(self.root / 'platform/inputs.json')
         inputs['genesisCoreHeight'] = self.q['anchorHeight']
+        inputs['initialProtocolVersion'] = int(read(self.td / 'genesis.json')['consensus_params']['version']['app_version'])
         write(self.root / 'platform/inputs.json', inputs)
         write(self.root / 'platform/identity.json', {name: digest(self.td / name) for name in ['genesis.json', 'node_key.json']})
         self.preserved(b)
@@ -779,7 +804,9 @@ class Reset:
         sync = result.get('result', result)['sync_info']
         need(int(sync['latest_block_height']) > 0 and sync['catching_up'] is False, 'Platform consensus not ready')
         need(self.rpc('masternode','status').get('state') == 'READY', 'masternode not READY')
-        need(read(self.td / 'genesis.json')['initial_core_chain_locked_height'] == self.q['anchorHeight'], 'wrong reset anchor')
+        genesis = read(self.td / 'genesis.json')
+        need(genesis == self.genesis_protocol(copy.deepcopy(genesis)), 'wrong reset Platform version')
+        need(genesis['initial_core_chain_locked_height'] == self.q['anchorHeight'], 'wrong reset anchor')
         env = dict(x.split('=',1) for x in owned['drive_abci']['Config']['Env'] if '=' in x)
         cfg_epoch = read(self.home / 'config.json')['configs'][self.node]['platform']['drive']['abci']['epochTime']
         parsed = run(['docker', 'exec', owned['drive_abci']['Id'], 'drive-abci', 'config'], timeout=60)
@@ -789,7 +816,7 @@ class Reset:
         need(self.rpc('mnsync', 'status').get('IsSynced') and not self.rpc('getblockchaininfo').get('initialblockdownload'), 'Core not synchronized')
         tls = run(['curl','-s','-o','/dev/null','-w','%{http_code}','--max-time','10',f'https://{self.q["address"]}:1443/']).strip()
         need(tls == '405', 'DAPI TLS not ready')
-        return {'consensus': {'height': int(sync['latest_block_height'])}, 'epochs': {'config': b['epochTime'], 'env': env['EPOCH_TIME_LENGTH_S'], 'parsed': int(match.group(1))},
+        return {'genesisProtocolVersion': int(genesis['consensus_params']['version']['app_version']), 'consensus': {'height': int(sync['latest_block_height'])}, 'epochs': {'config': b['epochTime'], 'env': env['EPOCH_TIME_LENGTH_S'], 'parsed': int(match.group(1))},
                 'core': {'chainPreserved': True, 'configurationMigrated': bool(prepared.get('coreMigration'))}, 'restarts': {s:c['RestartCount'] for s,c in owned.items() if s in PLATFORM and c['RestartCount']}}
 
 

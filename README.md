@@ -327,3 +327,63 @@ silence monitoring indefinitely. Manual maintenance/journal gates remain separat
 
 Deployment requires both the status web/incident-worker changes and the broker
 refresh check. Merging this source does not deploy either component.
+
+### Devnet operator keys
+
+Connect → **Private devnet keys** is available to operators of that managed
+console devnet (including admins), not viewers or anonymous users. Reveal uses
+POST `/api/networks/:name/keys` with the existing session, same-origin and CSRF
+checks. Grants reload before and after retrieval. Mainnet/Testnet are excluded.
+The ordinary connection files and event stream never contain keys.
+
+Deploy `deploy/devnet-keys-compose.yml` with the same source image as web.
+Create `/srv/dash-status/key-access` owned by uid1000, mode0700. The `keys`
+service is a separate, read-only collector, not a network operation runner:
+it exposes only a mode0600 Unix socket, checks current network/operator grants,
+requires an idle ready devnet, uses existing pinned SSH identities without
+provisioning, and verifies EC2 instance, Core chain and on-chain ProTx identities.
+It reads only the registered voting/owner/collateral keys and BLS/P2P identities,
+plus the devnet's spork/payout/faucet addresses. It never changes or unlocks a
+wallet, generates keys, or writes keys to disk. RPC/SSH/TLS credentials are not
+returned. Web mounts only the socket directory, never the agent's credentials.
+
+Responses are `private, no-store`; audit output contains only actor ID, network
+and time. UI data clears on hiding, unmount, background tab or five minutes.
+Downloads are explicit private JSON files. Failures return a generic error;
+never log raw SSH/RPC responses while troubleshooting key access.
+
+### CI host remediation exclusions
+
+An operator can set `remediation.excludedCiHosts` in the persisted `settings.json`
+to an array of exact CI reporter IDs (for example, `['strix-pasta']`, using JSON
+quotes in the actual file). This excludes host-scoped incidents and failed jobs
+from automated response and the remediation view without removing the reporter,
+CI history, resource observations, or CI page entry. Existing incidents remain
+recorded, not falsely resolved; unsent events are retained in quarantine with an
+explicit exclusion reason. The receiver's fresh-issue suppression gate prevents
+already-delivered events from starting repairs. Removing the ID re-enables
+admission after a fresh observation. This does not cancel an already-running
+response; settle that owner separately before changing its work.
+
+Console GitHub login sessions last seven days from sign-in (both the server session and browser cookie). Existing sessions keep their original expiry; sign in again to receive the new lifetime.
+
+After a console deployment, verify retained capabilities as well as legacy APIs:
+
+```sh
+node scripts/check-console-features.mjs https://status.testnet.networks.dash.org
+node scripts/check-legacy-api.mjs https://status.testnet.networks.dash.org 82
+```
+
+The feature gate checks Remediation, website monitoring, CI queue APIs and their frontend navigation. A passing `/api/health` alone must not certify a console rollout. Preserve deployed integrations when updating the separately built network executor.
+
+For an executor/agent promotion, also run `scripts/check-rollout-backend.mjs`
+inside **both candidate images** (mount the script read-only if it is not baked
+in). It checks the actual agent validator, plan binding, and both CLI planning
+commands without network access. Run the `requested concurrency` integration
+test in `agent/agent.test.js` against the candidate agent modules as well.
+Check retained features against the last verified complete release, not just the
+currently deployed image: on 2026-11-17 a regressed agent silently dropped a
+saved `concurrency: 3` request while the restored web correctly displayed it.
+Retain the merged engine's Platform protocol compatibility fixes. Do not replace
+an active operation's pinned executable/plan; promote only after the agent is
+idle and recheck its queue and child processes at cutover.
