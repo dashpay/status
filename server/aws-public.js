@@ -1,4 +1,4 @@
-// The AWS inventory before sign-in: spend and breakdowns only. No resource
+// The AWS inventory before sign-in: resource totals and breakdowns only. No resource
 // names, ids, addresses, DNS names or tags beyond the Dash network, and no
 // list of idle resources (that is for members).
 const add = (map, key, fields) => {
@@ -8,7 +8,7 @@ const add = (map, key, fields) => {
 };
 const rows = (map) => [...map.values()].map((e) => ({ ...e, memoryGiB: Math.round(e.memoryGiB) })).sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
 
-export function publicInventory(inv) {
+export function publicInventory(inv, { includeCosts = false } = {}) {
   const running = inv.instances.filter((i) => i.state === 'running');
   const byNetwork = new Map(), byRegion = new Map(), byFamily = new Map(), byArch = new Map();
   for (const i of running) {
@@ -21,7 +21,7 @@ export function publicInventory(inv) {
   for (const v of inv.volumes) ebsByType.set(v.type || 'unknown', (ebsByType.get(v.type || 'unknown') || 0) + (v.sizeGiB || 0));
   const lbByType = {};
   for (const l of inv.loadBalancers) lbByType[l.type] = (lbByType[l.type] || 0) + 1;
-  const c = inv.costs;
+  const c = includeCosts ? inv.costs : null;
   return {
     public: true, at: inv.at, regions: inv.regions.length,
     regionsInUse: new Set([...inv.instances, ...inv.volumes, ...inv.addresses, ...inv.loadBalancers, ...inv.natGateways].map((x) => x.region)).size,
@@ -34,6 +34,6 @@ export function publicInventory(inv) {
       ecrImages: inv.ecr.reduce((a, r) => a + (r.images || 0), 0), s3Buckets: inv.s3.length },
     network: { loadBalancers: inv.loadBalancers.length, loadBalancersByType: lbByType, natGateways: inv.natGateways.length, elasticIps: inv.addresses.length, cloudfront: inv.cloudfront.length },
     serverless: { lambda: inv.lambda.length, dynamodb: inv.dynamodb.length },
-    costs: c ? { at: c.at, month: c.month, currency: c.currency, monthToDate: c.monthToDate, monthEndEstimate: c.monthEndEstimate, lastMonth: c.lastMonth, byService: c.byService, daily: c.daily } : null,
+    ...(includeCosts ? { costs: c ? { at: c.at, month: c.month, currency: c.currency, monthToDate: c.monthToDate, monthEndEstimate: c.monthEndEstimate, lastMonth: c.lastMonth, byService: c.byService, daily: c.daily } : null } : {}),
   };
 }

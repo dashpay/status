@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch, openSync, readSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { websiteReport } from './websites.js';
 import { createAuth } from './auth.js';
 import { createCi } from './ci.js';
 import { createOrgQueue } from './ci-queue.js';
@@ -27,6 +28,21 @@ import { validateMainnetReport } from '../shared/mainnet.js';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 const LIFECYCLE_ACTIONS = ['create-devnet', 'delete-devnet', 'devnet-services', 'devnet-platform', 'platform-reset'];
+
+// Memo with a fixed lifetime. Expired entries are dropped on insert, so keys
+// that embed a timestamp (the AWS inventory) cannot accumulate.
+export function ttlCache(clock, ttl = 15_000) {
+  const entries = new Map();
+  const cached = (key, fn) => {
+    const hit = entries.get(key);
+    if (hit && clock() - hit.at < ttl) return hit.value;
+    for (const [k, e] of entries) if (clock() - e.at >= ttl) entries.delete(k);
+    const value = fn();
+    entries.set(key, { at: clock(), value });
+    return value;
+  };
+  return Object.assign(cached, { delete: (key) => entries.delete(key), size: () => entries.size });
+}
 
 export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, clock = Date.now, ciGithub = null, ciQueue = {}, mainnetReportToken = process.env.MAINNET_REPORT_TOKEN } = {}) {
   const settingsPath = join(dataDir, 'settings.json');
@@ -138,6 +154,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     res.status(stale ? 503 : 200).json({ ...body, stale });
   });
 
+  app.get('/api/websites', (req, res) => res.json(websiteReport(dataDir, clock())));
   app.get('/api/health', (req, res) => res.json({ service: 'dash-status', status: 'ok' }));
   app.get('/api/remediation', (req, res) => {
     reloadSettings();
@@ -181,7 +198,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   // A change to a private job is announced to members only: its timing is private too.
   const pushQueue = (scope) => {
     if (!scope) return;
-    if (scope === 'all') publicCache.delete('ci-queue');
+    if (scope === 'all') cached.delete('ci-queue');
     for (const members of scope === 'all' ? [true, false] : [true]) {
       const key = `ci-queue|${members}`;
       clearTimeout(debounce.get(key));
@@ -395,16 +412,10 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     res.json({ activityHistory });
   });
 
-  // Infrastructure pages: full detail for any account with access; before
-  // sign-in a sanitized view (statistics and spend, nothing identifying).
-  const publicCache = new Map();
-  const cached = (key, fn) => {
-    const hit = publicCache.get(key);
-    if (hit && clock() - hit.at < 15_000) return hit.value;
-    const value = fn();
-    publicCache.set(key, { at: clock(), value });
-    return value;
-  };
+  // Infrastructure pages: full detail for any account with access; otherwise a
+  // sanitized view (statistics, nothing identifying). Spend is never shown
+  // before sign-in.
+  const cached = ttlCache(clock);
   app.get('/api/ci', (req, res) => res.json(memberOf(settings, user(req)) ? ci.summary({ admin: isAdmin(req) }) : cached('ci', () => ci.publicSummary())));
   app.get('/api/ci/queue/capacity', (req, res) => {
     const window = typeof req.query.window === 'string' ? req.query.window : '7d';
@@ -423,7 +434,10 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   app.get('/api/aws', (req, res) => {
     const inv = readJSON(join(awsDir, 'inventory.json'));
     if (!inv) return res.status(404).json({ error: 'No AWS inventory yet; the agent collects it every 10 minutes' });
-    res.json(memberOf(settings, user(req)) ? inv : cached(`aws|${inv.at}`, () => publicInventory(inv)));
+    const viewer = user(req);
+    // Cost visibility follows the authenticated session, never query parameters.
+    // Keep signed-in summaries separate from the anonymous projection cache.
+    res.vary('Cookie').json(memberOf(settings, viewer) ? inv : cached(`aws|${viewer ? 'signed-in' : 'public'}|${inv.at}`, () => publicInventory(inv, { includeCosts: !!viewer })));
   });
 
   // GitHub account lookup so admins can grant access by login.

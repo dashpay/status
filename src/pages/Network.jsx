@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { ago, api, bytes, canOperate, canSee, clock, dash, duration, navigate, num, short, span, useNow, useResource, useSession, ROLE_LABEL } from '../lib.js';
-import { Delta, Dot, Empty, Err, Level, Link, Meter, Section, Stat } from '../ui.jsx';
+import { Delta, Dot, Empty, EndpointDot, Err, Level, Link, Meter, Section, Stat } from '../ui.jsx';
 import Operations from './Operations.jsx';
 import { cmp, COMPONENTS, helperFor, imageTag, newestRelease, OPERABLE, reported, REPOS } from '../releases.js';
 import Connect from './Connect.jsx';
@@ -61,9 +61,9 @@ export default function Network({ name, tab }) {
                 <div className="px-3 py-2 border-b border-line label">Public endpoints</div>
                 <table className="grid"><tbody className="[&_tr]:!cursor-default">
                   {n.endpoints.map((e) => (
-                    <tr key={e.label}><td className="w-4"><Dot level={e.ok ? 'ok' : 'down'} /></td><td>{e.label}</td>
+                    <tr key={e.label}><td className="w-4"><EndpointDot ok={e.ok} /></td><td>{e.label}</td>
                       <td className="mono text-dim truncate max-w-[280px]"><a className="link" href={e.url} target="_blank" rel="noreferrer">{e.url.replace(/^https:\/\//, '')}</a></td>
-                      <td className="num">{e.status ?? <span className="lv-down">{e.error}</span>}</td><td className="num text-dim">{e.ms != null ? `${e.ms} ms` : ''}</td></tr>
+                      <td className="num">{e.status ?? <span className={e.ok == null ? 'lv-stopped' : 'lv-down'}>{e.error}</span>}</td><td className="num text-dim">{e.ms != null ? `${e.ms} ms` : ''}</td></tr>
                   ))}
                   {!n.endpoints.length && <tr><td className="text-dim">none configured</td></tr>}
                 </tbody></table>

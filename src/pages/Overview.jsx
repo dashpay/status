@@ -1,5 +1,5 @@
 import { ago, num, useNow, ROLE_LABEL } from '../lib.js';
-import { Bar, Dot, Empty, Err, Level, Link } from '../ui.jsx';
+import { Bar, Dot, Empty, EndpointDot, Err, Level, Link } from '../ui.jsx';
 
 export default function Overview({ overview }) {
   const now = useNow(1000);
@@ -62,7 +62,7 @@ function NetworkCard({ n, now }) {
       {n.endpoints?.length > 0 && (
         <div className="px-4 py-2 border-t border-line flex flex-wrap gap-x-4 gap-y-1 text-[11px]">
           {n.endpoints.map((e) => (
-            <span key={e.label} className="flex items-center gap-1.5" title={e.url}><Dot level={e.ok ? 'ok' : 'down'} /><span className="text-dim">{e.label}</span><span className="mono">{e.status ?? e.error}{e.ms != null ? ` ${e.ms}ms` : ''}</span></span>
+            <span key={e.label} className="flex items-center gap-1.5" title={e.url}><EndpointDot ok={e.ok} /><span className="text-dim">{e.label}</span><span className="mono">{e.status ?? e.error}{e.ms != null ? ` ${e.ms}ms` : ''}</span></span>
           ))}
         </div>
       )}
