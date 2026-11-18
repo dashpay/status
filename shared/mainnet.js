@@ -1,11 +1,16 @@
 // Public-data-only boundary. Failure samples are data, never manufactured health.
 const integer = (v) => Number.isSafeInteger(v) && v >= 0 ? v : null;
 const finite = (v) => Number.isFinite(v) && v >= 0 ? v : null;
-const version = (v) => typeof v === 'string' && /^(?:unreleased-)?\d+(?:\.\d+){0,2}(?:[-+][a-zA-Z0-9.-]+)?$/.test(v) && v.length < 64 ? v : null;
-const coreVersion = (v) => typeof v === 'string' && /^\/Dash Core:\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]+)?\/$/.test(v) ? v : null;
+// A pre-release/build suffix starts with a letter, stays short and never has the shape of an IPv4 address.
+const suffix = (s) => s === undefined || (/^[a-zA-Z][a-zA-Z0-9.-]{0,31}$/.test(s) && !/\d[.-]\d+[.-]\d+[.-]\d/.test(s));
+const version = (v) => { const m = typeof v === 'string' && v.length < 64 && /^(?:unreleased-)?\d+(?:\.\d+){0,2}(?:[-+]([a-zA-Z0-9.-]+))?$/.exec(v); return m && suffix(m[1]) ? v : null; };
+// Dash Core may append a user-agent comment, `/Dash Core:23.1.0(observer)/`; only the version is kept.
+const coreVersion = (v) => { const m = typeof v === 'string' && /^\/Dash Core:(\d+\.\d+\.\d+(?:[-+]([a-zA-Z0-9.-]+))?)(?:\([^()]{0,256}\))?\/$/.exec(v); return m && suffix(m[2]) ? `/Dash Core:${m[1]}/` : null; };
 const enumeration = (v, allowed) => allowed.includes(v) ? v : null;
 const boolean = (v) => typeof v === 'boolean' ? v : null;
-const timestamp = (v) => typeof v === 'string' && Number.isFinite(Date.parse(v)) ? new Date(v).toISOString() : null;
+// Date.parse rolls an impossible date forward (30 February becomes 2 March), so the written date must be a real one.
+const realDate = (v) => { const m = /^(\d{4})-(\d\d)-(\d\d)/.exec(v); return !!m && new Date(Date.UTC(m[1], m[2] - 1, m[3])).toISOString().startsWith(m[0]); };
+const timestamp = (v) => typeof v === 'string' && realDate(v) && Number.isFinite(Date.parse(v)) ? new Date(v).toISOString() : null;
 
 // Every state Dash Core's `masternode status` can report.
 const MASTERNODE_STATES = ['READY', 'WAITING_FOR_PROTX', 'POSE_BANNED', 'REMOVED', 'OPERATOR_KEY_CHANGED', 'PROTX_IP_CHANGED', 'ERROR', 'UNKNOWN'];
@@ -22,8 +27,10 @@ const SERVICES = {
   observer: ['Independent observer / data freshness', 'https://status.testnet.networks.dash.org/'],
   core: ['Core chain progress', 'https://status.testnet.networks.dash.org/'], platform: ['Platform chain progress', 'https://status.testnet.networks.dash.org/'], chainlocks: ['ChainLocks', 'https://status.testnet.networks.dash.org/'],
 };
+const STALE = 'monitor sample missing or stale';
+const sampleFresh = (at, now) => finite(at) !== null && now / 1000 - at >= -60 && now / 1000 - at <= 240;
 export function serviceEndpoints(input, now) {
-  const fresh = finite(input?.at) !== null && now / 1000 - input.at >= -60 && now / 1000 - input.at <= 240;
+  const fresh = sampleFresh(input?.at, now);
   const rows = Array.isArray(input?.services) ? input.services : [];
   return Object.entries(SERVICES).map(([id, [label, url]]) => {
     const samples = rows.filter((s) => s?.id === id);
@@ -31,9 +38,13 @@ export function serviceEndpoints(input, now) {
     const reason = enumeration(s?.reason, ['healthy', 'reference-unavailable', 'stale-data', 'certificate-expiring', 'probe-failed', 'consensus-signal']);
     return { label, url, kind: 'mainnet-service', ok: s ? boolean(s.ok) : false,
       status: s?.ok === true ? 'OK' : null, ms: finite(s?.ms), height: integer(s?.height),
-      error: s?.ok === true ? null : reason || (s && boolean(s.ok) === null ? 'not observed' : 'monitor sample missing or stale') };
+      error: s?.ok === true ? null : reason || (!s ? STALE : boolean(s.ok) === null ? 'not observed' : 'probe-failed'),
+      ...(s ? { sampledAt: input.at } : {}) };
   });
 }
+// Stored rows outlive the sample they came from, so freshness is decided again on every read.
+export const liveServiceEndpoints = (endpoints, now) => (endpoints || []).map((e) => e?.kind !== 'mainnet-service' || sampleFresh(e.sampledAt, now) ? e
+  : { ...e, ok: false, status: null, ms: null, height: null, error: STALE });
 
 export function validateMainnetReport(input, now = Date.now()) {
   if (!input || input.network !== 'mainnet') throw new Error('mainnet report required');
@@ -64,10 +75,12 @@ export function validateMainnetReport(input, now = Date.now()) {
     type: enumeration(mn.type, ['Evo']), posePenalty: integer(mn.posePenalty),
   };
   const d = input.dapi;
+  // A DAPI answering for another chain is a failure; the foreign ID itself is never stored.
+  const chainId = d?.chainId === 'evo1' ? 'evo1' : typeof d?.chainId === 'string' && d.chainId ? 'other' : null;
   const dapi = evo ? {
-    ok: d?.ok === true, latencyMs: finite(d?.latencyMs), height: integer(d?.height),
+    ok: d?.ok === true && chainId !== 'other', latencyMs: finite(d?.latencyMs), height: integer(d?.height),
     dapiVersion: version(d?.dapiVersion), driveVersion: version(d?.driveVersion),
-    chainId: d?.chainId === 'evo1' ? 'evo1' : null,
+    chainId,
     query: d?.query ? { ok: d.query.ok === true, method: 'getEpochsInfo',
       latencyMs: finite(d.query.latencyMs), epoch: integer(d.query.epoch),
       firstBlockHeight: integer(d.query.firstBlockHeight), protocol: integer(d.query.protocol) } : null,

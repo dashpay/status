@@ -7,7 +7,9 @@ const MAX_SITES = 16, MAX_HISTORY = 2016; // seven days of five-minute samples
 const integer = (v) => Number.isSafeInteger(v) && v >= 0 ? v : null;
 const finite = (v) => Number.isFinite(v) && v >= 0 ? v : null;
 const percent = (v) => finite(v) !== null && v <= 100 ? v : null;
-const timestamp = (v) => typeof v === 'string' && Number.isFinite(Date.parse(v)) ? new Date(v).toISOString() : null;
+// Date.parse rolls an impossible date forward (30 February becomes 2 March), so the written date must be a real one.
+const realDate = (v) => { const m = /^(\d{4})-(\d\d)-(\d\d)/.exec(v); return !!m && new Date(Date.UTC(m[1], m[2] - 1, m[3])).toISOString().startsWith(m[0]); };
+const timestamp = (v) => typeof v === 'string' && realDate(v) && Number.isFinite(Date.parse(v)) ? new Date(v).toISOString() : null;
 const text = (v, max) => typeof v === 'string' ? v.slice(0, max) : null;
 // Header-derived values may arrive as numbers or digit strings (HTTP version, Age).
 const seconds = (v) => integer(typeof v === 'string' && /^\d{1,9}$/.test(v) ? Number(v) : v);
@@ -38,7 +40,7 @@ function site(s) {
   const d = s.summary24h;
   return { site: name, latest,
     summary24h: { ttfbP50Ms: finite(d?.ttfbP50Ms), ttfbP95Ms: finite(d?.ttfbP95Ms), successes: integer(d?.successes), samples: integer(d?.samples), successPercent: percent(d?.successPercent) },
-    history: (Array.isArray(s.history) ? s.history : []).map(sample).filter(Boolean).slice(-MAX_HISTORY) };
+    history: (Array.isArray(s.history) ? s.history : []).map(sample).filter(Boolean).sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).slice(-MAX_HISTORY) };
 }
 
 function normalize(report) {
@@ -49,12 +51,13 @@ function normalize(report) {
 
 // One parse per collector write. A file modified within the last two seconds is
 // not trusted as a cache key: a second write could share its mtime and size.
+// A failed read or parse is never cached: its cause can clear without changing the key.
 let cache = null;
 function load(file) {
   const st = statSync(file), key = `${file}|${st.mtimeMs}|${st.size}|${st.ino}`;
   if (cache?.key === key) return cache.report;
   const report = (() => { try { return normalize(JSON.parse(readFileSync(file, 'utf8'))); } catch { return null; } })();
-  cache = Date.now() - st.mtimeMs > 2000 ? { key, report } : null;
+  cache = report && Date.now() - st.mtimeMs > 2000 ? { key, report } : null;
   return report;
 }
 

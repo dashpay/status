@@ -94,3 +94,47 @@ test('website page helpers tolerate samples with missing fields', () => {
   assert.doesNotMatch(recommendations({ ok: true, redirects: 1, ttfbMs: 900, redirectMs: null }).join(' '), /NaN|null|undefined/);
   assert.deepEqual(segments(undefined, 'ttfbMs', 0, 1), []);
 });
+
+test('an impossible calendar date is not a collection time; offsets and missing milliseconds are', () => {
+  const now = Date.parse('2026-03-02T12:00:00Z');
+  const read = (generatedAt, at = generatedAt) => withReport({ schemaVersion: 1, generatedAt, sites: [{ ...siteAt(now), history: [{ ...sampleAt(now), at }] }] }, (dir) => websiteReport(dir, now));
+  for (const good of ['2026-03-02T12:00:00Z', '2026-03-02T12:00:00+00:00', '2026-03-02T14:00:00.000000+02:00', '2026-03-02T12:00:00.000Z']) {
+    const out = read(good);
+    assert.equal(out.stale, false, good);
+    assert.equal(Date.parse(out.generatedAt), now, good);
+    assert.equal(out.sites[0].history.length, 1, good);
+  }
+  // Date.parse reads each of these as a real instant; the first is exactly `now`.
+  for (const bad of ['2026-02-30T12:00:00Z', '2026-02-29T12:00:00Z', '2026-04-31T12:00:00+00:00', 'Mar 2 2026 12:00:00 UTC']) {
+    assert.ok(Number.isFinite(Date.parse(bad)), bad);
+    const out = read(bad);
+    assert.equal(out.generatedAt, null, bad);
+    assert.equal(out.stale, true, bad);
+    assert.deepEqual(out.sites[0].history, [], bad);
+  }
+  assert.equal(read('2024-02-29T12:00:00Z').generatedAt, '2024-02-29T12:00:00.000Z');
+});
+
+test('a failed read or parse is not cached under an unchanged mtime, size and inode', () => {
+  const now = Date.now(), old = new Date(now - 60_000);
+  const valid = JSON.stringify({ schemaVersion: 1, generatedAt: new Date(now).toISOString(), sites: [siteAt(now)] });
+  withReport({}, (dir, file) => {
+    writeFileSync(file, 'x'.repeat(valid.length)); utimesSync(file, old, old);
+    assert.equal(websiteReport(dir, now).error, 'Website checks have not reported yet.');
+    writeFileSync(file, valid); utimesSync(file, old, old);
+    assert.deepEqual(websiteReport(dir, now).sites.map((s) => s.site), ['dash.org']);
+  });
+});
+
+test('history is served oldest first and the cap keeps the newest samples, whatever order the collector wrote', () => {
+  const now = Date.now(), times = Array.from({ length: 2020 }, (_, i) => now - i * 300_000);
+  const out = withReport({ schemaVersion: 1, generatedAt: new Date(now).toISOString(), sites: [siteAt(now, { history: times.map((t) => sampleAt(t)) })] }, (dir) => websiteReport(dir, now));
+  assert.deepEqual(out.sites[0].history.map((s) => Date.parse(s.at)), times.slice(0, 2016).reverse());
+});
+
+test('chart orders samples by time before grouping, so a late-written sample cannot draw a line across a gap', () => {
+  const at = (n) => ({ at: new Date(n * 300_000).toISOString(), ok: true, ttfbMs: n });
+  const history = [at(9), at(1), at(0), at(8), at(2)], copy = structuredClone(history);
+  assert.deepEqual(segments(history, 'ttfbMs', 0, 10 * 300_000).map((g) => g.map((p) => p.value)), [[0, 1, 2], [8, 9]]);
+  assert.deepEqual(history, copy);
+});

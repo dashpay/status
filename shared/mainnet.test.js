@@ -100,7 +100,8 @@ test('private text in allowed-looking fields is rejected before persistence', ()
 test('service projection allowlists identity, fails stale/missing samples, preserves unknown', () => {
   const r = fixture();
   r.serviceChecks = { at: now/1000, services: [{ id: 'insight', ok: true, ms: 3, height: 100, password: 'SECRET' },
-    { id: 'quorums', ok: false, reason: 'stale-data', url: 'https://SECRET' }, { id: 'observer', ok: null, reason: 'SECRET' }] };
+    { id: 'quorums', ok: false, reason: 'stale-data', url: 'https://SECRET' }, { id: 'observer', ok: null, reason: 'SECRET' },
+    { id: 'seed-2', ok: false }, { id: 'seed-3', ok: false, reason: 'SECRET' }] };
   let endpoints = validateMainnetReport(r,now).endpoints;
   assert.equal(endpoints.find(e=>e.label.startsWith('Insight ·')).ok,true);
   assert.equal(endpoints.find(e=>e.label.startsWith('Quorums ·')).ok,false);
@@ -109,6 +110,7 @@ test('service projection allowlists identity, fails stale/missing samples, prese
   assert.equal(endpoints.find(e=>e.label.startsWith('Quorums ·')).error,'stale-data');
   assert.equal(endpoints.find(e=>e.label.startsWith('Platform seed 1')).error,'monitor sample missing or stale');
   assert.equal(endpoints.find(e=>e.label.startsWith('Platform seed 1')).ok,false);
+  for (const seed of ['Platform seed 2', 'Platform seed 3']) assert.deepEqual([endpoints.find(e=>e.label.startsWith(seed)).ok, endpoints.find(e=>e.label.startsWith(seed)).error], [false, 'probe-failed']);
   assert.doesNotMatch(JSON.stringify(endpoints),/SECRET/);
   assert.ok(endpoints.every(e=>typeof e.url==='string' && e.url.startsWith('https://')));
   assert.equal(endpoints.find(e=>e.label.startsWith('Insight ·')).status,'OK');
@@ -133,4 +135,71 @@ test('a stale Evo report is unreachable and says so on the observer row', () => 
   assert.equal(view.level, 'unreachable');
   assert.equal(view.rows[0].level, 'unreachable');
   assert.ok(view.rows[0].reasons.some((x) => x.level === 'unreachable' && x.text === 'mainnet observer report is stale'));
+});
+
+test('an impossible calendar date is not a report or block time', () => {
+  const later = Date.parse('2026-10-01T08:00:00Z'), r = fixture();
+  r.generatedAt = '2026-10-01T08:00:00+00:00'; r.platform.blockTime = '2026-02-30T12:00:00Z';
+  const state = validateMainnetReport(r, later);
+  assert.equal(state.generatedAt, '2026-10-01T08:00:00.000Z');
+  assert.equal(state.hosts[0].probe.data.tenderdash.blockTime, null);
+  assert.equal(Date.parse('2026-09-31T08:00:00Z'), later);
+  assert.throws(() => validateMainnetReport({ ...r, generatedAt: '2026-09-31T08:00:00Z' }, later), /timestamp invalid/);
+});
+
+test('a version suffix is a short label, never an address; a Core user-agent comment is dropped', () => {
+  const seen = (v) => { const r = fixture(); r.platform.version = v; r.core.subversion = `/Dash Core:${v}/`; const d = validateMainnetReport(r, now).hosts[0].probe.data; return [d.tenderdash.version, d.core.subversion]; };
+  for (const v of ['23.0.2', '1.5.0-dev.2', '2.1.0-rc.1', '3.0.0-hotfix.1', '4.1.2', '1.2.3+build.5', '2.0.0-pr.1234', `1.2.3-${'a'.repeat(32)}`]) assert.deepEqual(seen(v), [v, `/Dash Core:${v}/`], v);
+  assert.equal(seen('unreleased-2.0.0')[0], 'unreleased-2.0.0');
+  for (const v of ['1.2.3-192.0.2.123', '1.2.3-10-0-0-5', '1.2.3+1.2.3.4', '1.2.3-rc192.0.2.123', '1.2.3-rc.10-0-0-5', '1.2.3-7', `1.2.3-${'a'.repeat(33)}`]) assert.deepEqual(seen(v), [null, null], v);
+  const core = (subversion) => { const r = fixture(); r.core.subversion = subversion; return validateMainnetReport(r, now).hosts[0].probe.data.core.subversion; };
+  assert.equal(core('/Dash Core:23.1.0/'), '/Dash Core:23.1.0/');
+  assert.equal(core('/Dash Core:23.1.0(observer)/'), '/Dash Core:23.1.0/');
+  assert.equal(core('/Dash Core:23.1.0-rc.2(PRIVATE-NODE-IDENTITY; 192.0.2.123)/'), '/Dash Core:23.1.0-rc.2/');
+  for (const bad of ['/Dash Core:23.1.0(observer)(two)/', '/Dash Core:23.1.0(observer)x/', '/Dash Core:23.1.0(observer/', '/Dash Core:23.1.0-192.0.2.123(observer)/', '/Dash Core:(observer)/']) assert.equal(core(bad), null, bad);
+});
+
+test('a service sample fresh at ingest expires when read later; a still-fresh one stays OK', () => {
+  const mainnet = DEFAULT_SETTINGS.networks.find((n) => n.name === 'mainnet'), r = fixture();
+  const ids = ['quorums', 'insight', 'seed-1', 'seed-2', 'seed-3', 'bootstrap', 'quorums-tls', 'insight-tls', 'observer', 'core', 'platform', 'chainlocks'];
+  r.serviceChecks = { at: now / 1000 - 200, services: ids.map((id) => ({ id, ok: true, ms: 3, height: 100 })) };
+  r.serviceChecks.services[0] = { id: 'quorums', ok: null };
+  const state = validateMainnetReport(r, now);
+  assert.equal(state.endpoints.length, ids.length);
+  assert.ok(state.endpoints.every((e) => e.sampledAt === r.serviceChecks.at));
+  const view = (at) => { const e = evaluateNetwork(mainnet, state, DEFAULT_SETTINGS, at); return { level: e.level, endpoints: projectNetwork(mainnet, e, state, false).endpoints }; };
+  const fresh = view(now + 40_000);
+  assert.equal(fresh.level, 'ok');
+  assert.deepEqual(fresh.endpoints.map((e) => e.ok), [null, ...ids.slice(1).map(() => true)]);
+  assert.equal(fresh.endpoints[0].error, 'not observed');
+  assert.deepEqual([fresh.endpoints[1].status, fresh.endpoints[1].ms, fresh.endpoints[1].height], ['OK', 3, 100]);
+  const expired = view(now + 41_000);
+  assert.equal(expired.level, 'warn');
+  assert.ok(expired.endpoints.every((e) => e.ok === false && e.status === null && e.ms === null && e.error === 'monitor sample missing or stale'));
+  assert.ok([...fresh.endpoints, ...expired.endpoints].every((e) => !('sampledAt' in e)));
+  // Rows stored before the sample time was kept cannot be shown as OK.
+  const legacy = { ...state, endpoints: state.endpoints.map((e) => ({ ...e, sampledAt: undefined })) };
+  const old = evaluateNetwork(mainnet, legacy, DEFAULT_SETTINGS, now);
+  assert.equal(old.level, 'warn');
+  assert.ok(projectNetwork(mainnet, old, legacy, false).endpoints.every((e) => e.ok === false));
+  // Other networks' endpoint rows pass through untouched.
+  const other = [{ label: 'Seed', kind: 'dapi', url: 'https://seed.example', ok: true, status: 200, ms: 5 }];
+  assert.deepEqual(evaluateNetwork(mainnet, { ...state, endpoints: other }, DEFAULT_SETTINGS, now + 41_000).endpoints, other);
+});
+
+test('a DAPI on another chain is a failed DAPI and its chain ID is never stored', () => {
+  const evo = (dapi) => { const r = fixture(); r.evo = true; r.core.masternode = { state: 'READY', type: 'Evo', posePenalty: 0 }; r.dapi = { ok: true, height: 200, ...dapi }; return r; };
+  const disagree = (view) => view.rows[0].reasons.some((x) => x.text === 'DAPI and consensus chain IDs disagree');
+  const wrong = evo({ chainId: 'PRIVATE-OTHER-CHAIN' }), state = validateMainnetReport(wrong, now).hosts[0].probe.data.dapi;
+  assert.deepEqual([state.ok, state.chainId], [false, 'other']);
+  assert.doesNotMatch(JSON.stringify(validateMainnetReport(wrong, now)), /PRIVATE-OTHER-CHAIN/);
+  assert.ok(disagree(evaluate(wrong)));
+  assert.equal(evaluate(wrong).level, 'down');
+  assert.deepEqual(evaluate(wrong).summary.dapi, { ok: 0, total: 1 });
+  for (const [dapi, chainId] of [[{ chainId: 'evo1' }, 'evo1'], [{}, null], [{ chainId: '' }, null]]) {
+    const right = evo(dapi), stored = validateMainnetReport(right, now).hosts[0].probe.data.dapi;
+    assert.deepEqual([stored.ok, stored.chainId], [true, chainId]);
+    assert.ok(!disagree(evaluate(right)));
+    assert.deepEqual(evaluate(right).summary.dapi, { ok: 1, total: 1 });
+  }
 });

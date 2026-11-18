@@ -1,5 +1,6 @@
 // Turns agent state into what the board shows. Every status comes with the
 // concrete facts that produced it; there is no status without a reason.
+import { liveServiceEndpoints } from './mainnet.js';
 import { convergence, monitoringSummary } from './monitoring.js';
 import { COMPONENT_REPOS, SIDECAR_REPOS } from './settings.js';
 
@@ -260,11 +261,12 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
       platformSyncing: m.platformSyncing ?? null, newBans: m.newBans ?? null,
     };
   }
-  const endpointFailure = (state?.endpoints || []).some((e) => e.ok === false);
+  const endpoints = liveServiceEndpoints(state?.endpoints, now);
+  const endpointFailure = endpoints.some((e) => e.ok === false);
   const seedChains = summary.monitoring?.dapi.seedChains || [];
   const seedMismatch = seedChains.length > 1 || summary.monitoring?.dapi.seedHeightSpread > t.platformLagBlocks;
   const level = rows.reduce((a, r) => (r.host.duplicate || r.host.role === 'vpn' ? a : RANK[r.level] > RANK[a] ? r.level : a), 'ok');
-  return { level: reportStale ? 'unreachable' : building ? 'deploying' : (endpointFailure || seedMismatch) && RANK[level] < RANK.warn ? 'warn' : level === 'stopped' ? 'ok' : level, rows, summary, tags, generatedAt: state?.generatedAt || null, ageSeconds: state?.generatedAt ? Math.round((now - Date.parse(state.generatedAt)) / 1000) : null };
+  return { level: reportStale ? 'unreachable' : building ? 'deploying' : (endpointFailure || seedMismatch) && RANK[level] < RANK.warn ? 'warn' : level === 'stopped' ? 'ok' : level, rows, summary, tags, endpoints, generatedAt: state?.generatedAt || null, ageSeconds: state?.generatedAt ? Math.round((now - Date.parse(state.generatedAt)) / 1000) : null };
 }
 
 function chainMatches(chain, network) {
@@ -307,7 +309,7 @@ export function projectNetwork(network, evaluation, state, operator) {
     name: network.name, displayName: network.displayName, description: network.description || '', chainType: network.chainType, coreNetwork: network.coreNetwork,
     public: network.public, deployable: network.deployable, kind: network.kind || 'managed', upgradeScopes: network.upgradeScopes || null, images: network.images || null, dashmate: !!network.dashmate, lifecycle: network.lifecycle || null, observationWindow: network.observationWindow, operationTimeout: network.operationTimeout, level: evaluation.level, generatedAt: evaluation.generatedAt, ageSeconds: evaluation.ageSeconds,
     pollSeconds: state?.pollSeconds || null, discovery: state?.discovery ? { at: state.discovery.at, error: operator ? state.discovery.error : state.discovery.error ? 'discovery failed' : null } : null,
-    summary: evaluation.summary, endpoints: (state?.endpoints || []).map((e) => ({ label: e.label, kind: e.kind, url: e.url, status: e.status, ok: e.ok, ms: e.ms, error: e.error, height: e.height, version: e.version, chainId: e.chainId, state: e.state })),
+    summary: evaluation.summary, endpoints: (evaluation.endpoints ?? state?.endpoints ?? []).map((e) => ({ label: e.label, kind: e.kind, url: e.url, status: e.status, ok: e.ok, ms: e.ms, error: e.error, height: e.height, version: e.version, chainId: e.chainId, state: e.state })),
     hosts, journal: operator ? state?.journal || null : undefined,
   };
 }

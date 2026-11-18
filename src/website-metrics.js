@@ -2,9 +2,8 @@ export const METRICS = { ttfbMs: 'Time to first byte', totalMs: 'Total HTML resp
 export const valueOf = (sample, metric) => sample?.ok ? (sample[metric] ?? sample.phases?.[metric] ?? null) : null;
 export function segments(history, metric, start, end, interval = 300_000) {
   const groups = []; let current = [];
-  for (const s of history || []) {
-    const t = Date.parse(s.at), value = valueOf(s, metric);
-    if (t < start || t > end) continue;
+  const points = (history || []).map((s) => ({ t: Date.parse(s.at), value: valueOf(s, metric) })).filter((p) => p.t >= start && p.t <= end).sort((a, b) => a.t - b.t);
+  for (const { t, value } of points) {
     if (value == null || (current.length && t - current.at(-1).t > interval * 2)) {
       if (current.length) groups.push(current);
       current = [];

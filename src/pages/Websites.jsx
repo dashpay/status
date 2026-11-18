@@ -13,13 +13,14 @@ const utc = (t) => new Date(t).toISOString().replace('T', ' ').slice(0, 19) + ' 
 function History({ sites, now }) {
   const [metric, setMetric] = useState('ttfbMs');
   const [hours, setHours] = useState(24);
-  const [selected, setSelected] = useState(null);
+  const [selected, setSelected] = useState(null); // inspected time in ms, so it stays put as the window advances
   const end = now, start = end - hours * 3600_000;
   const groups = sites.map((s) => segments(s.history, metric, start, end));
   const max = Math.max(100, ...groups.flat(2).map((s) => s.value)) * 1.1;
   const x = (t) => 65 + (t - start) / (end - start) * 895;
   const y = (v) => 240 - v / max * 210;
-  const inspected = selected == null ? null : start + selected * (end - start);
+  const inspected = selected != null && selected >= start && selected <= end ? selected : null;
+  const select = (position) => setSelected(start + Math.max(0, Math.min(1, position)) * (end - start));
   const nearest = (site) => {
     const candidates = (site.history || []).filter((s) => Date.parse(s.at) >= start && Date.parse(s.at) <= end);
     return candidates.reduce((a, b) => !a || Math.abs(Date.parse(b.at) - inspected) < Math.abs(Date.parse(a.at) - inspected) ? b : a, null);
@@ -33,14 +34,14 @@ function History({ sites, now }) {
       </div>
       <div className="flex flex-wrap gap-4 text-[12px]">{sites.map((s, i) => <span key={s.site} style={{ color: color(i) }}>● {s.site}</span>)}<span className="text-dim">Lower is faster · milliseconds · UTC</span></div>
       <svg viewBox="0 0 990 285" className="w-full min-h-[160px]" role="img" aria-label={`${METRICS[metric]} history for ${names(sites)}; gaps indicate missing or failed checks`}
-        onPointerMove={(e) => { const r = e.currentTarget.getBoundingClientRect(); setSelected(Math.max(0, Math.min(1, ((e.clientX - r.left) / r.width * 990 - 65) / 895))); }} onPointerLeave={() => setSelected(null)}>
+        onPointerMove={(e) => { const r = e.currentTarget.getBoundingClientRect(); select(((e.clientX - r.left) / r.width * 990 - 65) / 895); }} onPointerLeave={() => setSelected(null)}>
         {[0, .5, 1].map((v) => <g key={v}><line x1="65" x2="960" y1={y(v * max)} y2={y(v * max)} stroke="#273342" /><text x="55" y={y(v * max) + 4} textAnchor="end" fill="#94a3b8" fontSize="12">{Math.round(v * max)}</text></g>)}
         {[0, .25, .5, .75, 1].map((v) => <text key={v} x={x(start + (end - start) * v)} y="266" textAnchor={v === 0 ? 'start' : v === 1 ? 'end' : 'middle'} fill="#94a3b8" fontSize="12">{new Date(start + (end - start) * v).toISOString().slice(hours > 24 ? 5 : 11, hours > 24 ? 10 : 16)}</text>)}
         {groups.map((g, i) => <g key={sites[i].site}>{g.map((points, j) => <g key={j}><polyline points={points.map((p) => `${x(p.t)},${y(p.value)}`).join(' ')} fill="none" stroke={color(i)} strokeWidth="2" />{points.map((p) => <circle key={p.t} cx={x(p.t)} cy={y(p.value)} r={points.length === 1 ? 4 : 2} fill={color(i)}><title>{sites[i].site}: {ms(p.value)} · {utc(p.t)}</title></circle>)}</g>)}</g>)}
         {inspected != null && <line x1={x(inspected)} x2={x(inspected)} y1="20" y2="240" stroke="#cbd5e1" strokeDasharray="4 4" />}
       </svg>
       <label className="text-[11px] text-dim block">Inspect time (drag, hover graph, or use arrow keys)
-        <input className="w-full block mt-1" type="range" aria-label="Inspect history time" min="0" max="1000" value={Math.round((selected ?? 1) * 1000)} onChange={(e) => setSelected(Number(e.target.value) / 1000)} />
+        <input className="w-full block mt-1" type="range" aria-label="Inspect history time" min="0" max="1000" value={Math.round(((inspected ?? end) - start) / (end - start) * 1000)} onChange={(e) => select(Number(e.target.value) / 1000)} />
       </label>
       <div className="text-[12px] mt-2 min-h-[3rem]" aria-live="polite">{inspected == null ? <span className="text-dim">Real five-minute samples. Blank areas mean no data; lines break across failed checks or gaps longer than ten minutes. History starts when monitoring is enabled.</span> : <><div className="text-dim">{utc(inspected)}</div>{sites.map((s, i) => { const sample = nearest(s); const close = sample && Math.abs(Date.parse(sample.at) - inspected) <= 300_000; return <div key={s.site} style={{ color: color(i) }}>{s.site}: {close ? `${sample.ok ? ms(valueOf(sample, metric)) : sample.error || 'Check failed'} · ${utc(sample.at)}` : 'No sample near this time'}</div>; })}</>}</div>
     </div>
@@ -78,6 +79,6 @@ export default function Websites() {
     <div className="mt-5 flex flex-wrap justify-between items-start gap-3"><div><h1 className="text-lg font-semibold">Website performance</h1><p className="text-dim mt-1">dash.dev &amp; dash.org · {data?.location || 'AWS status host'} · every 5 minutes</p></div><button className="btn" onClick={reload}>Refresh data</button></div>
     <p className="text-[12px] text-dim mt-3">HTTPS homepage checks from one AWS location, using fresh IPv4 connections and compression. TTFB is time to first byte of the final response, including redirects. Server wait includes network round-trip time. These are synthetic HTML checks, not global visitor latency, full-page load times or Core Web Vitals.</p>
     <div className="mt-3"><Err error={error} />{data && stale && <Err error={data.error || 'Collector data is stale. Last results are retained, not current health.'} />}</div>
-    {!data ? <Empty>Loading website measurements…</Empty> : !sites.length ? <Empty>Waiting for the first status-host checks. No history has been fabricated.</Empty> : <><History sites={sites} now={now} /><div className="grid lg:grid-cols-2 gap-4 mt-5">{sites.map((s) => <Site key={s.site} site={s} stale={stale} now={now} />)}</div><p className="text-dim text-[11px] mt-3">Last collection: {data.generatedAt ? utc(data.generatedAt) : '—'} · Seven days retained. Percentiles use successful checks only; small samples are not representative. Recommendations are HTML/header heuristics, not a browser audit.</p></>}
+    {!data ? <Empty>{error ? 'Website measurements are unavailable. Use Refresh data to try again.' : 'Loading website measurements…'}</Empty> : !sites.length ? <Empty>Waiting for the first status-host checks. No history has been fabricated.</Empty> : <><History sites={sites} now={now} /><div className="grid lg:grid-cols-2 gap-4 mt-5">{sites.map((s) => <Site key={s.site} site={s} stale={stale} now={now} />)}</div><p className="text-dim text-[11px] mt-3">Last collection: {data.generatedAt ? utc(data.generatedAt) : '—'} · Seven days retained. Percentiles use successful checks only; small samples are not representative. Recommendations are HTML/header heuristics, not a browser audit.</p></>}
   </>;
 }

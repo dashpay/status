@@ -69,9 +69,12 @@ export function useStream(fn) {
 export function useResource(path, match) {
   // State is keyed by path so a new path never shows the previous resource.
   const [state, setState] = useState({ path: null, data: null, error: null });
+  // Only the latest request may land: a slow older response must not replace newer data.
+  const seq = useRef(0);
   const reload = useCallback(() => {
     if (!path) return;
-    api(path).then((data) => setState({ path, data, error: null }), (error) => setState((s) => ({ ...s, path, error })));
+    const id = ++seq.current, latest = (apply) => (value) => { if (id === seq.current) apply(value); };
+    api(path).then(latest((data) => setState({ path, data, error: null })), latest((error) => setState((s) => ({ ...s, path, error }))));
   }, [path]);
   useEffect(() => { reload(); }, [reload]);
   const timer = useRef(null);
