@@ -63,7 +63,7 @@ test('requests are validated against the network and component repositories', ()
 });
 
 // Fake dashnet: writes the --out artifact each command would produce.
-function fakeDashnet(calls) {
+function fakeDashnet(calls, journal = { missing: true }) {
   return (binary, args) => {
     const child = new EventEmitter();
     child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
@@ -72,6 +72,14 @@ function fakeDashnet(calls) {
     const out = args[args.indexOf('--out') + 1];
     setImmediate(() => {
       const cmd = args[0];
+      if (cmd === 'managed-operation') {
+        if (journal.spawnError) { child.emit('error', new Error(journal.spawnError)); child.emit('close', -2); return; }
+        if (journal.missing) child.stderr.emit('data', 'dashnet: operation not found\n');
+        else if (journal.error) child.stderr.emit('data', journal.error + '\n');
+        else if (!journal.noOutput) writeFileSync(out, JSON.stringify(journal.record ? { record: journal.record } : journal));
+        child.emit('close', journal.missing || journal.error ? 1 : 0);
+        return;
+      }
       if (cmd === 'managed-import') writeFileSync(out, JSON.stringify({ id: 'a'.repeat(64), nodes: { 'seed-2': { components: { tenderdash: { image: 'dashpay/tenderdash:1.8.1', digests: ['dashpay/tenderdash@sha256:' + 'b'.repeat(64)] } } } } }));
       if (cmd === 'managed-enroll') { child.stderr.emit('data', 'runner: ' + 'c'.repeat(32) + '\nenrolled seed-2; services unchanged\n'); writeFileSync(out, '{}'); }
       if (cmd === 'managed-plan') writeFileSync(out, JSON.stringify({ id: 'd'.repeat(64), operation: 'upgrade', images: { 'seed-2': { tenderdash: 'index.docker.io/dashpay/tenderdash@sha256:' + 'e'.repeat(64) } } }));
@@ -81,11 +89,86 @@ function fakeDashnet(calls) {
         setTimeout(() => { child.stderr.emit('data', 'managed target seed-2 ready\nmanaged-verifying\nmanaged target seed-2 applied\nmanaged-verifying\n'); child.emit('close', 0); }, 150);
         return;
       }
-      child.emit('close', cmd === 'managed-operation' ? 1 : 0);
+      child.emit('close', 0);
     });
     return child;
   };
 }
+
+async function prepareWithJournal(journal, options) {
+  const root = mkdtempSync(join(tmpdir(), 'ops-journal-'));
+  const dirs = { data: root, private: join(root, 'private'), requests: join(root, 'req'), ops: join(root, 'ops'), work: join(root, 'work'), state: join(root, 'state') };
+  const calls = [];
+  const ops = createOps({ settings: () => settings, dirs, key: { path: '/key' }, pool: { knownHosts: () => 'x\n', pins: new Proxy({}, { get: () => ({ type: 'ssh-ed25519', key: 'k' }) }) }, binary: 'dashnet', log: () => {}, spawnImpl: fakeDashnet(calls, journal) });
+  mkdirSync(dirs.state, { recursive: true });
+  writeFileSync(join(dirs.state, 'testnet.json'), JSON.stringify({ hosts: [host('seed-2', 'seed', [['dashd', 'dashpay/dashd'], ['tenderdash', 'dashpay/tenderdash']])] }));
+  const id = '6c8139ad-e92f-40da-943d-1e001efaccb5', actor = { id: 9920871, login: 'ktechmidas' };
+  writeFileSync(join(dirs.requests, `${id}.json`), JSON.stringify({ type: 'create', id, network: 'testnet', action: 'upgrade', options, nodes: ['seed-2'], components: ['tenderdash'], images: { tenderdash: 'dashpay/tenderdash:1.8.2' }, actor }));
+  const read = () => JSON.parse(readFileSync(join(dirs.ops, `${id}.json`), 'utf8'));
+  const until = async (statuses) => {
+    for (let i = 0; i < 200; i++) { ops.tick(); if (statuses.includes(read().status)) return read(); await new Promise((r) => setTimeout(r, 5)); }
+    throw new Error(`operation did not settle: ${read().status}`);
+  };
+  await until(['review', 'failed']);
+  return { dirs, id, actor, calls, read, until };
+}
+
+test('requested concurrency reaches managed planner and ignored options cannot auto-run', async () => {
+  const { read, calls } = await prepareWithJournal({ record: { phase: 'enrolled', enrolled: { 'seed-2': true } } }, { concurrency: 3, pauseMining: false, autoRun: true });
+  const args = calls.find((a) => a[0] === 'managed-plan');
+  assert.equal(args[args.indexOf('--concurrency') + 1], '3');
+  // This old-executor fixture returns no rollout policy: fail before confirmation.
+  assert.equal(read().status, 'failed');
+  assert.match(read().error, /rollout|concurrency/);
+  assert.ok(!calls.some((a) => a[0] === 'managed-upgrade'));
+});
+
+test('journal failures stop before enrollment/planning and retain an actionable error', async (t) => {
+  for (const journal of [
+    { error: 'dashnet: unenrolled target in operation' },
+    { error: 'dashnet: AccessDeniedException: table not found' },
+    { error: 'dashnet: operation not found\nextra failure' },
+    { spawnError: 'spawn dashnet ENOENT' },
+    { noOutput: true },
+    { record: { enrolled: [] } },
+  ]) await t.test(JSON.stringify(journal), async () => {
+    const { read, calls, dirs, id } = await prepareWithJournal(journal);
+    const r = read();
+    assert.equal(r.status, 'failed');
+    assert.match(r.error, /Cannot read management journal:/);
+    if (journal.error) assert.ok(r.error.includes(journal.error.split('\n').at(-1)));
+    assert.equal(r.steps.at(-1).name, 'Read management journal');
+    assert.equal(r.steps.at(-1).status, 'failed');
+    assert.ok(!calls.some((a) => ['managed-enroll', 'managed-plan', 'managed-upgrade', 'managed-unlock'].includes(a[0])));
+    assert.ok(!readdirSync(join(dirs.work, id, '1')).some((f) => f.startsWith('journal-')), 'temporary journal result cleaned up');
+  });
+});
+
+test('successful journal reads reuse the exact instance enrollment', async () => {
+  const instanceId = host('seed-2', 'seed', []).instanceId;
+  const { read, calls } = await prepareWithJournal({ record: { phase: 'enrolled', enrolled: { 'seed-2': true }, instances: { 'seed-2': instanceId } } });
+  assert.equal(read().status, 'review');
+  assert.ok(calls.some((a) => a[0] === 'managed-plan'));
+  assert.ok(!calls.some((a) => a[0] === 'managed-enroll'));
+});
+
+test('a replacement instance still needs explicit enrollment', async () => {
+  const { read, calls } = await prepareWithJournal({ record: { phase: 'enrolled', enrolled: { 'seed-2': true }, instances: { 'seed-2': 'i-old' } } });
+  assert.equal(read().status, 'review');
+  assert.ok(calls.some((a) => a[0] === 'managed-enroll'));
+});
+
+test('a journal failure after confirmation stops before unlock or upgrade', async () => {
+  const journal = { record: { phase: 'enrolled', enrolled: { 'seed-2': true } } };
+  const { dirs, id, actor, read, until, calls } = await prepareWithJournal(journal);
+  const r = read();
+  assert.equal(r.status, 'review');
+  journal.error = 'dashnet: journal revision mismatch';
+  writeFileSync(join(dirs.requests, `${id}.confirm.json`), JSON.stringify({ type: 'confirm', id, network: 'testnet', planId: r.review.planId, actor }));
+  const failed = await until(['failed']);
+  assert.match(failed.error, /journal revision mismatch/);
+  assert.ok(!calls.some((a) => ['managed-unlock', 'managed-upgrade'].includes(a[0])));
+});
 
 test('operation lifecycle: request -> enroll -> plan -> review -> confirm -> upgrade', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ops-'));
@@ -245,13 +328,14 @@ test('platform reset: review from non-destructive stages; a failed wipe stops be
   const pool = { exec: async (h, cmd) => {
     const stage = cmd.split(' ')[4];
     calls.push(`${stage}:${h.name}`);
+    assert.equal(JSON.parse(Buffer.from(cmd.split(' ')[5], 'base64')).genesisProtocolVersion,15);
     const result = { baseline: { images: { drive: 'dashpay/drive:1' }, anchor: 10, epochTime: 3600, dashmate: 'dm', configFormatVersion: '4.2.0', tor: { enabled: false }, height: 100, tenderdashImage: 'dashpay/tenderdash:1' },
       anchor: { height: 99, hash: 'ab' }, canary: { checks: { epochTime: 3600, epochEnv: '3600', coreSectionUnchanged: true, anchor: 99 }, rendered: ['dynamic-compose.yml'] } }[stage] || {};
     const ok = !(stage === 'wipe' && h.name === failWipeOn);
     return JSON.stringify({ ok, stage, result, error: ok ? undefined : 'boom' });
   } };
   const records = [];
-  const r = { id: 'x1', network: 'devnet-moutai', steps: [], request: { network: 'devnet-moutai', images: { drive: 'dashpay/drive:2', dapi: 'dashpay/rs-dapi:2', tenderdash: 'dashpay/tenderdash:2' }, options: {} } };
+  const r = { id: 'x1', network: 'devnet-moutai', steps: [], request: { network: 'devnet-moutai', images: { drive: 'dashpay/drive:2', dapi: 'dashpay/rs-dapi:2', tenderdash: 'dashpay/tenderdash:2' }, options: {genesisProtocolVersion:15} } };
   const ctx = { step: () => () => {}, save: (x) => records.push(x.status), write: () => {} };
   const reset = createReset({ ctx, dirs, pool, getSettings: () => settings });
   await reset.prepareReset(r);

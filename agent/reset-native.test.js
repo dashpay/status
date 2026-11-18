@@ -14,6 +14,16 @@ test('dashnet reset is devnet-only and accepts Platform target versions but pres
   assert.throws(() => validateReset(settings, { network: 'devnet-sakura', options: { epochSeconds: 1 } }), /preserves epoch/);
 });
 
+test('reset PV is an optional uint32 for native and managed devnets, never a silently ignored value', () => {
+  for (const kind of ['dashnet', 'managed']) {
+    const settings = { networks: [{ name:'devnet-test', chainType:'devnet', kind }] };
+    const q = { network:'devnet-test', images:{drive:'dashpay/drive:new',dapi:'dashpay/rs-dapi:new',tenderdash:'dashpay/tenderdash:new'} };
+    for (const pv of [1, 14, 15, 4294967295]) assert.doesNotThrow(() => validateReset(settings, {...q,options:{genesisProtocolVersion:pv}}));
+    for (const pv of [0,-1,1.5,'15',true,4294967296]) assert.throws(() => validateReset(settings,{...q,options:{genesisProtocolVersion:pv}}), /Platform version/);
+    assert.doesNotThrow(() => validateReset(settings,q));
+  }
+});
+
 test('native reset binds every deployed validator, canaries all, excludes wallet, and refuses replacement hosts', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'native-reset-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -33,10 +43,11 @@ test('native reset binds every deployed validator, canaries all, excludes wallet
     assert.equal(q.node, host.name);
     assert.match(script, /class Reset:/);
     assert.equal(q.epochSeconds, null);
+    assert.equal(q.genesisProtocolVersion, 15);
     assert.deepEqual(q.images, {});
     calls.push([stage, host.name]);
     return JSON.stringify({ ok: fail !== `${stage}:${host.name}`, result: {
-      ...({ release: { sidecars:{} }, baseline: { images: { drive: 'installed@sha256:123' }, epochTime: 3600, height: 100, anchor: 10, dashmate: '5.0.0-beta.1', configFormatVersion: '5.0.0', tor: { enabled: true } }, anchor: { height: 99, hash: 'ab' }, canary: { checks: { coreSectionUnchanged: true }, rendered: [] } }[stage] || {}),
+      ...({ release: { sidecars:{} }, baseline: { images: { drive: 'installed@sha256:123' }, genesisProtocolVersion: 14, epochTime: 3600, height: 100, anchor: 10, dashmate: '5.0.0-beta.1', configFormatVersion: '5.0.0', tor: { enabled: true } }, anchor: { height: 99, hash: 'ab' }, canary: { checks: { coreSectionUnchanged: true, genesisProtocolVersion:15 }, rendered: [] } }[stage] || {}),
     } });
   } };
   const ctx = { step: () => () => {}, save: () => {}, write: () => {} };
@@ -47,10 +58,11 @@ test('native reset binds every deployed validator, canaries all, excludes wallet
     if (!checkOnly && fail === 'explorer') throw Error('Explorer not caught up');
     return {installed:true,indexed:8,chain:8};
   }, ctx, dirs, pool, journalImpl, getSettings: () => ({ networks: [{ name, chainType: 'devnet', coreNetwork: name, kind: 'dashnet' }] }) });
-  const record = () => ({ id: 'native-reset-test', network: name, request: { network: name, action: 'platform-reset' } });
+  const record = () => ({ id: 'native-reset-test', network: name, request: { network: name, action: 'platform-reset', options:{genesisProtocolVersion:15} } });
   const r = record();
   await reset.prepareReset(r);
   assert.equal(r.review.native, true);
+  assert.deepEqual(r.review.platformVersion,{current:[14],next:15});
   assert.equal(r.review.epoch.next, 3600);
   assert.deepEqual(calls.filter(([s]) => s === 'canary').map(([, h]) => h), ['validators-001', 'validators-002']);
   assert.ok(!calls.some(([s]) => ['wipe','apply','start'].includes(s)));

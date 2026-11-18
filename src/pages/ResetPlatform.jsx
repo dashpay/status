@@ -8,6 +8,7 @@ export default function ResetPlatform({ name }) {
   const session = useSession();
   const { data: n, error } = useResource(`/api/networks/${name}`);
   const [images, setImages] = useState(null);
+  const [pv, setPv] = useState('');
   const [epoch, setEpoch] = useState(3600);
   const [busy, setBusy] = useState(false);
   const [submitError, setSubmitError] = useState(null);
@@ -30,7 +31,7 @@ export default function ResetPlatform({ name }) {
   async function submit() {
     setBusy(true); setSubmitError(null);
     try {
-      const r = await api(`/api/networks/${name}/ops`, { method: 'POST', body: { action: 'platform-reset', images: Object.fromEntries(Object.entries(value).filter(([,v]) => v)), ...(!native ? { options: { epochSeconds: epoch } } : {}) } });
+      const r = await api(`/api/networks/${name}/ops`, { method: 'POST', body: { action: 'platform-reset', images: Object.fromEntries(Object.entries(value).filter(([,v]) => v)), options: { ...(!native ? { epochSeconds: epoch } : {}), ...(pv !== '' ? { genesisProtocolVersion: Number(pv) } : {}) } } });
       navigate(`/n/${name}/ops/${r.id}`);
     } catch (e) { setSubmitError(e); setBusy(false); }
   }
@@ -52,6 +53,9 @@ export default function ResetPlatform({ name }) {
             <label key={c} className="text-[12px] min-w-0"><div className="text-dim mb-1">{c} <span className="mono">{REPOS[c]}</span>{c !== 'helper' && <> · running <span className="mono break-all">{current(c)}</span></>}</div>
               <input className="input w-full min-w-0 mono" aria-label={`${c} target image`} placeholder={c === 'helper' ? 'Automatic: match Drive release (or keep installed for a digest)' : ''} value={value[c]} onChange={(e) => setImages({ ...value, [c]: e.target.value.trim() })} /></label>
           ))}
+          <label className="text-[12px]"><div className="text-dim mb-1">Initial Platform version (PV)</div>
+            <input className="input w-40 mono" aria-label="Initial Platform version (PV)" type="number" min="1" max="4294967295" step="1" placeholder="Keep installed" value={pv} onChange={(e) => setPv(e.target.value)} />
+            <div className="text-dim mt-1">Protocol version for the new genesis, not the image tag. Leave blank to preserve the installed genesis PV.{n.summary?.platform?.protocol != null && ` Current consensus PV: ${n.summary.platform.protocol}.`}</div></label>
           {!native && <label className="text-[12px]"><div className="text-dim mb-1">Epoch length (seconds; dashmate platform.drive.abci.epochTime)</div>
             <input className="input w-32 mono" value={epoch} onChange={(e) => setEpoch(Number(e.target.value) || 0)} /></label>}
         </div>
@@ -62,13 +66,13 @@ export default function ResetPlatform({ name }) {
           <li><b>Review</b> the version set, anchor and canary, then confirm.</li>
           <li><b>Wipe</b> Platform on all HPMNs {native ? '(only the Drive and Tenderdash chain-data volumes)' : <>(<span className="mono">dashmate reset --platform --force</span>), then reset only the seed’s Tenderdash data directory</>}.</li>
           {native && <li><b>Migrate Core automatically</b> when required by the release, with private backups, parallel restarts (up to 32 validators per batch) and fleet health checks. Core chain and wallets are never wiped.</li>}
-          <li><b>Apply</b> the images, anchor and epoch; render only Platform files; start the seed, then every HPMN.</li>
+          <li><b>Apply</b> the images, PV, anchor and epoch; render only Platform files; start the seed, then every HPMN.</li>
           {native && <li><b>Rebuild Explorer</b> for the new chain, keeping the previous index and a private backup. Installed Explorer images are preserved.</li>}
           <li><b>Verify</b> READY, containers and images, consensus, epochs at config/env/parsed layers, DAPI TLS, Core unchanged.</li>
         </ol>
       </Section>
       <div className="mt-5 flex items-center gap-3">
-        <button className="btn btn-primary" disabled={busy || unreachable.length > 0} onClick={submit}>{busy ? 'Submitting…' : 'Prepare (non-destructive)'}</button>
+        <button className="btn btn-primary" disabled={busy || unreachable.length > 0 || (pv !== '' && (!Number.isInteger(Number(pv)) || Number(pv) < 1 || Number(pv) > 0xffffffff))} onClick={submit}>{busy ? 'Submitting…' : 'Prepare (non-destructive)'}</button>
         <span className="text-dim text-[12px]">Nothing is wiped until you confirm the prepared review.</span>
       </div>
       {submitError && <div className="mt-3"><Err error={submitError} /></div>}

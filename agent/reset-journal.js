@@ -21,6 +21,20 @@ export function candidateYaml(yaml, images) {
   }
   return yaml;
 }
+export function resolutionNetwork(network, images) {
+  const result = clone(network);
+  result.nodes = result.nodes.filter((g) => g.role === 'validator');
+  need(result.nodes.length > 0, 'no validator groups to resolve');
+  if (result.aws?.provision?.amis) {
+    const arches = new Set(result.nodes.map((g) => g.architecture));
+    result.aws.provision.amis = Object.fromEntries(Object.entries(result.aws.provision.amis).filter(([arch]) => arches.has(arch)));
+  }
+  for (const [c, ref] of Object.entries(images)) {
+    need(RESET_COMPONENTS.includes(c), 'resolution outside Platform images');
+    result.images[c] = `docker.io/${ref.replace(/^(?:index\.)?docker\.io\//, '')}`;
+  }
+  return result;
+}
 export function transitionRecord(original, plan, id, desired, observations, at) {
   const record = clone(original), from = original.runtime?.images || Object.fromEntries(plan.targets.map((t) => [t.name, Object.fromEntries(t.images.map((i) => [i.component, i.pinned]))]));
   const baseline = {}, completed = {};
@@ -28,13 +42,14 @@ export function transitionRecord(original, plan, id, desired, observations, at) 
     const actual = observations[t.name];
     need(actual && hash(actual.images) === hash(from[t.name]), `installed images differ from dashnet journal on ${t.name}`);
     // Native Platform upgrades stage the wallet helper without an upgrade marker.
-    need(actual.previousId === (original.runtime?.upgradeId || '') || (t.role !== 'validator' && !actual.previousId), `native upgrade marker differs on ${t.name}`);
+    const scopedMarker = /^[a-f0-9]{64}$/.test(actual.previousId || '') && actual.markerEvidence?.phase === 'applied' && hash(actual.markerEvidence.images) === hash(actual.images);
+    need(scopedMarker || actual.previousId === (original.runtime?.upgradeId || '') || (t.role !== 'validator' && !actual.previousId), `native upgrade marker differs on ${t.name}`);
     need(desired[t.name].core === from[t.name].core, 'reset attempted to change Core');
     baseline[t.name] = actual.preservation;
     if (t.role === 'validator') completed[t.name] = false;
   }
   const sidecars = original.runtime?.sidecars || original.deployment.sidecars;
-  record.runtime = { deploymentId: plan.id, upgradeId: id, images: clone(from), ...(sidecars ? { sidecars } : {}) };
+  record.runtime = { ...(original.runtime || {}), deploymentId: plan.id, upgradeId: id, images: clone(from), ...(sidecars ? { sidecars } : {}) };
   record.upgrade = { planId: id, previousId: original.runtime?.upgradeId || '', phase: 'applying', from, to: desired, baseline, completed, observedAt: at, ...(sidecars ? { sidecars } : {}) };
   record.revision++; record.updatedAt = at; record.lastRunner = 'status-platform-reset-' + id; delete record.lastError;
   return record;
@@ -81,7 +96,9 @@ export function createResetJournal({ dirs, ctx, client }) {
     const candidate = join(dir(r), 'candidate.yaml'), lockPath = file(r, 'candidate-lock');
     writeAtomic(candidate, yaml, 0o600);
     if (Object.keys(images).length) {
-      need(await ctx.dashnet(r, ['resolve', '--network', candidate, '--out', lockPath], { bin: join(work(r), 'dashnet'), timeoutMs: 15 * 60_000 }) === 0, 'target image resolution failed');
+      const resolution = join(dir(r), 'candidate-resolve.json');
+      writeAtomic(resolution, JSON.stringify(resolutionNetwork(d.n, images)), 0o600);
+      need(await ctx.dashnet(r, ['resolve', '--network', resolution, '--out', lockPath], { bin: join(work(r), 'dashnet'), timeoutMs: 15 * 60_000 }) === 0, 'target image resolution failed');
       const lock = readJSON(lockPath);
       for (const t of d.plan.targets.filter((t) => t.role === 'validator')) for (const c of Object.keys(images)) {
         const image = lock.images.find((i) => i.component === c), platform = image?.platforms.find((p) => p.architecture === t.architecture && p.os === 'linux');
@@ -89,7 +106,7 @@ export function createResetJournal({ dirs, ctx, client }) {
         desired[t.name][c] = image.pinned.split('@')[0] + '@' + platform.digest;
       }
     }
-    r.nativePlanId = hash([r.execId || r.id, d.plan.id, snapshot.data.revision, desired]);
+    r.nativePlanId = hash([r.execId || r.id, d.plan.id, snapshot.data.revision, desired, r.genesisProtocolVersion ?? null]);
     r.nativeImages = Object.fromEntries(d.plan.targets.filter((t) => t.role === 'validator').map((t) => [t.name, Object.fromEntries(RESET_COMPONENTS.map((c) => [c, desired[t.name][c]]))]));
     r.nativeArchitectures = Object.fromEntries(d.plan.targets.map((t) => [t.name, t.architecture]));
     store(r, 'target-images', desired);
@@ -153,7 +170,7 @@ export function createResetJournal({ dirs, ctx, client }) {
     const path = join(dirs.data, 'devnets.json'), registry = readJSON(path, {});
     registry[r.network] = { ...registry[r.network], images:imagesOf(yaml), updatedAt:next.updatedAt };
     writeAtomic(path, JSON.stringify(registry));
-    writeAtomic(join(work(r), 'platform-reset.json'), JSON.stringify({ operation:r.id, anchor:r.anchor, verifiedAt:next.updatedAt }), 0o600);
+    writeAtomic(join(work(r), 'platform-reset.json'), JSON.stringify({ operation:r.id, anchor:r.anchor, ...(r.review?.platformVersion?.next != null ? { genesisProtocolVersion:r.review.platformVersion.next } : {}), verifiedAt:next.updatedAt }), 0o600);
     if (current.item.Owner) {
       const d = db(r);
       await d.client.send(new UpdateItemCommand({ TableName:d.TableName, Key:d.Key, UpdateExpression:'REMOVE #owner', ConditionExpression:'#owner = :owner AND #plan = :plan AND #rev = :rev',

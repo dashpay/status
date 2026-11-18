@@ -32,7 +32,7 @@ export function remediationView(state, { full = false, visibleNetworks = [], now
   const workerFresh = feed?.schemaVersion === 1 && fresh(feed.generatedAt, now) && fresh(workerAt, now) && Array.isArray(feed.cases);
   const observations = new Map((Array.isArray(feed?.cases) ? feed.cases : []).map((c) => [c.issueId, c]));
   const visible = new Set(visibleNetworks);
-  const visibleIssues = (state?.issues || []).filter((i) => full || i.domain !== 'network' || visible.has(i.scope));
+  const visibleIssues = (state?.issues || []).filter((i) => !i.remediationExcluded).filter((i) => full || i.domain !== 'network' || visible.has(i.scope));
   const displayedIssues = visibleIssues.filter((i) => !activityHidden(i, observations.get(i.id), state));
   const cases = displayedIssues.map((issue) => {
     const response = observations.get(issue.id);

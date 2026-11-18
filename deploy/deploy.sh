@@ -12,6 +12,11 @@ rev=$(git rev-parse HEAD)
 dashnet_ref=${DASHNET_REF:-$(git ls-remote https://github.com/dashpay/dash-network-go refs/heads/main | cut -f1)}
 echo "building status ${rev} with dash-network-go ${dashnet_ref}"
 docker build --quiet -t "dash-status:${rev}" --build-arg "RELEASE_REVISION=${rev}" --build-arg "DASHNET_REF=${dashnet_ref}" . >/dev/null
+# Fail before retagging/stopping services if an engine rebuild lost rollout support.
+# This exercises actual candidate agent modules and CLI, not only the web bundle.
+docker run --rm --network none --read-only \
+  -v "$src/scripts/check-rollout-backend.mjs:/check-rollout-backend.mjs:ro" \
+  --entrypoint node "dash-status:${rev}" /check-rollout-backend.mjs
 previous=$(docker image inspect dash-status:current --format '{{.Id}}' 2>/dev/null || true)
 install -d -o 1000 -g 1000 -m 0750 /srv/dash-status/data
 install -d -o 1000 -g 1000 -m 0700 /srv/dash-status/agent /srv/dash-status/agent/devnets

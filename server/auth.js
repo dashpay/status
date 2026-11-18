@@ -1,5 +1,6 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
+const SESSION_TTL_MS = 7 * 24 * 60 * 60_000;
 const nonce = () => randomBytes(32).toString('base64url');
 const equal = (a, b) => typeof a === 'string' && typeof b === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 const cookies = (req) => Object.fromEntries((req.headers.cookie || '').split(';').map((s) => s.trim().split('=')));
@@ -62,8 +63,8 @@ export function createAuth(config, { clientId = process.env.GITHUB_OAUTH_CLIENT_
         if (!response.ok) throw new Error('Identity unavailable');
         const u = await response.json(); if (!Number.isSafeInteger(u.id) || typeof u.login !== 'string') throw new Error('Identity invalid');
         if (sessions.size >= 5000) throw new Error('Session capacity');
-        const id = nonce(); sessions.set(id, { user: { id: u.id, login: u.login }, csrf: nonce(), expires: clock() + 8 * 60 * 60_000 }); persist();
-        res.cookie(sessionName, id, { ...options, maxAge: 8 * 60 * 60_000 });
+        const id = nonce(); sessions.set(id, { user: { id: u.id, login: u.login }, csrf: nonce(), expires: clock() + SESSION_TTL_MS }); persist();
+        res.cookie(sessionName, id, { ...options, maxAge: SESSION_TTL_MS });
         res.redirect('/');
       } catch { res.status(502).json({ error: 'GitHub sign-in failed; retry from the sign-in button' }); }
     });

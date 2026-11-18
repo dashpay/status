@@ -23,6 +23,20 @@ class ResetTests(unittest.TestCase):
                             'config': 'devnet-sakura', 'anchorHeight': 123}, self.root / 'host', self.root / 'state')
         self.r.state.mkdir(parents=True)
 
+    def test_pv_override_is_explicit_and_only_changes_genesis_app_version(self):
+        genesis = {'chain_id':'same','consensus_params':{'version':{'app_version':'14'},'block':{'max_bytes':'123'}}}
+        original = json.loads(json.dumps(genesis))
+        self.assertEqual(self.r.genesis_protocol(genesis), original)
+        self.r.q['genesisProtocolVersion'] = 15
+        result = self.r.genesis_protocol(genesis)
+        self.assertEqual(result['consensus_params']['version']['app_version'], '15')
+        original['consensus_params']['version']['app_version'] = '15'
+        self.assertEqual(result, original)
+        for pv in [0, -1, True, '15', 15.5, 4294967296]:
+            self.r.q['genesisProtocolVersion'] = pv
+            with self.assertRaisesRegex(mod.Fail, 'Platform version'):
+                self.r.genesis_protocol(genesis)
+
     def containers(self):
         return {s: {'Id': s, 'Mounts': [{'Type': 'volume', 'Name': s+'-volume', 'Destination': d}]}
                 for s,d in mod.DATA_MOUNTS.items()}
@@ -69,7 +83,7 @@ class ResetTests(unittest.TestCase):
             'config.json': '{}', '.envs': 'UNCHANGED=1', '.dashnet-compose.json': '{}',
             'validators-001/core/dash.conf': 'rendered salted core',
             'validators-001/platform/gateway/ssl/private.key': 'not-a-real-key-staged',
-            'validators-001/platform/drive/tenderdash/genesis.json': '{"initial_core_chain_locked_height":123}',
+            'validators-001/platform/drive/tenderdash/genesis.json': '{"initial_core_chain_locked_height":123,"consensus_params":{"version":{"app_version":"15"}}}',
             'validators-001/platform/drive/tenderdash/node_key.json': '{"test":"identity"}',
         }
         for name, data in files.items():
@@ -87,7 +101,7 @@ class ResetTests(unittest.TestCase):
             self.r.apply()
         self.assertEqual(core.read_text(), 'live exact core')
         self.assertEqual(ssl.read_text(), 'live mock certificate key')
-        self.assertEqual(mod.read(self.r.root / 'platform/inputs.json'), {'genesisCoreHeight':123,'peers':['same']})
+        self.assertEqual(mod.read(self.r.root / 'platform/inputs.json'), {'genesisCoreHeight':123,'initialProtocolVersion':15,'peers':['same']})
         self.assertEqual(mod.read(self.r.root / 'platform/identity.json'), {n:mod.digest(self.r.td/n) for n in ['genesis.json','node_key.json']})
         (stage / '.envs').write_text('tampered')
         with patch.object(self.r, 'baseline_record', return_value={}), patch.object(self.r, 'preserved'):

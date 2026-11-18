@@ -34,6 +34,14 @@ def need(cond, msg):
         raise Fail(msg)
 
 
+def genesis_protocol(genesis):
+    version = Q.get('genesisProtocolVersion')
+    if version is not None:
+        need(type(version) is int and 1 <= version <= 0xffffffff, 'invalid Platform version (PV)')
+        genesis['consensus_params']['version']['app_version'] = str(version)
+    return genesis
+
+
 def run(args, timeout=300, env=None, cwd=None, check=True, user=None, secret=False):
     if user:
         args = ['sudo', '-H', '-u', user, *(['env'] + [f'{k}={v}' for k, v in (env or {}).items()] if env else []), *args]
@@ -176,6 +184,7 @@ def baseline():
                    dashmate=run(['dashmate', '--version'], user='dashmate', cwd='/home/dashmate').strip(),
                    platform=platform_containers(), images=dict(drive=conf['platform']['drive']['abci']['docker']['image'],
                    dapi=conf['platform']['dapi']['rsDapi']['docker']['image'], tenderdash=conf['platform']['drive']['tenderdash']['docker']['image']),
+                   genesisProtocolVersion=int(json.loads((DM_HOME / CFG / 'platform/drive/tenderdash/genesis.json').read_text())['consensus_params']['version']['app_version']),
                    epochTime=conf['platform']['drive']['abci'].get('epochTime'),
                    anchor=conf['platform']['drive']['tenderdash']['genesis'].get('initial_core_chain_locked_height'))
     else:
@@ -187,7 +196,7 @@ def baseline():
         td = inspect('tenderdash') or next((x for x in containers() if 'tenderdash' in x['Config']['Image']), None)
         genesis = json.loads((SEED / 'tenderdash' / 'config' / 'genesis.json').read_text())
         out.update(dataDir=seed_dir_meta(), compose=sha(SEED_COMPOSE), tenderdashImage=td['Config']['Image'] if td else None, tenderdashId=td['Id'] if td else None,
-                   genesisChainId=genesis.get('chain_id'), anchor=genesis.get('initial_core_chain_locked_height'),
+                   genesisChainId=genesis.get('chain_id'), genesisProtocolVersion=int(genesis['consensus_params']['version']['app_version']), anchor=genesis.get('initial_core_chain_locked_height'),
                    nodeKey=sha(SEED / 'tenderdash' / 'config' / 'node_key.json'))
     save_json('baseline.json', out)
     return out
@@ -245,6 +254,7 @@ def _render(base, apply_back):
     p['drive']['tenderdash']['docker']['image'] = Q['images']['tenderdash']
     p['drive']['tenderdash']['genesis']['initial_core_chain_locked_height'] = int(Q['anchorHeight'])
     p['drive']['abci']['epochTime'] = int(Q['epochSeconds'])
+    genesis_protocol(p['drive']['tenderdash']['genesis'])
     (home / 'config.json').write_text(json.dumps(doc, indent=2))
     os.lchown(home / 'config.json', dm.pw_uid, dm.pw_gid)
     run(['dashmate', 'config', 'render', f'--config={CFG}'], user='dashmate', env=env, cwd='/home/dashmate', timeout=300)
@@ -270,9 +280,10 @@ def _render(base, apply_back):
     live_key, new_key = [json.loads((root / td / 'node_key.json').read_text()) for root in (DM_HOME, home)]
     need(live_key == new_key, 'rendered Tenderdash node key differs from the live node key')
     live_g, new_g = [json.loads((root / td / 'genesis.json').read_text()) for root in (DM_HOME, home)]
+    genesis_protocol(live_g)
     changed = sorted(k for k in set(live_g) | set(new_g) if k != 'initial_core_chain_locked_height' and live_g.get(k) != new_g.get(k))
     need(not changed, f'rendered genesis changes more than the anchor: {changed}')
-    checks.update(nodeKeyUnchanged=True, genesisChainId=new_g.get('chain_id'), genesisOnlyAnchorChanged=True)
+    checks.update(nodeKeyUnchanged=True, genesisChainId=new_g.get('chain_id'), genesisOnlyAnchorChanged=Q.get('genesisProtocolVersion') is None, genesisProtocolVersion=int(new_g['consensus_params']['version']['app_version']))
     rendered = []
     for tpl in sorted(Path('/usr/lib/dashmate/templates/platform').rglob('*.dot')):
         rel = Path('platform') / tpl.relative_to('/usr/lib/dashmate/templates/platform').with_suffix('')
@@ -354,6 +365,7 @@ def apply():
     genesis_path = SEED / 'tenderdash' / 'config' / 'genesis.json'
     g = json.loads(genesis_path.read_text())
     g['initial_core_chain_locked_height'] = int(Q['anchorHeight'])
+    genesis_protocol(g)
     tmp = genesis_path.with_name('.genesis.json.tmp')
     st = genesis_path.stat()
     tmp.write_text(json.dumps(g, indent=2))
@@ -402,6 +414,8 @@ def verify():
     sync = core_cli(c, 'mnsync', 'status')
     out = dict(core=dict(unchanged=True, id=ident['id'][:12], synced=bool(sync.get('IsSynced')), height=info['blocks']))
     genesis = json.loads(((DM_HOME / CFG / 'platform' / 'drive' / 'tenderdash') if ROLE == 'hpmn' else (SEED / 'tenderdash' / 'config')).joinpath('genesis.json').read_text())
+    need(genesis == genesis_protocol(json.loads(json.dumps(genesis))), 'wrong reset Platform version')
+    out['genesisProtocolVersion'] = int(genesis['consensus_params']['version']['app_version'])
     out['anchor'] = genesis.get('initial_core_chain_locked_height')
     need(int(out['anchor'] or 0) == int(Q['anchorHeight']), f"live genesis anchor {out['anchor']}, expected {Q['anchorHeight']}")
     if ROLE == 'seed':

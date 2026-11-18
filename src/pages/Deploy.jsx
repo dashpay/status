@@ -1,3 +1,4 @@
+import RolloutOptions from '../RolloutOptions.jsx';
 import { useEffect, useMemo, useState } from 'react';
 import { api, canOperate, navigate, useResource, useSession, ROLE_LABEL, ago } from '../lib.js';
 import { Dot, Empty, Err, Link, Section } from '../ui.jsx';
@@ -5,7 +6,7 @@ import { COMPONENTS, OPERABLE, REPOS, cmp, helperFor, imageTag, newestRelease, r
 
 // Plain-language actions; the dashnet command runs underneath (shown in the header).
 const ACTIONS = [
-  { id: 'upgrade', title: 'Upgrade images', text: 'Change the version of selected components. Each image is pinned by digest and swapped one host at a time; the next host waits until the whole fleet passes the health check.' },
+  { id: 'upgrade', title: 'Upgrade images', text: 'Change the version of selected components. Images are pinned by digest and replaced in the batches you choose; every batch must pass health and quorum checks.' },
   { id: 'deploy', title: 'Restart stopped containers', text: 'Recovery: start containers that are stopped (crash, reboot, deliberate stop) with exactly the image and settings recorded at enrollment. No version change, not for new nodes.' },
   { id: 'doctor', title: 'Health check', text: 'Read-only. Observes each host twice across the observation window: services running, Core synced and advancing with ChainLocks, masternode READY, Platform advancing in agreement, DAPI answering.' },
   { id: 'enroll', title: 'Enroll hosts', text: 'One-time, changes nothing running: records each host\'s container setup (images, commands, mounts) as a root-only recovery file and in the shared dashnet journal. Upgrades and restarts need it; they enroll new hosts automatically.' },
@@ -21,6 +22,8 @@ export default function Deploy({ name }) {
   const [picked, setPicked] = useState(params.get('nodes') ? new Set(params.get('nodes').split(',').filter(Boolean)) : null);
   const [components, setComponents] = useState(new Set(params.get('components')?.split(',').filter(Boolean) || []));
   const [images, setImages] = useState({});
+  const [concurrency, setConcurrency] = useState(1);
+  const [pauseMining, setPauseMining] = useState(false);
   const [window, setWindow] = useState('');
   const [timeout, setTimeoutValue] = useState('');
   const [busy, setBusy] = useState(false);
@@ -32,7 +35,7 @@ export default function Deploy({ name }) {
   const selected = picked ?? healthy;
   const setSelected = (next) => setPicked((p) => (typeof next === 'function' ? next(p ?? healthy) : next));
   const hosts = useMemo(() => (n?.hosts || []).filter((h) => OPERABLE.includes(h.role) && !h.duplicate), [n]);
-  // dash-network-go upgrades every validator, one at a time; there is no node selection.
+  // This form selects the whole native validator fleet; scoped APIs remain available.
   const chosen = native ? hosts.filter((h) => h.role === 'validator') : hosts.filter((h) => selected.has(h.name));
   const coreUpgradable = !native || (n?.upgradeScopes || []).includes('core');
   // On dashmate-rendered devnets the helper never runs: it is the dashmate
@@ -89,7 +92,7 @@ export default function Deploy({ name }) {
   async function submit() {
     setBusy(true); setSubmitError(null);
     try {
-      const body = { action, nodes: native ? [] : chosen.map((h) => h.name), components: needsComponents ? activeComponents : [], images: action === 'upgrade' ? Object.fromEntries(activeComponents.map((c) => [c, images[c]])) : {}, options: { ...(window ? { observationWindow: window } : {}), ...(timeout ? { timeout } : {}), ...(needsComponents ? { autoRun } : {}) } };
+      const body = { action, nodes: native ? [] : chosen.map((h) => h.name), components: needsComponents ? activeComponents : [], images: action === 'upgrade' ? Object.fromEntries(activeComponents.map((c) => [c, images[c]])) : {}, options: { ...(action === 'upgrade' ? { concurrency, pauseMining } : {}), ...(window ? { observationWindow: window } : {}), ...(timeout ? { timeout } : {}), ...(needsComponents ? { autoRun } : {}) } };
       const r = await api(`/api/networks/${name}/ops`, { method: 'POST', body });
       navigate(`/n/${name}/ops/${r.id}`);
     } catch (e) { setSubmitError(e); setBusy(false); }
@@ -116,7 +119,7 @@ export default function Deploy({ name }) {
 
       {native ? (
         <Section title={`2 · Nodes · all ${chosen.length} validators`}>
-          <div className="panel p-3 text-[12px] text-dim">dash-network-go withdraws one node at a time and requires the whole fleet (advancing consensus, common block hashes, DAPI, membership) to be healthy before the next. A Core upgrade runs first on every node (validators, then the mining node); Platform images then roll across the validators. {coreUpgradable ? '' : <span className="lv-warn">This devnet was created with a dash-network-go that cannot upgrade Core; newer devnets can.</span>}</div>
+          <div className="panel p-3 text-[12px] text-dim">Each batch checks affected services and current validator quorum before the next batch. There is no fixed four-minute delay per node. A Core upgrade runs first on every node (validators, then the mining node); Platform images then roll across the validators. {coreUpgradable ? '' : <span className="lv-warn">This devnet was created with a dash-network-go that cannot upgrade Core; newer devnets can.</span>}</div>
         </Section>
       ) : (
       <Section title={`2 · Nodes · ${chosen.length} selected`} right={
@@ -172,9 +175,10 @@ export default function Deploy({ name }) {
 
       <Section title={`${needsComponents ? 4 : 3} · Options`}>
         <div className="panel p-3 flex flex-wrap gap-6 items-end">
-          <label className="text-[12px]"><div className="text-dim mb-1">Observation window (health gap between checks)</div><input className="input w-28 mono" placeholder={n.observationWindow} value={window} onChange={(e) => setWindow(e.target.value.trim())} /></label>
+          {action === 'upgrade' && <RolloutOptions concurrency={concurrency} setConcurrency={setConcurrency} pauseMining={pauseMining} setPauseMining={setPauseMining} native={native} miningEnabled={native || n.chainType === 'testnet'} />}
+          {action !== 'upgrade' && <label className="text-[12px]"><div className="text-dim mb-1">Observation window</div><input className="input w-28 mono" placeholder={n.observationWindow} value={window} onChange={(e) => setWindow(e.target.value.trim())} /></label>}
           {(action === 'upgrade' || action === 'deploy') && <label className="text-[12px]"><div className="text-dim mb-1">Operation timeout per node</div><input className="input w-28 mono" placeholder={n.operationTimeout} value={timeout} onChange={(e) => setTimeoutValue(e.target.value.trim())} /></label>}
-          <div className="text-dim text-[11.5px] max-w-[520px]">Defaults come from Settings. Upgrades withdraw one host at a time; validators additionally require the remaining quorum to be healthy before each withdrawal.</div>
+          <div className="text-dim text-[11.5px] max-w-[520px]">Timeout defaults come from Settings. Upgrades continue when the changed nodes are ready, with no fixed four-minute delay between nodes.</div>
           {needsComponents && <label className="flex items-center gap-2 text-[12px] cursor-pointer"><input type="checkbox" checked={autoRun} onChange={(e) => setAutoRun(e.target.checked)} />
             <span>Start as soon as the plan is ready <span className="text-dim">(the exact plan stays on the operation page; cancel any time)</span></span></label>}
         </div>

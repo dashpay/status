@@ -1,0 +1,35 @@
+# On-demand key access. Web gets a Unix socket, never SSH or cloud credentials.
+services:
+  web:
+    environment:
+      DEVNET_KEYS_SOCKET: /key-access/keys.sock
+    volumes:
+      - /srv/dash-status/key-access:/key-access:ro
+  keys:
+    image: dash-status:current
+    pull_policy: never
+    init: true
+    user: "1000:1000"
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    command: [node, agent/devnet-keys-service.js]
+    environment:
+      STATUS_DATA_DIR: /data
+      AGENT_PRIVATE_DIR: /agent
+      DEVNET_KEYS_SOCKET: /key-access/keys.sock
+    volumes:
+      - /srv/dash-status/data:/data:ro
+      - /srv/dash-status/agent:/agent:ro
+      - /srv/dash-status/key-access:/key-access
+    healthcheck:
+      test: [CMD, node, -e, "const n=require('net').connect('/key-access/keys.sock');n.on('connect',()=>{n.end();process.exit(0)});n.on('error',()=>process.exit(1));setTimeout(()=>process.exit(1),3000)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: "3" }

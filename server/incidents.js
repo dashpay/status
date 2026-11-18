@@ -339,7 +339,8 @@ export function deriveIssues({ settings, states, ci, aws, operations = [], maint
       else if (a.state === 'ALARM') add('aws', a.region, a.name, 'aws_alarm', 'warning', 'aws:health', { state: a.state }, health.at);
     }
   }
-  return { issues, sources, checks, samples, suppressions, jobSuccesses };
+  return { issues, sources, checks, samples, suppressions, jobSuccesses,
+    excludedCiHosts: (Array.isArray(settings.remediation?.excludedCiHosts) ? settings.remediation.excludedCiHosts : []).filter((id) => typeof id === 'string') };
 }
 
 export function reconcile(previous, derived, now = Date.now()) {
@@ -360,7 +361,8 @@ export function reconcile(previous, derived, now = Date.now()) {
     events.push({ schemaVersion: 1, eventId: `${issue.id}:${revision}`, occurredAt: iso(now), transition, issue: structuredClone(issue) });
   };
   // `exempt` marks a check the network-wide hold must not cover (a crash loop).
-  const suppressed = (issue, check) => check?.suppressed === true || (check?.exempt !== true && issue.domain === 'network' && derived.suppressions?.[issue.scope] === true);
+  const excluded = (issue) => issue?.domain === 'ci' && (derived.excludedCiHosts || []).includes(issue.scope);
+  const suppressed = (issue, check) => excluded(issue) || check?.suppressed === true || (check?.exempt !== true && issue.domain === 'network' && derived.suppressions?.[issue.scope] === true);
   const positive = (issue, check) => {
     const s = derived.sources?.[check?.sourceKey];
     const at = Date.parse(check?.observedAt), lastFault = Date.parse(issue.lastFaultAt || issue.observedAt || issue.firstSeen);
@@ -447,7 +449,16 @@ export function reconcile(previous, derived, now = Date.now()) {
     }
   }
   state.issues = [...existing.values()].filter((i) => i.status === 'open' || now - Date.parse(i.resolvedAt) < 30 * 86400_000);
-  state.outbox = [...(state.outbox || []), ...events];
+  // Exclusion is not recovery. Retain observations/history and withdraw only
+  // undelivered remediation events; the broker rechecks suppressed live issues.
+  for (const issue of state.issues) {
+    issue.remediationExcluded = excluded(issue);
+    if (issue.remediationExcluded) issue.suppressed = true;
+  }
+  const pending = [...(state.outbox || []), ...events];
+  state.quarantined = [...(state.quarantined || []), ...pending.filter((e) => excluded(e.issue))
+    .map((event) => ({ event, at: iso(now), reason: 'owner-configured remediation exclusion' }))];
+  state.outbox = pending.filter((e) => !excluded(e.issue));
   state.revisionCounters = counters;
   const samples = { ...(state.explorerSamples || {}) };
   for (const [key, sample] of Object.entries(derived.samples || {})) {

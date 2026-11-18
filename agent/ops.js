@@ -2,6 +2,7 @@
 //
 // The web process may only create request files; this module owns operation
 // records, logs and every dashnet artifact. One operation runs per network.
+import { reviewedRollout, rolloutArgs, rolloutFor, trackRollout } from '../shared/rollout.js';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -19,7 +20,8 @@ const IMAGE = (component) => new RegExp(`^(docker\\.io/)?${COMPONENT_REPOS[compo
 export function manifestFor(settings, network, state) {
   const targets = [], excluded = [];
   for (const h of state?.hosts || []) {
-    if (!['validator', 'masternode', 'seed'].includes(h.role) || h.duplicate) continue;
+    const miner = network.chainType === 'testnet' && ['miner-1', 'miner-2'].includes(h.name) && h.role === 'miner';
+    if ((!['validator', 'masternode', 'seed'].includes(h.role) && !miner) || h.duplicate) continue;
     const why = h.state !== 'running' ? h.state : !h.publicIp ? 'no public address' : !h.tagged ? `missing ${settings.aws.tagKey} tag` : null;
     const containers = h.probe?.data?.containers || h.lastGood?.data?.containers;
     if (why || !containers) { excluded.push({ name: h.name, reason: why || 'not yet probed' }); continue; }
@@ -29,11 +31,11 @@ export function manifestFor(settings, network, state) {
       if (component && !map[component]) map[component] = c.name;
     }
     let chosen = map;
-    if (h.role === 'masternode') chosen = map.core ? { core: map.core } : null;
+    if (h.role === 'masternode' || miner) chosen = map.core ? { core: map.core } : null;
     if (h.role === 'seed') chosen = map.tenderdash ? Object.fromEntries(['core', 'tenderdash'].filter((c) => map[c]).map((c) => [c, map[c]])) : null;
     if (h.role === 'validator' && !['core', 'drive', 'tenderdash', 'dapi', 'gateway'].every((c) => map[c])) chosen = null;
     if (!chosen) { excluded.push({ name: h.name, reason: 'expected containers not found' }); continue; }
-    targets.push({ name: h.name, instanceId: h.instanceId, address: h.publicIp, architecture: h.arch, role: h.role, containers: chosen });
+    targets.push({ name: h.name, instanceId: h.instanceId, address: h.publicIp, architecture: h.arch, role: miner ? 'core' : h.role, ...(miner ? { miningService: 'dashd-generate-miner.service' } : {}), containers: chosen });
   }
   return {
     manifest: {
@@ -71,8 +73,10 @@ export function validateRequest(settings, q, registry = {}) {
     return { lifecycle: true };
   }
   const network = settings.networks.find((n) => n.name === q.network);
+  const rollout = rolloutFor(q);
+  if (rollout && !['testnet', 'devnet'].includes(network?.chainType)) throw new Error('rollout controls support Testnet and devnets only');
   if (network?.kind === 'dashnet') {
-    // Console devnets: dash-network-go native upgrade (all validators) and doctor.
+    // Native devnets support explicitly scoped rollouts; empty nodes retains the legacy fleet scope.
     if (!['upgrade', 'doctor'].includes(q.action)) throw new Error('console devnets support upgrade and health check');
     if (!registry[q.network] || registry[q.network].status !== 'ready') throw new Error('devnet is not ready');
     const components = q.components || [], images = q.images || {};
@@ -81,13 +85,20 @@ export function validateRequest(settings, q, registry = {}) {
       // dashnet upgrades a network-ready deployment only.
       if (['starting', 'stopped'].includes(registry[q.network].platform)) throw new Error('Platform has not started on this devnet yet; upgrade once its Platform operation has finished');
       const core = (registry[q.network].upgradeScopes || []).includes('core');
-      const allowed = ['drive', 'dapi', 'gateway', 'helper', 'tenderdash', ...(core ? ['core'] : [])];
+      const allowed = ['drive', 'dapi', 'gateway', 'helper', 'tenderdash', ...(core ? ['core', 'miner'] : [])];
+      if (!Array.isArray(q.nodes || []) || (q.nodes || []).length > 200 || new Set(q.nodes || []).size !== (q.nodes || []).length || !(q.nodes || []).every((n) => /^[a-z][a-z0-9-]{0,62}$/.test(n))) throw new Error('nodes must be a unique list of host names');
+      if (q.options?.allowCoreConfigRestart !== undefined && typeof q.options.allowCoreConfigRestart !== 'boolean') throw new Error('allowCoreConfigRestart must be boolean');
+      if ((components.includes('miner') || q.options?.allowCoreConfigRestart) && !q.nodes?.length) throw new Error('miner pins and Core config restarts require explicit nodes');
+      if (q.options?.allowCoreConfigRestart && !components.some((c) => ['drive', 'dapi', 'helper', 'tenderdash', 'gateway'].includes(c))) throw new Error('Core config restart applies to Platform upgrades only');
       if (components.includes('core') && !core) throw new Error('this devnet was created with a dash-network-go that cannot upgrade Core; devnets created since Core upgrades landed can');
       if (!components.length || components.some((c) => !allowed.includes(c)) || new Set(components).size !== components.length) throw new Error(`select from ${allowed.join(', ')}`);
-      for (const c of components) if (!IMAGE(c).test(images[c] || '')) throw new Error(`${c}: image must be ${COMPONENT_REPOS[c]}:<tag> or @sha256:<digest>`);
+      for (const c of components) {
+        const repository = c === 'miner' ? 'core' : c;
+        if (!IMAGE(repository).test(images[c] || '') || (c === 'miner' && !/@sha256:[0-9a-f]{64}$/.test(images[c] || ''))) throw new Error(`${c}: image must be ${COMPONENT_REPOS[repository]}${c === 'miner' ? '@sha256:<digest>' : ':<tag> or @sha256:<digest>'}`);
+      }
       if (Object.keys(images).some((c) => !components.includes(c))) throw new Error('image for an unselected component');
     } else if (components.length) throw new Error('components apply to upgrade only');
-    return { network, native: true, components, images };
+    return { network, native: true, components, images, rollout };
   }
   if (!network?.deployable) throw new Error('network is not deployable');
   if (!ACTIONS.has(q.action)) throw new Error('unsupported action');
@@ -104,7 +115,7 @@ export function validateRequest(settings, q, registry = {}) {
   const window = q.options?.observationWindow || network.observationWindow;
   const timeout = q.options?.timeout || network.operationTimeout;
   if (!d.test(window) || !d.test(timeout)) throw new Error('durations look like 4m / 110m');
-  return { network, window, timeout, components, images };
+  return { network, window, timeout, components, images, rollout };
 }
 
 export function createOps({ settings: getSettings, dirs, key, pool, binary, onChange = () => {}, log = console.log, spawnImpl = spawn, devnetsImpl }) {
@@ -183,7 +194,10 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
 
   async function prepare(r) {
     const s = getSettings();
-    const { network, components, images } = validateRequest(s, r.request);
+    const { network, components, images, rollout } = validateRequest(s, r.request);
+    const miners = rollout?.pauseMining ? ['miner-1', 'miner-2'] : [];
+    if (miners.length && network.chainType !== 'testnet') throw new Error('managed mining controls require legacy Testnet; native devnets use their deployment miner');
+    const required = [...new Set([...r.request.nodes, ...miners])];
     // Each preparation gets fresh artifacts; dashnet never overwrites outputs.
     r.attempt = (r.attempt || 0) + 1;
     const dir = join(work, r.id, String(r.attempt)); mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -193,7 +207,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     const state = await readState(network.name);
     const { manifest, excluded } = manifestFor(s, network, state);
     const names = new Set(manifest.targets.map((t) => t.name));
-    const missing = r.request.nodes.filter((n) => !names.has(n));
+    const missing = required.filter((n) => !names.has(n));
     if (missing.length) { done('failed'); throw new Error(`not operable: ${missing.map((n) => `${n} (${excluded.find((e) => e.name === n)?.reason || 'unknown'})`).join(', ')}`); }
     writeFileSync(join(dir, 'manifest.json'), JSON.stringify(manifest, null, 1), { mode: 0o600 });
     writeFileSync(join(dir, 'known_hosts'), pool.knownHosts(manifest.targets.map((t) => ({ instanceId: t.instanceId }))), { mode: 0o600 });
@@ -205,14 +219,16 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     const code = await dashnet(r, ['managed-import', '--manifest', join(dir, 'manifest.json'), ...access(dir), '--timeout', '6m', '--out', join(dir, 'snapshot.json')], { timeoutMs: 7 * 60_000 });
     const snapshot = readJSON(join(dir, 'snapshot.json'));
     if (!snapshot) { done('failed'); throw new Error('import produced no snapshot'); }
-    const unavailable = r.request.nodes.filter((n) => { const o = snapshot.nodes?.[n]; return !o || o.error || o.problems?.length; });
+    const unavailable = required.filter((n) => { const o = snapshot.nodes?.[n]; return !o || o.error || o.problems?.length; });
     done(code === 0 ? 'ok' : 'warn', code === 0 ? `snapshot ${snapshot.id.slice(0, 12)}` : 'some unselected targets incomplete');
     if (unavailable.length) throw new Error(`selected nodes not observable: ${unavailable.map((n) => `${n}: ${snapshot.nodes?.[n]?.error || snapshot.nodes?.[n]?.problems?.join(', ') || 'missing'}`).join('; ')}`);
 
     if (r.request.action === 'doctor') return { dir, snapshot, manifest };
+    done = step(r, 'Read management journal');
     const journal = await journalFor(dir);
+    done('ok', journal ? `phase ${journal.record.phase}` : 'not enrolled');
     const enrolled = new Set(Object.entries(journal?.record?.enrolled || {}).filter(([n, v]) => v && (!journal.record.instances || journal.record.instances[n] === manifest.targets.find((t) => t.name === n)?.instanceId)).map(([n]) => n));
-    const toEnroll = r.request.nodes.filter((n) => !enrolled.has(n));
+    const toEnroll = required.filter((n) => !enrolled.has(n));
     if (toEnroll.length) {
       done = step(r, `Enroll ${toEnroll.length} node(s) (no restarts)`);
       const c = await dashnet(r, ['managed-enroll', '--snapshot', join(dir, 'snapshot.json'), '--confirm', snapshot.id, '--nodes', toEnroll.join(','), ...access(dir), '--timeout', '15m', '--out', join(dir, 'enroll.json')], { timeoutMs: 16 * 60_000, onLine: parseRunner(r) });
@@ -226,30 +242,45 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     const explicit = Object.fromEntries(Object.entries(images).map(([c, ref]) => [c, ref.startsWith('docker.io/') ? ref : `docker.io/${ref}`]));
     writeFileSync(join(dir, 'images.json'), JSON.stringify(explicit), { mode: 0o600 });
     const planArgs = ['managed-plan', '--snapshot', join(dir, 'snapshot.json'), '--operation', r.request.action, '--scope', components.join(','), '--nodes', r.request.nodes.join(','), '--timeout', '5m', '--out', join(dir, 'plan.json')];
-    if (r.request.action === 'upgrade') planArgs.push('--images', join(dir, 'images.json'));
+    if (r.request.action === 'upgrade') planArgs.push('--images', join(dir, 'images.json'), ...rolloutArgs(rollout, miners));
     const pc = await dashnet(r, planArgs, { timeoutMs: 6 * 60_000 });
     const plan = readJSON(join(dir, 'plan.json'));
     if (pc !== 0 || !plan) { done('failed'); throw new Error('planning failed; see log'); }
+    const reviewed = reviewedRollout(plan, rollout, miners);
     const changes = [];
     for (const [node, pins] of Object.entries(plan.images || {})) for (const [component, to] of Object.entries(pins)) {
       const before = snapshot.nodes[node]?.components?.[component] || {};
       changes.push({ node, component, from: before.image, fromDigest: before.digests?.[0]?.split('@')[1] || null, to, requested: images[component] || null, dependency: !components.includes(component) });
     }
     done('ok', `${changes.length} container change(s)`);
-    r.review = { planId: plan.id, snapshotId: snapshot.id, changes, targets: r.request.nodes, operation: plan.operation, preparedAt: new Date().toISOString() };
+    r.review = { ...(reviewed ? { rollout: reviewed } : {}), planId: plan.id, snapshotId: snapshot.id, changes, targets: r.request.nodes, operation: plan.operation, preparedAt: new Date().toISOString() };
     return { dir, snapshot, manifest, plan };
   }
 
   async function journalFor(dir) {
     const out = join(dir, `journal-${randomUUID()}.json`);
-    const code = await new Promise((resolve) => {
-      const child = spawnImpl(binary, ['managed-operation', '--manifest', join(dir, 'manifest.json'), '--timeout', '1m', '--out', out], { stdio: 'ignore' });
-      const timer = setTimeout(() => child.kill('SIGKILL'), 90_000);
-      child.on('close', (c) => { clearTimeout(timer); resolve(c ?? 1); }); child.on('error', () => { clearTimeout(timer); resolve(1); });
-    });
-    const v = code === 0 ? readJSON(out) : null;
-    rmSync(out, { force: true });
-    return v;
+    try {
+      const result = await new Promise((resolve) => {
+        const child = spawnImpl(binary, ['managed-operation', '--manifest', join(dir, 'manifest.json'), '--timeout', '1m', '--out', out], { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, AWS_REGION: getSettings().aws.region } });
+        let stderr = '', timedOut = false;
+        child.stderr.on('data', (d) => { stderr = (stderr + d.toString()).slice(-2000); });
+        const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 90_000);
+        child.on('close', (code) => { clearTimeout(timer); resolve({ code, stderr, timedOut }); });
+        child.on('error', (e) => { clearTimeout(timer); resolve({ code: null, stderr: e.message }); });
+      });
+      // Only the CLI's exact missing-record sentinel permits first enrollment.
+      // Validation, cloud and runner failures must not masquerade as lost enrollment.
+      if (result.code === 1 && result.stderr.trim() === 'dashnet: operation not found') return null;
+      if (result.code !== 0) {
+        const detail = result.timedOut ? 'timed out' : result.stderr.trim().split('\n').pop()?.slice(0, 300) || `exit ${result.code}`;
+        throw new Error(`Cannot read management journal: ${detail}. Stopping before enrollment or workload changes.`);
+      }
+      const v = readJSON(out);
+      if (!v?.record || !v.record.enrolled || typeof v.record.enrolled !== 'object' || Array.isArray(v.record.enrolled)) {
+        throw new Error('Cannot read management journal: invalid result. Stopping before enrollment or workload changes.');
+      }
+      return v;
+    } finally { rmSync(out, { force: true }); }
   }
 
   const parseRunner = (r) => (line) => {
@@ -276,10 +307,8 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
       parseRunner(r)(line);
       const p = r.progress;
       if (/^managed-(staging|applying|verifying)$/.test(line)) p.phase = line.slice(8);
-      let m = /^managed target (\S+) applying$/.exec(line);
-      if (m) p.current = m[1];
-      m = /^managed target (\S+) applied$/.exec(line);
-      if (m) { p.completed.push(m[1]); p.current = null; }
+      trackRollout(p, line);
+      let m;
       m = /^managed health gate waiting: (.*)$/.exec(line);
       p.waiting = m ? m[1].slice(0, 300) : undefined;
       // A replaced node may take minutes to serve again (a new Core can migrate
@@ -289,8 +318,8 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
       if (/^managed target \S+ (ready|applied)$/.test(line)) p.starting = undefined;
       save(r);
     };
-    // The configured timeout is a per-node budget: nodes are replaced one at a
-    // time, each behind its own startup wait and fleet health gate.
+    // Keep the historical upper time budget for slow first-start migrations;
+    // new plan-bound batches use readiness, not fixed inter-node windows.
     const budget = operationBudget(timeout, r.review?.targets?.length || r.request.nodes.length);
     const c = await dashnet(r, [`managed-${plan.operation}`, '--plan', join(dir, 'plan.json'), '--confirm', plan.id, ...access(dir), '--observation-window', window, '--timeout', budget.flag, '--out', join(dir, `result-${Date.now()}.json`)], { timeoutMs: budget.ms + 60_000, onLine });
     if (r.progress.starting) { r.progress.starting = undefined; save(r); }

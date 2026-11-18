@@ -21,6 +21,7 @@ import { publicInventory } from './aws-public.js';
 import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, loadSettings, memberOf, operatorFor, readJSON, saveSettings, validateSettings, writeAtomic } from '../shared/settings.js';
 import { expectations } from '../shared/monitoring.js';
 import { evaluateNetwork, projectNetwork } from '../shared/evaluate.js';
+import { requestDevnetKeys } from './devnet-keys.js';
 import { devnetFiles } from '../shared/devnet-files.js';
 import { validateRequest } from '../agent/ops.js';
 import { validateMainnetReport } from '../shared/mainnet.js';
@@ -44,7 +45,7 @@ export function ttlCache(clock, ttl = 15_000) {
   return Object.assign(cached, { delete: (key) => entries.delete(key), size: () => entries.size });
 }
 
-export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, clock = Date.now, ciGithub = null, ciQueue = {}, mainnetReportToken = process.env.MAINNET_REPORT_TOKEN } = {}) {
+export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, clock = Date.now, ciGithub = null, ciQueue = {}, mainnetReportToken = process.env.MAINNET_REPORT_TOKEN, keyReader = requestDevnetKeys, keySocket = process.env.DEVNET_KEYS_SOCKET } = {}) {
   const settingsPath = join(dataDir, 'settings.json');
   const dirs = { state: join(dataDir, 'state'), requests: join(dataDir, 'requests'), ops: join(dataDir, 'ops') };
   for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
@@ -283,6 +284,23 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     if (!facts) return res.status(404).json({ error: 'No connection facts yet: they appear once the devnet has a deployment plan' });
     res.json({ facts, files: devnetFiles(facts) });
   });
+  // Explicit, network-scoped operator action; never part of config or stream data.
+  app.post('/api/networks/:name/keys', (req, res, next) => {
+    try { validateSettings(JSON.parse(readFileSync(settingsPath, 'utf8'))); reloadSettings(); next(); }
+    catch { res.status(503).json({ error: 'Key access settings unavailable' }); }
+  }, requireOperator, auth.csrf,
+    rateLimit({ windowMs: 60_000, limit: 6, standardHeaders: true, legacyHeaders: false }), async (req, res) => {
+      const n = settings.networks.find(x => x.name === req.params.name);
+      if (!n || n.kind !== 'dashnet' || n.chainType !== 'devnet' || !/^devnet-[a-z0-9-]+$/.test(n.name)) return res.status(404).json({ error: 'Keys are available for managed devnets only' });
+      res.set({ 'Cache-Control': 'private, no-store', 'Pragma': 'no-cache' }); res.vary('Cookie');
+      try {
+        const result = await keyReader(keySocket, n.name, req.session.user);
+        reloadSettings();
+        if (!operatorFor(settings, user(req), n.name)) return res.status(403).json({ error: 'Operator access required' });
+        console.info(JSON.stringify({ event: 'devnet-key-access', network: n.name, actorId: req.session.user.id, at: new Date(clock()).toISOString() }));
+        return res.json(result);
+      } catch { return res.status(503).json({ error: 'Keys unavailable: the devnet must be idle and all node identities must verify' }); }
+    });
   app.post('/api/networks/:name/ops', requireOperator, auth.csrf, (req, res) => {
     const n = settings.networks.find((x) => x.name === req.params.name);
     if (!n) return res.status(404).json({ error: 'Network not found' });
