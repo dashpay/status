@@ -76,6 +76,8 @@ export default function Settings() {
 
       <Access doc={doc} ro={ro} setOperators={setOperators} self={session.user} />
 
+      {admin && <ApiTokens names={doc.networks.map((n) => n.name)} />}
+
       <DevnetDefaults d={doc.devnets} ro={ro} update={(fn) => set((x) => fn(x.devnets))} />
 
       <Section title="Networks" right={!ro && <button className="btn" onClick={() => set((d) => { d.networks.push(blankNetwork()); })}>Add network</button>}>
@@ -230,6 +232,81 @@ function Access({ doc, ro, setOperators, self }) {
         </table>
       </div>
       <div className="text-dim text-[11.5px] mt-1">Access is bound to the GitHub numeric user id, so a renamed account keeps its access. Access changes are saved immediately.{note && <span className={`ml-2 ${note.ok ? 'lv-ok' : 'lv-down'}`}>{note.text}</span>}</div>
+    </Section>
+  );
+}
+
+// Tokens for bots. Each acts for the admin who issued it, within the role and
+// networks chosen here, and is shown once.
+const TOKEN_ROLE_TEXT = { admin: 'operate every network, including devnet lifecycle and Platform resets', operator: ROLE_TEXT.operator, viewer: ROLE_TEXT.viewer };
+function ApiTokens({ names }) {
+  const [tokens, setTokens] = useState(null);
+  const [label, setLabel] = useState('');
+  const [role, setRole] = useState('operator');
+  const [networks, setNetworks] = useState([]);
+  const [days, setDays] = useState('');
+  const [issued, setIssued] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  useEffect(() => { api('/api/tokens').then((r) => setTokens(r.tokens), setErr); }, []);
+  const toggle = (n) => setNetworks((l) => (l.includes(n) ? l.filter((x) => x !== n) : [...l, n]));
+  const issue = async (e) => {
+    e.preventDefault();
+    // One token per submit: a second token's secret would replace the first on screen.
+    if (busy) return;
+    setBusy(true); setErr(null); setIssued(null);
+    try {
+      const t = await api('/api/tokens', { method: 'POST', body: { label, role, networks: role === 'admin' ? ['*'] : networks, ...(days ? { expiresDays: Number(days) } : {}) } });
+      setIssued(t); setLabel(''); setNetworks([]); setDays('');
+      setTokens((await api('/api/tokens')).tokens);
+    } catch (x) { setErr(x); } finally { setBusy(false); }
+  };
+  const revoke = async (t) => {
+    if (!window.confirm(`Revoke API token "${t.label}" (${t.id})? It stops working at once.`)) return;
+    setErr(null);
+    try { setTokens((await api(`/api/tokens/${t.id}`, { method: 'DELETE' })).tokens); if (issued?.id === t.id) setIssued(null); } catch (x) { setErr(x); }
+  };
+  return (
+    <Section title={`API tokens · ${tokens?.length ?? 0}`}>
+      <form onSubmit={issue} className="panel p-3 mb-2 flex flex-wrap items-center gap-3">
+        <span className="text-dim text-[12px]">Issue a token for a bot</span>
+        <input className="input w-56" aria-label="Token label" placeholder="label, e.g. infraclaw" value={label} onChange={(e) => setLabel(e.target.value)} />
+        <select className="input" aria-label="Token role" value={role} onChange={(e) => setRole(e.target.value)}>
+          <option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option>
+        </select>
+        {role !== 'admin' && <div className="flex flex-wrap gap-1" role="group" aria-label="Token networks">{['*', ...names].map((n) => <button type="button" key={n} aria-pressed={networks.includes(n)} className={`chip ${networks.includes(n) ? 'on' : ''}`} onClick={() => toggle(n)}>{n === '*' ? 'all networks' : n}</button>)}</div>}
+        <input className="input w-36" aria-label="Token expiry in days" inputMode="numeric" placeholder="expires in days" value={days} onChange={(e) => setDays(e.target.value.replace(/\D/g, ''))} />
+        <button className="btn btn-primary" disabled={busy || !label.trim() || (role !== 'admin' && !networks.length)}>{busy ? 'Issuing…' : 'Issue token'}</button>
+        <span className="text-dim text-[11.5px] w-full">{TOKEN_ROLE_TEXT[role]}. Sent as <span className="mono">Authorization: Bearer …</span>. Tokens never change settings, access or tokens and never read private keys.</span>
+        {issued && (
+          <div className="w-full border-t border-line pt-3">
+            <div className="lv-warn text-[12px] mb-1">Copy this token now. It is not shown again.</div>
+            <div className="panel p-2 bg-panel-2 mono text-[11.5px] break-all select-all">{issued.token}</div>
+          </div>
+        )}
+      </form>
+      <Err error={err} />
+      {tokens?.length ? (
+        <div className="panel scroll-x">
+          <table className="grid"><thead><tr><th>token</th><th>acts for</th><th>role</th><th>networks</th><th>created</th><th>expires</th><th>last used</th><th /></tr></thead>
+            <tbody className="[&_tr]:!cursor-default">
+              {tokens.map((t) => (
+                <tr key={t.id}>
+                  <td>{t.label} <span className="text-faint mono text-[11px]">{t.id}</span></td>
+                  <td className="mono">@{t.owner.login}</td>
+                  <td>{t.role}</td>
+                  <td className="!whitespace-normal">{t.networks.includes('*') ? <span className="text-dim">all networks</span> : t.networks.join(', ')}</td>
+                  <td className="mono text-dim">{t.createdAt.slice(0, 10)}</td>
+                  <td className="mono text-dim">{t.expiresAt ? t.expiresAt.slice(0, 10) : 'never'}</td>
+                  <td className="mono text-dim">{t.lastUsedAt ? t.lastUsedAt.slice(0, 16).replace('T', ' ') : 'never'}</td>
+                  <td><button className="btn btn-danger !py-0.5" onClick={() => revoke(t)}>revoke</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : tokens && <Empty>No API tokens.</Empty>}
+      <div className="text-dim text-[11.5px] mt-1">A token can only narrow the access of the account it acts for; removing or demoting that account takes its tokens with it.</div>
     </Section>
   );
 }
