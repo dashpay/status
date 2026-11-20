@@ -154,6 +154,39 @@ class Probes(unittest.TestCase):
         self.assertIsNone(check['indexedHeight'])
         self.assertIsNone(check['chainHeight'])
 
+    def test_consensus_protocol_comes_from_the_committed_header(self):
+        # Palmatum, 2026-11-20: protocol 15 activated at height 509 while Tenderdash kept
+        # reporting the 14 it started with, so every validator warned about a disagreement.
+        td = container('dashpay/tenderdash:2.0.0-dev.3')
+        td['State']['Pid'] = 4242
+        status = {'node_info': {'network': 'dash-devnet-palmatum', 'version': '2.0.0-dev.3', 'id': 'node',
+                                'protocol_version': {'p2p': '11', 'block': '14', 'app': '14'}},
+                  'sync_info': {'latest_block_height': '644', 'latest_block_time': '2026-11-20T15:53:51.5Z', 'catching_up': False},
+                  'validator_info': {'pro_tx_hash': 'AB', 'voting_power': '100'}}
+        block = {'block': {'header': {'version': {'block': '14', 'app': '15'}, 'proposer_pro_tx_hash': 'CD'},
+                           'last_commit': {'round': 0, 'threshold_block_signature': 'sig'}}}
+
+        def rpc(replies):
+            def run(args, timeout):
+                self.assertEqual(args[:4], ['nsenter', '-t', '4242', '-n'])
+                path = args[-1].split('/', 3)[3]
+                if path not in replies: raise RuntimeError('unavailable')
+                return json.dumps({'result': replies[path]}).encode()
+            return run
+        for role in ['validator', 'fullnode']:
+            with patch.object(p, 'ROLE', role), patch.object(p, 'run', rpc({'status': status, 'block': block})):
+                self.assertEqual(p.tenderdash({'td': td})['protocolApp'], 15, role)
+        with patch.object(p, 'ROLE', 'validator'), patch.object(p, 'run', rpc({'status': status, 'block': block})):
+            out = p.tenderdash({'td': td})
+        self.assertEqual((out['proposer'], out['commitRound'], out['thresholdSigned']), ('CD', 0, True))
+        # A node whose block cannot be read still reports the number it started with.
+        with patch.object(p, 'ROLE', 'validator'), patch.object(p, 'run', rpc({'status': status})), patch.object(p, 'errors', []):
+            self.assertEqual(p.tenderdash({'td': td})['protocolApp'], 14)
+        self.assertEqual(p.app_version({'version': {'app': '15'}}, {'protocol_version': {'app': '14'}}), 15)
+        self.assertEqual(p.app_version({'version': {'block': '14'}}, {'protocol_version': {'app': '14'}}), 14)
+        self.assertEqual(p.app_version({'version': 'bad'}, {'protocol_version': {'app': 'x'}}), None)
+        self.assertEqual(p.app_version(None, None), None)
+
     def test_malformed_protobuf_is_bounded(self):
         for data in [b'\x80'*100,b'\x0a\x08a',b'\x09a',b'\x0da']:
             with self.assertRaises(ValueError): p.protobuf(data)

@@ -290,6 +290,22 @@ def core(raw):
     return out
 
 
+def app_version(header, node_info):
+    # The committed header carries the app (protocol) version its block was made under.
+    # node_info.protocol_version.app is fixed when Tenderdash starts: a protocol upgrade
+    # activates without a restart, so that field keeps the old number until the next one.
+    header = header if isinstance(header, dict) else {}
+    node_info = node_info if isinstance(node_info, dict) else {}
+    for source in (header.get('version'), node_info.get('protocol_version')):
+        try:
+            v = int((source or {}).get('app') or 0)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if v > 0:
+            return v
+    return None
+
+
 def tenderdash(raw):
     c = find(raw, ['dashpay/tenderdash'])
     if not c:
@@ -332,8 +348,10 @@ def tenderdash(raw):
         raise RuntimeError('rpc unreachable on %s' % ports)
     get = lambda p: fetch(p, port)
     ni, si, vi = st.get('node_info') or {}, st.get('sync_info') or {}, st.get('validator_info') or {}
+    block = (attempt('latest block', get, 'block') or {}).get('block') or {}
+    header = block.get('header') or {}
     out = dict(network=ni.get('network'), version=ni.get('version'), nodeId=ni.get('id'),
-               protocolApp=int((ni.get('protocol_version') or {}).get('app') or 0) or None,
+               protocolApp=app_version(header, ni),
                height=int(si.get('latest_block_height') or 0), blockTime=si.get('latest_block_time'),
                catchingUp=si.get('catching_up'), proTxHash=vi.get('pro_tx_hash'),
                votingPower=int(vi['voting_power']) if vi.get('voting_power') is not None else None)
@@ -351,9 +369,6 @@ def tenderdash(raw):
         rs = consensus.get('round_state', {})
         hrs = str(rs.get('height/round/step', '')).split('/')
         out['round'] = int(hrs[1]) if len(hrs) > 1 and hrs[1].isdigit() else None
-        block = attempt('latest commit', get, 'block') or {}
-        block = block.get('block', {})
-        header = block.get('header', {})
         out['proposer'] = header.get('proposer_pro_tx_hash') or header.get('proposer_address')
         out['commitRound'] = (block.get('last_commit') or {}).get('round')
         # Tenderdash has a threshold block signature, not individual Tendermint signatures.
