@@ -111,7 +111,9 @@ def wallet_exporter(rpc):
             assert info.get('ismine') is True and not info.get('iswatchonly', False)
             if wallet not in descriptors:
                 entries = rpc('listdescriptors', [True], wallet)['descriptors']
-                descriptors[wallet] = [e['desc'] for e in entries if e['desc'].startswith('pkh(')]
+                # Ranged only: Core refuses a range for a fixed descriptor (RPC -8),
+                # which would end the export before the HD parent is compared.
+                descriptors[wallet] = [e['desc'] for e in entries if e['desc'].startswith('pkh(') and '*' in e['desc']]
             index = path_parts(info['hdkeypath'][2:])[-1]
             assert index < 2 ** 31
             # Core's normalized parent descriptor may move hardened derivation

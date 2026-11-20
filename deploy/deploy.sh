@@ -45,9 +45,17 @@ case "${DEPLOY_ONLY:-}" in
   web) compose up -d --no-deps $web_services ;;
   *) echo "DEPLOY_ONLY must be empty or web" >&2; exit 2 ;;
 esac
+# Web's health endpoint does not consult the key socket, so a rollout that also
+# replaced the key helper is healthy only when the helper's own check passes.
+healthy() {
+  curl -fsS -m 3 http://127.0.0.1:3006/api/health >/dev/null 2>&1 || return 1
+  if [ "$web_services" = web ]; then return 0; fi
+  keys_id=$(compose ps -q keys 2>/dev/null) || return 1
+  [ -n "$keys_id" ] && [ "$(docker inspect --format '{{.State.Health.Status}}' "$keys_id" 2>/dev/null)" = healthy ]
+}
 for i in $(seq 1 30); do
-  if curl -fsS -m 3 http://127.0.0.1:3006/api/health >/dev/null 2>&1; then
-    echo "web healthy on ${rev}"; compose ps --format '{{.Service}} {{.Status}}'
+  if healthy; then
+    echo "$web_services healthy on ${rev}"; compose ps --format '{{.Service}} {{.Status}}'
     # Each deploy leaves a ~370 MB image: keep the running one and the two
     # newest others for rollback, so the root disk never fills (a full disk
     # fails the next build mid-download).
@@ -62,7 +70,7 @@ for i in $(seq 1 30); do
   fi
   sleep 2
 done
-echo "web did not become healthy; rolling back" >&2
+echo "$web_services did not become healthy; rolling back" >&2
 if [ -n "$previous" ]; then
   docker tag "$previous" dash-status:current
   if [ "${DEPLOY_ONLY:-}" = web ]; then compose up -d --no-deps $web_services; else compose up -d; fi

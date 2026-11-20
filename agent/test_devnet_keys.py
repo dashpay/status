@@ -73,9 +73,11 @@ class Exports(unittest.TestCase):
         if method == 'getaddressinfo':
             return {'ismine': self.owned, 'iswatchonly': False, 'hdkeypath': 'm/0h/1/2h/2/1000000000'}
         if method == 'listdescriptors':
-            return {'descriptors': [{'desc': self.desc}] * self.match_count}
+            return {'descriptors': [{'desc': self.desc}] * self.match_count + [{'desc': d} for d in self.fixed]}
         if method == 'deriveaddresses':
             if len(params) == 2:  # Core independently identifies the parent.
+                # Core: "Range should not be specified for an un-ranged descriptor" (-8).
+                assert '*' in params[0], 'range given for a fixed descriptor'
                 return ['synthetic-address']
             return [self.derived_address]
         if method == 'getdescriptorinfo':
@@ -87,6 +89,7 @@ class Exports(unittest.TestCase):
         self.descriptors = True
         self.owned = True
         self.match_count = 1
+        self.fixed = []
         self.derived_address = 'synthetic-address'
         self.desc = 'pkh([3442193e/0h/1/2h]' + testnet_extended(VECTORS[3]) + '/2/*)'
 
@@ -98,6 +101,12 @@ class Exports(unittest.TestCase):
         self.assertEqual(len(self.calls), before)
         self.assertEqual(keys.b58decode(result)[1:-1], keys.b58decode(VECTORS[-1])[46:])
         self.assertNotIn(('dumpprivkey', 'dashnet'), self.calls)
+
+    def test_fixed_descriptor_beside_the_hd_parent_does_not_end_the_export(self):
+        # An imported single key sits next to the ranged parent; it must never be probed with a range.
+        self.fixed = ['pkh(synthetic-imported-key)#abcdefgh', 'pkh([3442193e/0h]' + testnet_extended(VECTORS[1]) + '/1)']
+        result = keys.wallet_exporter(self.rpc)('synthetic-address', 'dashnet')
+        self.assertEqual(keys.b58decode(result)[1:-1], keys.b58decode(VECTORS[-1])[46:])
 
     def test_legacy_wallet_remains_supported(self):
         self.descriptors = False
