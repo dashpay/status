@@ -54,6 +54,7 @@ export default function Network({ name, tab }) {
               <Stat label="PoSe bans" value={s.mainnet.bigBans ?? '—'} sub={`${s.mainnet.newBans ?? '—'} newly banned / hour`} level={(s.mainnet.newBans || 0) >= 20 ? 'warn' : undefined} />
               <Stat label="Chain stalls" value={s.mainnet.platformSyncing ? 'syncing' : s.mainnet.coreStall || s.mainnet.platformStall ? 'stalled' : s.mainnet.coreStall == null || s.mainnet.platformStall == null ? 'unknown' : 'clear'} sub={s.mainnet.chainLockAgeSeconds != null ? `ChainLock ${Math.round(s.mainnet.chainLockAgeSeconds)}s old` : 'ChainLock age unavailable'} level={s.mainnet.coreStall || s.mainnet.platformStall ? 'down' : undefined} />
             </>}
+            {n.genesisSync && <GenesisSync g={n.genesisSync} now={now} />}
           </div>
 
           {(n.endpoints.length > 0 || Object.keys(s.versions).length > 0) && (
@@ -86,6 +87,33 @@ export default function Network({ name, tab }) {
       )}
     </div>
   );
+}
+
+// The nightly replay of Platform from block 1 with the newest published Drive
+// (dashpay/infra, platform-sync). One tile; the detail is in its tooltip.
+function GenesisSync({ g, now }) {
+  const run = g.run, last = g.lastPassed, image = run?.image || last?.image;
+  const version = image?.version || '—';
+  const running = ['starting', 'syncing', 'verifying'].includes(g.phase);
+  const value = g.stale ? 'no report' : running ? (g.progress != null ? `${Math.floor(g.progress * 100)}%` : 'starting') : run?.result || '—';
+  const sub = g.stale ? `last heard ${ago(g.generatedAt, now)} ago`
+    : running ? `${version} · ${num(g.height)}${g.etaSeconds != null ? ` · ${duration(g.etaSeconds)} left` : ''}`
+      : run?.finishedAt ? `${version} · ${ago(run.finishedAt, now)} ago` : version;
+  const level = g.stale || (g.phase === 'following' && g.healthy === false) ? 'warn' : run?.result === 'failed' ? 'down' : run?.result === 'passed' ? 'ok' : undefined;
+  const received = run?.bytes ? ['platformRx', 'coreRx', 'image'].reduce((a, k) => a + (run.bytes[k] || 0), 0) : null;
+  const title = ['Platform replayed from genesis with the newest published Drive',
+    image?.ref && `image ${image.ref}${image.revision ? ` (${short(image.revision, 10)})` : ''}`,
+    run?.tenderdash && `Tenderdash ${run.tenderdash}`,
+    g.height != null && `height ${num(g.height)} of ${num(g.referenceHeight)}`,
+    running && g.blocksPerSecond != null && `${g.blocksPerSecond} blocks/s`,
+    run?.durationSeconds != null && `replay took ${duration(run.durationSeconds)}`,
+    received ? `${bytes(received)} received` : null,
+    run?.reason,
+    g.phase === 'following' && g.healthy === false && 'the node stopped following the tip after it passed',
+    g.onHold && 'on hold: the next run is refused',
+    run?.result !== 'passed' && last?.finishedAt && `last passed ${last.image?.version || ''} ${ago(last.finishedAt, now)} ago`,
+  ].filter(Boolean).join('\n');
+  return <Stat label="Genesis sync" value={value} sub={sub} level={level} title={title} />;
 }
 
 function Monitoring({ m }) {

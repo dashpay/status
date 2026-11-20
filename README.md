@@ -120,6 +120,8 @@ AWS account/region changes take effect after an agent restart.
 
 **Mainnet** is a deliberately limited observer board, not a mainnet-support-fleet monitor. A separately managed Evolution fullnode observer reports Core ChainLocks and stall state, Platform block progress and stall state, the public quorum-list-server, and the count of large PoSe bans. The `mainnet-support` EC2 fleet is not discovered or probed by this application, and no Mainnet operations are exposed. The observer report is token-scoped and contains only public chain/service facts. The web container reads `MAINNET_REPORT_TOKEN` from `/etc/dash-status/mainnet.env`; the observer host uses the same secret in `/etc/dash-mainnet-observer/env`. Install `deploy/dash-mainnet-observer.service` only on the dedicated observer/fullnode host.
 
+**Genesis sync** is one tile on the Testnet and Mainnet pages. A separate host replays Platform from block 1 with the newest published Drive every night ([dashpay/infra, `platform-sync`](https://github.com/dashpay/infra/tree/master/platform-sync)) and posts where its node is and how the last replay ended to `/api/platform-sync/report`. The report is token-scoped (`PLATFORM_SYNC_REPORT_TOKEN`, read by the web container from `/etc/dash-status/mainnet.env`; the sync host keeps the same secret in `/etc/platform-sync/report-token`), schema-checked, and holds only public facts. A report older than 15 minutes shows as `no report`.
+
 ## Infrastructure pages
 
 Visible to any account with access (any role).

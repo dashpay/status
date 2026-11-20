@@ -19,7 +19,7 @@ async function start(userId = 9920871, extraUsers = [], options = {}) {
     : url.includes('/users/octocat') ? Response.json({ id: 583231, login: 'octocat', name: 'The Octocat', type: 'User', avatar_url: 'https://avatars.githubusercontent.com/u/583231' })
       : url.includes('/users/') ? new Response('{}', { status: 404 }) : Response.json({ id: userId, login: 'someone' });
   const origin = 'http://127.0.0.1';
-  const app = createWeb({ dataDir, origin, mainnetReportToken: 'fixture-mainnet-token', auth: { clientId: 'c', clientSecret: 's', fetcher: github }, fetcher: github, ...options });
+  const app = createWeb({ dataDir, origin, mainnetReportToken: 'fixture-mainnet-token', platformSyncReportToken: 'fixture-sync-token', auth: { clientId: 'c', clientSecret: 's', fetcher: github }, fetcher: github, ...options });
   const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   const base = `http://127.0.0.1:${server.address().port}`;
   let cookie = '';
@@ -46,6 +46,27 @@ test('public board needs no session and hides operator fields', async () => {
     assert.equal(n.hosts[0].name, 'seed-2');
     assert.equal(n.hosts[0].instanceId, undefined);
     assert.equal((await w.req('/api/networks/testnet/ops')).status, 401);
+  } finally { w.close(); }
+});
+
+test('genesis sync report is token-scoped and appears on its network only', async () => {
+  const w = await start();
+  try {
+    const post = (body, token) => w.req('/api/platform-sync/report', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) } });
+    const body = { schema: 1, network: 'testnet', updatedAt: new Date().toISOString().replace(/\.\d+Z$/, 'Z'), phase: 'following', healthy: true, height: 720000, referenceHeight: 720001,
+      run: { id: 'gh-1-1-testnet', result: 'passed', finishedAt: new Date().toISOString(), durationSeconds: 21000, image: { ref: 'dashpay/drive:5.1.0-dev.2', version: '5.1.0-dev.2' }, bytes: { platformRx: 3000000000 } } };
+    assert.equal((await w.req('/api/networks/testnet').then((r) => r.json())).genesisSync, null);
+    assert.equal((await post(body)).status, 401);
+    assert.equal((await post(body, 'fixture-mainnet-token')).status, 401);
+    assert.equal((await post({ ...body, network: 'devnet-x' }, 'fixture-sync-token')).status, 400);
+    assert.equal((await post(body, 'fixture-sync-token')).status, 202);
+    const g = (await (await w.req('/api/networks/testnet')).json()).genesisSync;
+    assert.equal(g.run.result, 'passed');
+    assert.equal(g.run.image.version, '5.1.0-dev.2');
+    assert.equal(g.run.id, undefined);
+    assert.equal(g.stale, false);
+    assert.equal((await (await w.req('/api/networks/mainnet')).json()).genesisSync, null);
+    assert.equal((await post({ ...body, updatedAt: new Date(Date.now() - 60_000).toISOString() }, 'fixture-sync-token')).status, 400);
   } finally { w.close(); }
 });
 
