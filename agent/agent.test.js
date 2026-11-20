@@ -235,6 +235,29 @@ test('requests from non-operators are dropped', async () => {
   assert.equal(existsSync(join(dirs.ops, `${id}.json`)), false);
 });
 
+test('a request made through an API token records the token; access is still the account', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ops-'));
+  const dirs = { data: root, private: join(root, 'private'), requests: join(root, 'req'), ops: join(root, 'ops'), work: join(root, 'work'), state: join(root, 'state') };
+  const ops = createOps({ settings: () => settings, dirs, key: { path: '/key' }, pool: { knownHosts: () => '', pins: {} }, binary: 'dashnet', log: () => {}, spawnImpl: fakeDashnet([]) });
+  const read = (id) => JSON.parse(readFileSync(join(dirs.ops, `${id}.json`), 'utf8'));
+  const a = '7c8139ad-e92f-40da-943d-1e001efaccb6', b = '7c8139ad-e92f-40da-943d-1e001efaccb7', c = '7c8139ad-e92f-40da-943d-1e001efaccb8';
+  const request = (id, network, actor) => writeFileSync(join(dirs.requests, `${id}.json`), JSON.stringify({ type: 'create', id, network, action: 'doctor', nodes: ['seed-1'], actor }));
+  request(a, 'testnet', { id: 9920871, login: 'ktechmidas', token: '0a1b2c3d', grant: { role: 'admin', networks: ['*'] } });
+  // A grant in a request file is never honoured: an unknown account stays unknown.
+  request(c, 'testnet', { id: 1, login: 'mallory', token: '0a1b2c3d', grant: { role: 'admin', networks: ['*'] } });
+  ops.tick();
+  assert.deepEqual(read(a).actor, { id: 9920871, login: 'ktechmidas', token: '0a1b2c3d' });
+  assert.match(readFileSync(join(dirs.ops, `${a}.log`), 'utf8'), /requested by ktechmidas \(API token 0a1b2c3d\): doctor/);
+  assert.equal(existsSync(join(dirs.ops, `${c}.json`)), false);
+  // Anything that is not a token id is dropped from the record.
+  const root2 = mkdtempSync(join(tmpdir(), 'ops-'));
+  const dirs2 = { data: root2, private: join(root2, 'private'), requests: join(root2, 'req'), ops: join(root2, 'ops'), work: join(root2, 'work'), state: join(root2, 'state') };
+  const ops2 = createOps({ settings: () => settings, dirs: dirs2, key: { path: '/key' }, pool: { knownHosts: () => '', pins: {} }, binary: 'dashnet', log: () => {}, spawnImpl: fakeDashnet([]) });
+  writeFileSync(join(dirs2.requests, `${b}.json`), JSON.stringify({ type: 'create', id: b, network: 'testnet', action: 'doctor', nodes: ['seed-1'], actor: { id: 9920871, login: 'ktechmidas', token: '../../etc' } }));
+  ops2.tick();
+  assert.deepEqual(JSON.parse(readFileSync(join(dirs2.ops, `${b}.json`), 'utf8')).actor, { id: 9920871, login: 'ktechmidas' });
+});
+
 test('devnet requests: admin-only fields, permanent names, placement from settings', async () => {
   const { validateDevnetRequest, networkYaml, estimate } = await import('./devnets.js');
   const s = structuredClone(settings);

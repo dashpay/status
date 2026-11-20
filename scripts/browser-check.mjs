@@ -126,8 +126,9 @@ try {
   await page.getByPlaceholder('GitHub login, e.g. octocat').fill('octocat');
   await page.getByRole('button', { name: 'Look up' }).click();
   await page.getByText('The Octocat').waitFor();
-  await page.locator('form select').selectOption('viewer');
-  await page.locator('form .chip', { hasText: 'devnet-moutai' }).click();
+  const accessForm = page.locator('form', { hasText: 'Add a GitHub user' });
+  await accessForm.locator('select').selectOption('viewer');
+  await accessForm.locator('.chip', { hasText: 'devnet-moutai' }).click();
   await page.getByRole('button', { name: 'Add @octocat' }).click();
   // Saved on add, with no page-wide Save: a reload keeps the new account.
   await page.getByText('saved', { exact: true }).waitFor();
@@ -136,7 +137,25 @@ try {
   await page.getByText('@octocat').waitFor();
   const saved = JSON.parse(readFileSync(join(dataDir, 'settings.json'), 'utf8'));
   assert.deepEqual(saved.operators.find((o) => o.login === 'octocat'), { id: 583231, login: 'octocat', role: 'viewer', networks: ['devnet-moutai'] });
+  // API tokens: issued once in Settings, used by a bot with no session, revoked from the table.
+  const tokenForm = page.locator('form', { hasText: 'Issue a token for a bot' });
+  await tokenForm.getByPlaceholder('label, e.g. infraclaw').fill('fixture bot');
+  await tokenForm.locator('select').selectOption('admin');
+  await tokenForm.getByRole('button', { name: 'Issue token' }).click();
+  const apiToken = (await tokenForm.locator('.select-all').innerText()).trim();
+  assert.match(apiToken, /^dst_[a-f0-9]{8}_[A-Za-z0-9_-]{43}$/);
+  const asBot = (path, init = {}) => fetch(origin + path, { ...init, headers: { authorization: `Bearer ${apiToken}`, ...(init.body ? { 'content-type': 'application/json' } : {}) } });
+  const botMe = await (await asBot('/api/me')).json();
+  assert.deepEqual([botMe.user.login, botMe.admin], ['fixture-operator', true]);
+  assert.equal((await asBot('/api/tokens')).status, 403, 'a token never manages tokens');
+  const tokenRow = page.getByRole('row', { name: /fixture bot/ });
+  await tokenRow.waitFor();
   await page.screenshot({ path: 'artifacts/settings.png', fullPage: true });
+  page.once('dialog', (d) => d.accept());
+  await tokenRow.getByRole('button', { name: 'revoke' }).click();
+  await page.getByText('No API tokens.').waitFor();
+  assert.equal((await asBot('/api/me')).status, 401, 'revoked');
+  assert.equal(await page.getByRole('button', { name: 'Save settings' }).isDisabled(), true, 'tokens leave nothing unsaved');
 
   // Infrastructure pages: CI runners (a reporter's push) and the AWS inventory.
   const { id: reporter } = app.ci.addReporter('mac-runner-fixture');

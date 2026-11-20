@@ -19,7 +19,7 @@ export default function Operations({ network, operator }) {
                   <td><Link to={`/n/${network.name}/ops/${o.id}`} className="link">{o.request.action}</Link></td>
                   <td className="mono text-[11.5px] max-w-[320px] truncate">{o.request.nodes.length > 4 ? `${o.request.nodes.slice(0, 4).join(', ')} +${o.request.nodes.length - 4}` : o.request.nodes.join(', ')}</td>
                   <td className="mono text-[11.5px] max-w-[380px] truncate">{Object.values(o.request.images || {}).join(' ') || (o.request.components || []).join(', ') || '—'}</td>
-                  <td>{o.actor.login}</td>
+                  <td>{o.actor.login}{o.actor.token && <span className="text-dim" title={`API token ${o.actor.token}`}> · token</span>}</td>
                   <td className="num text-dim">{ago(o.createdAt, now)}</td>
                   <td className="num text-dim">{ago(o.updatedAt, now)}</td>
                 </tr>

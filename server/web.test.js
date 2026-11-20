@@ -33,7 +33,7 @@ async function start(userId = 9920871, extraUsers = [], options = {}) {
     await req(`/api/auth/callback?state=${state}&code=x`);
     return (await (await req('/api/session')).json()).csrf;
   };
-  return { dataDir, req, login, cookie: () => cookie, close: () => { app.close(); server.close(); } };
+  return { dataDir, base, req, login, cookie: () => cookie, close: () => { app.close(); server.close(); } };
 }
 
 test('public board needs no session and hides operator fields', async () => {
@@ -491,4 +491,132 @@ test('public projection cache keeps its 15 s lifetime and evicts expired keys on
   assert.equal(cached('ci', () => ++calls), 5);
   cached.delete('ci');
   assert.equal(cached('ci', () => ++calls), 7);
+});
+
+// A bot: no cookie jar, no Origin header, only the bearer token.
+const bot = (w, token) => (path, opts = {}) => fetch(w.base + path, { ...opts, headers: { ...(opts.body ? { 'content-type': 'application/json' } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}), ...(opts.headers || {}) } });
+const issueToken = async (w, csrf, body) => {
+  const r = await w.req('/api/tokens', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json', 'x-csrf-token': csrf } });
+  return { status: r.status, ...(await r.json()) };
+};
+
+test('API tokens: an admin issues one; a bot queues and confirms operations with it, without a session or CSRF', async () => {
+  const w = await start();
+  try {
+    assert.equal((await w.req('/api/tokens')).status, 401, 'signed out');
+    const csrf = await w.login();
+    assert.equal((await w.req('/api/tokens', { method: 'POST', body: JSON.stringify({ label: 'infraclaw', role: 'admin' }), headers: { 'content-type': 'application/json' } })).status, 403, 'CSRF required to issue');
+    assert.equal((await issueToken(w, csrf, { label: '', role: 'admin' })).status, 400);
+    assert.equal((await issueToken(w, csrf, { label: 'x', role: 'root' })).status, 400);
+    assert.equal((await issueToken(w, csrf, { label: 'x', role: 'operator', networks: [] })).status, 400);
+    assert.equal((await issueToken(w, csrf, { label: 'x', role: 'operator', networks: ['testnet'], expiresDays: 0 })).status, 400);
+    const issued = await issueToken(w, csrf, { label: 'infraclaw', role: 'admin', networks: ['testnet'] });
+    assert.equal(issued.status, 201);
+    assert.match(issued.token, /^dst_[a-f0-9]{8}_[A-Za-z0-9_-]{43}$/);
+    assert.deepEqual([issued.role, issued.networks, issued.owner], ['admin', ['*'], { id: 9920871, login: 'someone' }]);
+    // Only the hash is kept, and the list never returns the token.
+    const stored = readFileSync(join(w.dataDir, 'api-tokens.json'), 'utf8');
+    assert.ok(!stored.includes(issued.token) && !stored.includes(issued.token.split('_')[2]));
+    const listed = await (await w.req('/api/tokens')).json();
+    assert.deepEqual(listed.tokens.map((t) => [t.id, t.label, t.token]), [[issued.id, 'infraclaw', undefined]]);
+
+    const call = bot(w, issued.token);
+    const me = await (await call('/api/me')).json();
+    assert.deepEqual(me.user, { id: 9920871, login: 'someone', token: issued.id });
+    assert.deepEqual([me.role, me.admin, me.allNetworks], ['admin', true, true]);
+    assert.equal((await (await call('/api/networks/testnet')).json()).hosts[0].instanceId, 'i-0eb19958115adb5d0', 'member detail');
+    const body = JSON.stringify({ action: 'upgrade', nodes: ['seed-2'], components: ['tenderdash'], images: { tenderdash: 'dashpay/tenderdash:1.8.2' } });
+    assert.equal((await bot(w)('/api/networks/testnet/ops', { method: 'POST', body })).status, 401, 'no token, no session');
+    const queued = await call('/api/networks/testnet/ops', { method: 'POST', body });
+    assert.equal(queued.status, 202);
+    const { id } = await queued.json();
+    const q = JSON.parse(readFileSync(join(w.dataDir, 'requests', `${id}.json`), 'utf8'));
+    assert.deepEqual(q.actor, { id: 9920871, login: 'someone', token: issued.id }, 'the account, and the token it acted through; never the grant');
+    // Review, then confirm with the plan id, as the console does.
+    mkdirSync(join(w.dataDir, 'ops'), { recursive: true });
+    writeFileSync(join(w.dataDir, 'ops', `${id}.json`), JSON.stringify({ id, network: 'testnet', status: 'review', review: { planId: 'plan-1' }, request: { action: 'upgrade' }, createdAt: new Date().toISOString() }));
+    assert.equal((await (await call(`/api/ops/${id}`)).json()).status, 'review');
+    assert.equal((await call(`/api/ops/${id}/confirm`, { method: 'POST', body: JSON.stringify({ planId: 'stale' }) })).status, 409);
+    assert.equal((await call(`/api/ops/${id}/confirm`, { method: 'POST', body: JSON.stringify({ planId: 'plan-1' }) })).status, 202);
+    const confirm = readdirSync(join(w.dataDir, 'requests')).find((f) => f.startsWith(`${id}.confirm-`));
+    assert.deepEqual(JSON.parse(readFileSync(join(w.dataDir, 'requests', confirm), 'utf8')).actor, { id: 9920871, login: 'someone', token: issued.id });
+    assert.ok((await (await w.req('/api/tokens')).json()).tokens[0].lastUsedAt, 'use is recorded');
+
+    // A presented token is that token or nothing: a wrong one never falls back to the browser session.
+    const wrong = `${issued.token.slice(0, -1)}${issued.token.endsWith('A') ? 'B' : 'A'}`;
+    assert.equal((await w.req('/api/me', { headers: { authorization: `Bearer ${wrong}` } })).status, 401);
+    assert.equal((await bot(w, 'dst_nope')('/api/overview')).status, 401);
+    // Revoked: dead at once.
+    assert.equal((await w.req('/api/tokens/ffffffff', { method: 'DELETE', headers: { 'x-csrf-token': csrf } })).status, 404);
+    assert.equal((await w.req(`/api/tokens/${issued.id}`, { method: 'DELETE', headers: { 'x-csrf-token': csrf } })).status, 200);
+    assert.equal((await call('/api/me')).status, 401);
+    assert.equal((await call('/api/networks/testnet/ops', { method: 'POST', body })).status, 401);
+  } finally { w.close(); }
+});
+
+test('API tokens operate networks only: no settings, access, tokens, remediation or private keys', async () => {
+  const w = await start();
+  try {
+    const csrf = await w.login();
+    writeFileSync(join(w.dataDir, 'devnets.json'), JSON.stringify({ 'devnet-palmatum': { status: 'ready', coreNetwork: 'palmatum-g1' } }));
+    const { token } = await issueToken(w, csrf, { label: 'admin bot', role: 'admin' });
+    const call = bot(w, token);
+    const { settings } = await (await call('/api/settings')).json();
+    assert.ok(settings.networks.length, 'settings are readable');
+    const refused = [
+      ['PUT', '/api/settings', { settings }], ['PUT', '/api/access/583231', { login: 'octocat', role: 'admin' }], ['DELETE', '/api/access/9920871'],
+      ['GET', '/api/tokens'], ['POST', '/api/tokens', { label: 'more', role: 'admin' }], ['DELETE', '/api/tokens/00000000'],
+      ['POST', '/api/remediation/dispatch', { enabled: true }], ['POST', '/api/remediation/clear'], ['POST', '/api/ci/reporters', { label: 'h' }],
+      ['POST', '/api/networks/devnet-palmatum/keys'],
+    ];
+    for (const [method, path, body] of refused) {
+      // Even with the admin's own cookie and CSRF value attached, a token request stays a token request.
+      const r = await w.req(path, { method, ...(body ? { body: JSON.stringify(body) } : {}), headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, 'x-csrf-token': csrf } });
+      assert.equal(r.status, 403, `${method} ${path}`);
+      assert.match((await r.json()).error, /signed-in account/, `${method} ${path}`);
+    }
+    assert.equal(Object.keys(JSON.parse(readFileSync(join(w.dataDir, 'api-tokens.json'), 'utf8'))).length, 1);
+    assert.equal((await call('/api/auth/logout', { method: 'POST' })).status, 401);
+    // Admin tokens do manage devnet lifecycle and Platform resets, which is what a bot is for.
+    const reset = await call('/api/networks/devnet-palmatum/ops', { method: 'POST', body: JSON.stringify({ action: 'platform-reset', images: { drive: 'dashpay/drive:5.0.3' }, options: { genesisProtocolVersion: 14 } }) });
+    assert.equal(reset.status, 202);
+  } finally { w.close(); }
+});
+
+test('API tokens narrow their account: role, networks, expiry, and the account losing access', async () => {
+  let now = Date.now();
+  const w = await start(9920871, [{ id: 77, login: 'op', role: 'operator', networks: ['testnet'] }], { clock: () => now });
+  try {
+    const csrf = await w.login();
+    writeFileSync(join(w.dataDir, 'devnets.json'), JSON.stringify({ 'devnet-palmatum': { status: 'ready', coreNetwork: 'palmatum-g1', public: false } }));
+    const doctor = JSON.stringify({ action: 'doctor', nodes: ['seed-2'] });
+    const viewer = bot(w, (await issueToken(w, csrf, { label: 'viewer', role: 'viewer', networks: ['testnet'] })).token);
+    assert.equal((await viewer('/api/networks/testnet/ops')).status, 200);
+    assert.equal((await viewer('/api/networks/testnet/ops', { method: 'POST', body: doctor })).status, 403);
+    assert.equal((await viewer('/api/networks/devnet-palmatum')).status, 404, 'a private network outside the grant stays hidden');
+    assert.deepEqual((await (await viewer('/api/settings')).json()).settings.networks.map((n) => n.name), ['testnet']);
+
+    const operator = bot(w, (await issueToken(w, csrf, { label: 'testnet operator', role: 'operator', networks: ['testnet'], expiresDays: 2 })).token);
+    assert.deepEqual((await (await operator('/api/me')).json()).operatorOf, ['testnet']);
+    assert.equal((await operator('/api/networks/testnet/ops', { method: 'POST', body: doctor })).status, 202);
+    assert.equal((await operator('/api/networks/devnet-palmatum/ops', { method: 'POST', body: doctor })).status, 403, 'not granted');
+    const wide = bot(w, (await issueToken(w, csrf, { label: 'all networks', role: 'operator', networks: ['*'] })).token);
+    assert.equal((await wide('/api/networks/devnet-palmatum/ops', { method: 'POST', body: JSON.stringify({ action: 'platform-reset' }) })).status, 403, 'lifecycle needs an admin token');
+    assert.equal((await wide('/api/devnets', { method: 'POST', body: JSON.stringify({ name: 'devnet-new' }) })).status, 403);
+    now += 2 * 86400_000;
+    assert.equal((await operator('/api/me')).status, 401, 'expired');
+    assert.equal((await wide('/api/me')).status, 200, 'no expiry');
+
+    // The issuing admin is demoted by another admin: its tokens follow at once.
+    const s = JSON.parse(readFileSync(join(w.dataDir, 'settings.json'), 'utf8'));
+    s.operators = [{ id: 77, login: 'op', role: 'admin', networks: ['*'] }, { id: 9920871, login: 'someone', role: 'operator', networks: ['testnet'] }];
+    writeFileSync(join(w.dataDir, 'settings.json'), JSON.stringify(s));
+    const me = await (await wide('/api/me')).json();
+    assert.deepEqual([me.role, me.operatorOf, me.allNetworks], ['operator', ['testnet'], false]);
+    assert.equal((await wide('/api/networks/devnet-palmatum/ops', { method: 'POST', body: doctor })).status, 403);
+    s.operators = [{ id: 77, login: 'op', role: 'admin', networks: ['*'] }];
+    writeFileSync(join(w.dataDir, 'settings.json'), JSON.stringify(s));
+    assert.equal((await wide('/api/me')).status, 401, 'account removed');
+    assert.equal((await viewer('/api/networks/testnet/ops')).status, 401);
+  } finally { w.close(); }
 });

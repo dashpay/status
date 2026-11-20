@@ -421,7 +421,9 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
   }
 
   function handle(s, q) {
-    const actor = q.actor && Number.isInteger(q.actor.id) ? { id: q.actor.id, login: String(q.actor.login).slice(0, 39) } : null;
+    // `token` is audit detail only (the API token a bot acted through); access is the account's.
+    const actor = q.actor && Number.isInteger(q.actor.id) ? { id: q.actor.id, login: String(q.actor.login).slice(0, 39), ...(/^[a-f0-9]{8}$/.test(q.actor.token) ? { token: q.actor.token } : {}) } : null;
+    const who = actor?.token ? `${actor.login} (API token ${actor.token})` : actor?.login;
     const lifecycle = LIFECYCLE.has(q.action) || LIFECYCLE.has(load(q.id)?.request?.action);
     if (!actor || !(lifecycle ? adminFor(s, actor) : operatorFor(s, actor, q.network))) throw new Error(lifecycle ? 'only admins create or delete devnets' : 'actor is not an operator for this network');
     if (q.type === 'create') {
@@ -431,7 +433,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
       let r = { id: q.id, network: q.network, actor, createdAt: new Date().toISOString(), request, status: 'queued', steps: [] };
       if (existsSync(recordPath(q.id))) throw new Error('duplicate request id');
       try { validateRequest(s, request, devnets.registry()); } catch (e) { r = { ...r, status: 'rejected', error: e.message }; }
-      save(r); write(r.id, `requested by ${actor.login}: ${request.action} ${request.nodes.join(',')} ${request.components.join(',')} ${Object.values(request.images).join(' ')}`);
+      save(r); write(r.id, `requested by ${who}: ${request.action} ${request.nodes.join(',')} ${request.components.join(',')} ${Object.values(request.images).join(' ')}`);
       return;
     }
     const r = UUID.test(q.id || '') ? load(q.id) : null;
@@ -441,16 +443,16 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
       if (r.status !== 'review' || q.planId !== r.review?.planId) throw new Error('plan changed or not awaiting review');
       if (Date.now() - Date.parse(r.review.preparedAt) > 60 * 60_000) { r.status = 'failed'; r.error = 'review expired after 60 minutes; prepare again'; save(r); return; }
       r.status = 'confirmed'; r.confirmedBy = actor; r.confirmedAt = new Date().toISOString(); save(r);
-      write(r.id, `confirmed by ${actor.login}: plan ${r.review.planId}`);
+      write(r.id, `confirmed by ${who}: plan ${r.review.planId}`);
     } else if (q.type === 'cancel') {
       const active = running.get(r.network);
       const mine = live.get(r.id);
       if (active?.id === r.id && mine) {
         // The running copy owns the record: flag it there so the next save keeps it.
-        mine.cancelRequested = true; save(mine); write(r.id, `cancel requested by ${actor.login}`);
+        mine.cancelRequested = true; save(mine); write(r.id, `cancel requested by ${who}`);
         active.child?.kill('SIGTERM');
       } else if (['queued', 'review', 'confirmed'].includes(r.status)) {
-        r.status = 'cancelled'; save(r); write(r.id, `cancelled by ${actor.login}`);
+        r.status = 'cancelled'; save(r); write(r.id, `cancelled by ${who}`);
         if (r.request.action === 'devnet-platform') devnets.markPlatformFailed?.(r.network);
       }
     } else if (q.type === 'resume') {
@@ -461,7 +463,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
         Object.assign(r, { status: 'queued', steps: [], review: undefined, stages: undefined, anchor: undefined, targets: undefined, execId: `${r.id}.${Date.now()}` });
       }
       else r.status = 'confirmed';
-      r.error = undefined; save(r); write(r.id, `resume requested by ${actor.login}`);
+      r.error = undefined; save(r); write(r.id, `resume requested by ${who}`);
     }
   }
 

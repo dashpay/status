@@ -22,6 +22,7 @@ import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, loadSettings, memberO
 import { expectations } from '../shared/monitoring.js';
 import { evaluateNetwork, projectNetwork } from '../shared/evaluate.js';
 import { requestDevnetKeys } from './devnet-keys.js';
+import { createApiTokens, presentsApiToken } from './api-tokens.js';
 import { devnetFiles } from '../shared/devnet-files.js';
 import { validateRequest } from '../agent/ops.js';
 import { validateMainnetReport } from '../shared/mainnet.js';
@@ -53,6 +54,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   const reloadSettings = () => { settings = loadSettings(settingsPath); return settings; };
   const app = express();
   const auth = createAuth({ origin }, { store: join(dataDir, 'sessions.json'), ...authDeps });
+  const tokens = createApiTokens({ dataDir, clock });
   const clients = new Set();
   const cache = new Map();
   // Each module reads the other only when a request is served, so ci gets a late-bound runningJobs.
@@ -108,6 +110,17 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   app.use(express.json({ limit: '64kb' }));
   app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
   auth.install(app);
+  // Bots authenticate with an API token instead of a browser session. A request
+  // that presents one is that token or nothing: it never falls back to a cookie.
+  app.use('/api', (req, res, next) => {
+    if (!presentsApiToken(req.get('authorization'))) return next();
+    const t = tokens.authenticate(req.get('authorization'));
+    const bot = t && { token: t.id, user: { id: t.owner.id, login: t.owner.login, token: t.id, grant: { role: t.role, networks: t.networks } } };
+    // Checked against the settings on disk: a revoked account loses its tokens at once.
+    if (!bot || !accessFor(reloadSettings(), bot.user)) return res.status(401).json({ error: 'API token unknown, revoked or expired' });
+    req.bot = bot;
+    next();
+  });
 
   // The limited Mainnet board is fed by a separately managed observer/fullnode
   // (not the existing mainnet-support fleet). Keep this write path token-only,
@@ -124,7 +137,19 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     } catch (e) { res.status(400).json({ error: e.message }); }
   });
 
-  const user = (req) => auth.session(req)?.user || null;
+  // Who is asking: an API token (req.bot) or the signed-in browser session.
+  const principal = (req) => req.bot || auth.session(req);
+  const user = (req) => principal(req)?.user || null;
+  // What is recorded and shown: the account, and the token it acted through.
+  const identity = (u) => (u ? { id: u.id, login: u.login, ...(u.token ? { token: u.token } : {}) } : null);
+  // CSRF protects cookies. A bearer token is not sent by a browser on its own.
+  const csrf = (req, res, next) => (req.bot ? next() : auth.csrf(req, res, next));
+  const signedIn = (req, res, next) => {
+    if (req.bot) return res.status(403).json({ error: 'This needs a signed-in account; API tokens operate networks only' });
+    const s = auth.session(req);
+    if (!s) return res.status(401).json({ error: 'Sign in required' });
+    req.session = s; next();
+  };
   const isOperator = (req, network) => operatorFor(settings, user(req), network);
   const isMember = (req, network) => memberOf(settings, user(req), network);
   const isAdmin = (req) => adminFor(settings, user(req));
@@ -168,7 +193,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     const a = accessFor(settings, u);
     // allNetworks: access covers every network, including ones created after this
     // session loaded (a devnet being created is not yet in the network list).
-    res.json({ user: u, role: a?.role || null, allNetworks: !!a?.networks.includes('*'), operatorOf: u ? settings.networks.filter((n) => isOperator(req, n.name)).map((n) => n.name) : [],
+    res.json({ user: identity(u), role: a?.role || null, allNetworks: !!a?.networks.includes('*'), operatorOf: u ? settings.networks.filter((n) => isOperator(req, n.name)).map((n) => n.name) : [],
       memberOf: u ? settings.networks.filter((n) => isMember(req, n.name)).map((n) => n.name) : [], admin: isAdmin(req) });
   });
   app.get('/api/overview', (req, res) => {
@@ -245,7 +270,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
 
   // Operator API.
   const requireAccess = (check, message) => (req, res, next) => {
-    const s = auth.session(req);
+    const s = principal(req);
     if (!s) return res.status(401).json({ error: 'Sign in required' });
     req.session = s;
     const network = req.params.name || readJSON(join(dirs.ops, `${req.params.id}.json`))?.network;
@@ -288,7 +313,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   app.post('/api/networks/:name/keys', (req, res, next) => {
     try { validateSettings(JSON.parse(readFileSync(settingsPath, 'utf8'))); reloadSettings(); next(); }
     catch { res.status(503).json({ error: 'Key access settings unavailable' }); }
-  }, requireOperator, auth.csrf,
+  }, signedIn, requireOperator, auth.csrf,
     rateLimit({ windowMs: 60_000, limit: 6, standardHeaders: true, legacyHeaders: false }), async (req, res) => {
       const n = settings.networks.find(x => x.name === req.params.name);
       if (!n || n.kind !== 'dashnet' || n.chainType !== 'devnet' || !/^devnet-[a-z0-9-]+$/.test(n.name)) return res.status(404).json({ error: 'Keys are available for managed devnets only' });
@@ -301,7 +326,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
         return res.json(result);
       } catch { return res.status(503).json({ error: 'Keys unavailable: the devnet must be idle and all node identities must verify' }); }
     });
-  app.post('/api/networks/:name/ops', requireOperator, auth.csrf, (req, res) => {
+  app.post('/api/networks/:name/ops', requireOperator, csrf, (req, res) => {
     const n = settings.networks.find((x) => x.name === req.params.name);
     if (!n) return res.status(404).json({ error: 'Network not found' });
     const body = req.body || {};
@@ -310,7 +335,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     try { validateRequest(settings, q, registry()); } catch (e) { return res.status(400).json({ error: e.message }); }
     const busy = listOps(n.name).find((r) => ['queued', 'preparing', 'confirmed', 'running'].includes(r.status));
     if (busy) return res.status(409).json({ error: `operation ${busy.id.slice(0, 8)} (${busy.request.action}) is ${busy.status} on this network`, id: busy.id });
-    request({ type: 'create', ...q, actor: req.session.user });
+    request({ type: 'create', ...q, actor: identity(req.session.user) });
     res.status(202).json({ id: q.id });
   });
   // New devnets (admins; billable). The agent prepares a plan that must be confirmed.
@@ -318,13 +343,13 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     if (!isAdmin(req)) return res.status(403).json({ error: 'Only admins create devnets' });
     res.json({ defaults: reloadSettings().devnets, existing: [...settings.networks.map((n) => n.name), ...Object.entries(registry()).filter(([, reg]) => reg?.status !== 'deleted').map(([name]) => name)] });
   });
-  app.post('/api/devnets', (req, res, next) => { const s = auth.session(req); if (!s) return res.status(401).json({ error: 'Sign in required' }); req.session = s; next(); }, auth.csrf, (req, res) => {
+  app.post('/api/devnets', (req, res, next) => { const s = principal(req); if (!s) return res.status(401).json({ error: 'Sign in required' }); req.session = s; next(); }, csrf, (req, res) => {
     if (!isAdmin(req)) return res.status(403).json({ error: 'Only admins create devnets' });
     const body = req.body || {};
     const q = { id: randomUUID(), network: body.name, action: 'create-devnet', nodes: [], devnet: body.devnet || {} };
     try { validateRequest(reloadSettings(), q, registry()); } catch (e) { return res.status(400).json({ error: e.message }); }
     if (listOps(q.network).some((r) => !['failed', 'cancelled', 'rejected', 'succeeded'].includes(r.status))) return res.status(409).json({ error: 'an operation for this name is already active' });
-    request({ type: 'create', ...q, actor: req.session.user });
+    request({ type: 'create', ...q, actor: identity(req.session.user) });
     res.status(202).json({ id: q.id, network: q.network });
   });
 
@@ -356,12 +381,12 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     req.on('close', () => clearInterval(timer));
   });
   for (const type of ['confirm', 'cancel', 'resume']) {
-    app.post(`/api/ops/:id/${type}`, requireOperator, auth.csrf, (req, res) => {
+    app.post(`/api/ops/:id/${type}`, requireOperator, csrf, (req, res) => {
       if (!UUID.test(req.params.id)) return res.status(400).json({ error: 'invalid id' });
       const r = readJSON(join(dirs.ops, `${req.params.id}.json`));
       if (type === 'confirm' && (r?.status !== 'review' || req.body?.planId !== r.review?.planId)) return res.status(409).json({ error: 'The plan changed or is not awaiting review' });
       if (LIFECYCLE_ACTIONS.includes(r?.request?.action) && !isAdmin(req)) return res.status(403).json({ error: 'Only admins confirm, cancel or resume devnet lifecycle and Platform resets' });
-      request({ type, id: req.params.id, network: req.network, planId: req.body?.planId, actor: req.session.user });
+      request({ type, id: req.params.id, network: req.network, planId: req.body?.planId, actor: identity(req.session.user) });
       res.status(202).json({ ok: true });
     });
   }
@@ -373,7 +398,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     // Non-admins see only the networks they were granted.
     res.json({ settings: isAdmin(req) ? s : { ...s, networks: s.networks.filter((n) => memberOf(s, user(req), n.name)) }, admin: isAdmin(req) });
   });
-  app.put('/api/settings', (req, res, next) => { const s = auth.session(req); if (!s) return res.status(401).json({ error: 'Sign in required' }); req.session = s; next(); }, auth.csrf, (req, res) => {
+  app.put('/api/settings', signedIn, auth.csrf, (req, res) => {
     if (!isAdmin(req)) return res.status(403).json({ error: 'Only admins can change settings' });
     try {
       // Access has its own endpoints; a page-wide save never carries a stale
@@ -387,7 +412,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
 
   // Access changes save immediately (no page-wide Save). Each call edits the
   // current file, never a stale browser copy of the whole settings document.
-  const adminWrite = [(req, res, next) => { const s = auth.session(req); if (!s) return res.status(401).json({ error: 'Sign in required' }); req.session = s; next(); }, auth.csrf,
+  const adminWrite = [signedIn, auth.csrf,
     (req, res, next) => (isAdmin(req) ? next() : res.status(403).json({ error: 'Only admins can change access' }))];
   const changeAccess = (req, res, fn) => {
     try {
@@ -412,6 +437,24 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     if (!next.operators.some((o) => o.id === id)) throw new Error('no such account');
     next.operators = next.operators.filter((o) => o.id !== id);
   }));
+
+  // API tokens for bots: issued and revoked by signed-in admins, never by a
+  // token. The token is in the response to its creation and nowhere afterwards.
+  app.get('/api/tokens', signedIn, (req, res) => (isAdmin(req) ? res.json({ tokens: tokens.list() }) : res.status(403).json({ error: 'Only admins manage API tokens' })));
+  app.post('/api/tokens', ...adminWrite, (req, res) => {
+    try {
+      const issued = tokens.issue(req.session.user, req.body || {});
+      console.info(JSON.stringify({ event: 'api-token-issued', token: issued.id, role: issued.role, networks: issued.networks, actorId: req.session.user.id, at: new Date(clock()).toISOString() }));
+      res.status(201).set('Cache-Control', 'private, no-store').json(issued);
+    } catch (e) { res.status(400).json({ error: e.message }); }
+  });
+  app.delete('/api/tokens/:id', ...adminWrite, (req, res) => {
+    try {
+      tokens.revoke(req.params.id);
+      console.info(JSON.stringify({ event: 'api-token-revoked', token: req.params.id, actorId: req.session.user.id, at: new Date(clock()).toISOString() }));
+      res.json({ tokens: tokens.list() });
+    } catch (e) { res.status(404).json({ error: e.message }); }
+  });
 
   // Remediation controls: administrators only. They record the request; the
   // incident sidecar forwards it on its next signed heartbeat and the board

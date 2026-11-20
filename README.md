@@ -328,6 +328,40 @@ silence monitoring indefinitely. Manual maintenance/journal gates remain separat
 Deployment requires both the status web/incident-worker changes and the broker
 refresh check. Merging this source does not deploy either component.
 
+### API tokens for bots
+
+A bot operates networks with an API token instead of a GitHub sign-in. An admin
+issues one in Settings → **API tokens** (label, role, networks, optional expiry).
+The token is shown once; the console keeps only its SHA-256 in
+`data/api-tokens.json`.
+
+```sh
+export DASH_STATUS_TOKEN=dst_...        # from a secret store, never a script or a log
+api() { curl -fsS -H "Authorization: Bearer $DASH_STATUS_TOKEN" -H 'Content-Type: application/json' "$@"; }
+api https://status.testnet.networks.dash.org/api/me
+id=$(api -X POST https://status.testnet.networks.dash.org/api/networks/devnet-x/ops -d '{"action":"doctor","nodes":[]}' | jq -r .id)
+api https://status.testnet.networks.dash.org/api/ops/$id            # status, steps, review, log tail
+api -X POST https://status.testnet.networks.dash.org/api/ops/$id/confirm -d '{"planId":"<review.planId>"}'
+```
+
+- A token **acts for the admin account that issued it** and can only narrow that
+  account's access: its role is the lower of the two, its networks the overlap.
+  Demoting or removing the account takes its tokens with it, on the next request.
+  The agent re-checks the account, as it does for a browser request.
+- Token requests need no cookie, `Origin` or CSRF value. A request that presents a
+  token is that token or nothing; an unknown, revoked or expired one is `401` and
+  never falls back to a browser session.
+- Tokens operate networks: read granted networks, operations and logs; create,
+  confirm, cancel and resume operations their role allows (an `admin` token
+  includes devnet lifecycle and Platform resets). They never change settings,
+  access, tokens, remediation controls or CI reporters and never read private
+  devnet keys; those answer `403` and need a signed-in account.
+- Operations record the account and the token id (`actor.token`), shown as
+  "via API token" on the operation and in its log. Issue and revoke are logged by
+  the web process with the admin's id. `lastUsedAt` is kept to the minute.
+- Revoke in Settings. A token that may have leaked is revoked first and replaced
+  after.
+
 ### Devnet operator keys
 
 Connect → **Private devnet keys** is available to operators of that managed

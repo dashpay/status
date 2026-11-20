@@ -222,3 +222,23 @@ test('console devnets carry their images and dashmate release; sidecars are labe
   assert.equal(sidecarOf({ repo: 'redis', name: 'some-cache' }), null, 'only the rate limiter store is a sidecar');
   assert.equal(sidecarOf({ repo: 'dashpay/drive', name: 'x-drive_abci' }), null);
 });
+
+test('API token grants only narrow the account they act for', async () => {
+  const { accessFor, adminFor, memberOf } = await import('./settings.js');
+  const s = structuredClone(settings);
+  s.operators.push({ id: 6, login: 'o', role: 'operator', networks: ['testnet', 'devnet-a'] }, { id: 5, login: 'v', role: 'viewer', networks: ['testnet'] });
+  const v = validateSettings(s);
+  const as = (id, role, networks) => accessFor(v, { id, grant: { role, networks } });
+  assert.deepEqual([as(9920871, 'admin', ['*']).role, as(9920871, 'admin', ['*']).networks], ['admin', ['*']]);
+  assert.deepEqual([as(9920871, 'operator', ['testnet']).role, as(9920871, 'operator', ['testnet']).networks], ['operator', ['testnet']]);
+  assert.equal(adminFor(v, { id: 9920871, grant: { role: 'operator', networks: ['*'] } }), false);
+  // An account below the token's role or outside its networks wins.
+  assert.deepEqual([as(6, 'admin', ['*']).role, as(6, 'admin', ['*']).networks], ['operator', ['testnet', 'devnet-a']]);
+  assert.deepEqual(as(6, 'operator', ['devnet-a', 'devnet-b']).networks, ['devnet-a']);
+  assert.equal(as(6, 'operator', ['devnet-b']), null);
+  assert.equal(as(5, 'operator', ['testnet']).role, 'viewer');
+  assert.equal(operatorFor(v, { id: 5, grant: { role: 'operator', networks: ['testnet'] } }, 'testnet'), false);
+  assert.equal(memberOf(v, { id: 6, grant: { role: 'viewer', networks: ['testnet'] } }, 'devnet-a'), false);
+  assert.equal(as(1, 'admin', ['*']), null, 'no account, no access');
+  assert.equal(as(6, 'owner', ['testnet']), null, 'unknown role');
+});

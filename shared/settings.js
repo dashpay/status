@@ -245,7 +245,22 @@ export function readJSON(path, fallback = null) {
 
 export function accessFor(settings, user) {
   const o = user ? settings.operators.find((x) => x.id === user.id) : null;
-  return o ? { ...o, role: o.role || (o.networks.includes('*') ? 'admin' : 'operator') } : null;
+  if (!o) return null;
+  const account = { ...o, role: o.role || (o.networks.includes('*') ? 'admin' : 'operator') };
+  return user.grant ? narrowAccess(account, user.grant) : account;
+}
+// An API token (server/api-tokens.js) acts for the account that issued it: its
+// own grant can lower that account's role and shorten its networks, never widen
+// them. `grant` is set by the web process from a verified token only; the agent
+// rebuilds every actor from its id and login.
+export function narrowAccess(account, grant) {
+  if (!ROLES.includes(grant.role) || !Array.isArray(grant.networks)) return null;
+  const role = ROLES[Math.max(ROLES.indexOf(account.role), ROLES.indexOf(grant.role))];
+  const networks = role === 'admin' ? ['*']
+    : account.networks.includes('*') ? grant.networks
+      : grant.networks.includes('*') ? account.networks
+        : account.networks.filter((n) => grant.networks.includes(n));
+  return networks.length ? { ...account, role, networks } : null;
 }
 const covers = (a, network) => network === undefined || a.networks.includes('*') || a.networks.includes(network);
 // Members (any role) see granted networks in full detail, including private ones.
