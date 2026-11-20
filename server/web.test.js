@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createWeb, ttlCache } from './web.js';
+import { requestDevnetKeys } from './devnet-keys.js';
 import { DEFAULT_SETTINGS } from '../shared/settings.js';
 
 async function start(userId = 9920871, extraUsers = [], options = {}) {
@@ -348,6 +349,24 @@ test('key route excludes Mainnet/Testnet and suppresses internal errors', async 
     const response = await w.req('/api/networks/devnet-sakura/keys', { method: 'POST', headers });
     assert.equal(response.status, 503); assert.ok(!(await response.text()).includes('secret fixture'));
   } finally { w.close(); }
+});
+
+test('key route names a missing key service instead of blaming the devnet', async () => {
+  // Default reader, no socket configured: what a web container rolled without the keys overlay sees.
+  const w = await start(9920871, [], { keySocket: '' });
+  try {
+    const csrf = await w.login(), headers = { 'x-csrf-token': csrf };
+    writeFileSync(join(w.dataDir, 'devnets.json'), JSON.stringify({ 'devnet-sakura': { status: 'ready' } }));
+    const response = await w.req('/api/networks/devnet-sakura/keys', { method: 'POST', headers });
+    assert.equal(response.status, 503);
+    const { error } = await response.json();
+    assert.match(error, /key service is not running/); assert.doesNotMatch(error, /must be idle/);
+  } finally { w.close(); }
+});
+
+test('key reader marks an absent or unreachable socket, and only that, as a service fault', async () => {
+  await assert.rejects(requestDevnetKeys('', 'devnet-sakura', { id: 1 }), { code: 'key-service-down' });
+  await assert.rejects(requestDevnetKeys(join(tmpdir(), `absent-${process.pid}-keys.sock`), 'devnet-sakura', { id: 1 }), { code: 'key-service-down' });
 });
 
 test('remediation switch and queue clear are administrator-only, CSRF-protected and default to off', async () => {

@@ -348,7 +348,14 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
         if (!operatorFor(settings, user(req), n.name)) return res.status(403).json({ error: 'Operator access required' });
         console.info(JSON.stringify({ event: 'devnet-key-access', network: n.name, actorId: req.session.user.id, at: new Date(clock()).toISOString() }));
         return res.json(result);
-      } catch { return res.status(503).json({ error: 'Keys unavailable: the devnet must be idle and all node identities must verify' }); }
+      } catch (e) {
+        // A missing key service is a deployment fault; do not blame the devnet for it.
+        if (e?.code === 'key-service-down') {
+          console.warn(JSON.stringify({ event: 'devnet-key-service-down', network: n.name, at: new Date(clock()).toISOString() }));
+          return res.status(503).json({ error: 'Keys unavailable: the key service is not running on the status host' });
+        }
+        return res.status(503).json({ error: 'Keys unavailable: the devnet must be idle and all node identities must verify' });
+      }
     });
   app.post('/api/networks/:name/ops', requireOperator, csrf, (req, res) => {
     const n = settings.networks.find((x) => x.name === req.params.name);
