@@ -382,7 +382,12 @@ checks. Grants reload before and after retrieval. Mainnet/Testnet are excluded.
 The ordinary connection files and event stream never contain keys.
 
 Deploy `deploy/devnet-keys-compose.yml` with the same source image as web.
-Create `/srv/dash-status/key-access` owned by uid1000, mode0700. The `keys`
+Create `/srv/dash-status/key-access` owned by uid1000, mode0700; `deploy/deploy.sh`
+adds that compose file, and rolls `keys` together with web, on every host where
+the directory exists. A hand-run `docker compose` must name the file too: without
+it the recreated web has no socket, and a full `up --remove-orphans` removes the
+helper. Reveal then answers "the key service is not running on the status host",
+and web logs `devnet-key-service-down`. The `keys`
 service is a separate, read-only collector, not a network operation runner:
 it exposes only a mode0600 Unix socket, checks current network/operator grants,
 requires an idle ready devnet, uses existing pinned SSH identities without
@@ -392,10 +397,26 @@ plus the devnet's spork/payout/faucet addresses. It never changes or unlocks a
 wallet, generates keys, or writes keys to disk. RPC/SSH/TLS credentials are not
 returned. Web mounts only the socket directory, never the agent's credentials.
 
+Legacy wallets use `dumpprivkey`. For descriptor wallets the collector matches
+the owned address to an existing private P2PKH descriptor, derives its test/devnet
+WIF in target-process memory, and asks Core to verify that it resolves to the
+registered address. OpenSSL supplies secp256k1 public-key operations over stdin;
+neither private descriptors nor scalars enter command arguments or files. The
+spork key may instead be held in the managed node's secret store; its address is
+verified in the same way. Unsupported scripts or ambiguous/mismatched identities
+fail closed. These paths do not convert wallets or change registrations.
+
 Responses are `private, no-store`; audit output contains only actor ID, network
 and time. UI data clears on hiding, unmount, background tab or five minutes.
 Downloads are explicit private JSON files. Failures return a generic error;
 never log raw SSH/RPC responses while troubleshooting key access.
+For a wallet-side RPC -18, compare `listwallets` with `listwalletdir`: a wallet on
+disk need not be loaded. An authorized operator can load the existing wallet with
+`loadwallet "dashnet" true` to persist autoload, then recheck exports; the read-only
+key service does not load wallets itself. Core can keep processing a timed-out
+load request, so reconcile `listwallets`, `getrpcinfo` and wallet scan state before
+retrying. Verify the wallet entry in Core's startup settings without restarting
+the node solely to test persistence.
 
 ### CI host remediation exclusions
 

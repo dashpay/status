@@ -20,20 +20,29 @@ docker run --rm --network none --read-only \
 previous=$(docker image inspect dash-status:current --format '{{.Id}}' 2>/dev/null || true)
 install -d -o 1000 -g 1000 -m 0750 /srv/dash-status/data
 install -d -o 1000 -g 1000 -m 0700 /srv/dash-status/agent /srv/dash-status/agent/devnets
-# Preserve the optional incident sidecar on future rollouts. Loading the small
-# compose env file only supplies a non-secret receiver URL; never source it.
+# Preserve the optional incident and devnet key sidecars on future rollouts.
+# Loading the small compose env file only supplies a non-secret receiver URL;
+# never source it. The key sidecar is on wherever its socket directory exists
+# (README, "Devnet operator keys"). Leaving its file out would drop web's socket
+# and, on a full rollout, remove the helper as an orphan.
+web_services=web
+if [ -d /srv/dash-status/key-access ]; then web_services="web keys"; fi
 compose() {
+  files="-f deploy/compose.yml"; env_file=
   if [ -f /etc/dash-status/incidents/compose.env ]; then
     install -d -o 1000 -g 1000 -m 0700 /srv/dash-status/data/incidents
-    docker compose --env-file /etc/dash-status/incidents/compose.env -f deploy/compose.yml -f deploy/incident-compose.yml "$@"
-  else
-    docker compose -f deploy/compose.yml "$@"
+    env_file="--env-file /etc/dash-status/incidents/compose.env"; files="$files -f deploy/incident-compose.yml"
   fi
+  if [ -d /srv/dash-status/key-access ]; then files="$files -f deploy/devnet-keys-compose.yml"; fi
+  # shellcheck disable=SC2086 # deliberate word splitting of fixed option lists
+  docker compose $env_file $files "$@"
 }
 docker tag "dash-status:${rev}" dash-status:current
+# The key helper serves one read per request and runs no operation, so a
+# web-only rollout may replace it together with web.
 case "${DEPLOY_ONLY:-}" in
   "") compose up -d --remove-orphans ;;
-  web) compose up -d --no-deps web ;;
+  web) compose up -d --no-deps $web_services ;;
   *) echo "DEPLOY_ONLY must be empty or web" >&2; exit 2 ;;
 esac
 for i in $(seq 1 30); do
@@ -56,6 +65,6 @@ done
 echo "web did not become healthy; rolling back" >&2
 if [ -n "$previous" ]; then
   docker tag "$previous" dash-status:current
-  if [ "${DEPLOY_ONLY:-}" = web ]; then compose up -d --no-deps web; else compose up -d; fi
+  if [ "${DEPLOY_ONLY:-}" = web ]; then compose up -d --no-deps $web_services; else compose up -d; fi
 fi
 exit 1
