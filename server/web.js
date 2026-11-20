@@ -109,18 +109,32 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   });
   app.use(express.json({ limit: '64kb' }));
   app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
-  auth.install(app);
   // Bots authenticate with an API token instead of a browser session. A request
-  // that presents one is that token or nothing: it never falls back to a cookie.
+  // that presents one is that token or nothing: it never falls back to a cookie,
+  // so this runs before the browser's own session routes.
+  const resolveBot = (header) => {
+    // The grant is read from the settings on disk, and only from a file that
+    // validates: loadSettings falls back to the built-in defaults, which name an
+    // admin, and a token must never be authorized by that fallback.
+    try { validateSettings(JSON.parse(readFileSync(settingsPath, 'utf8'))); } catch { return { status: 503, error: 'Access settings unavailable' }; }
+    reloadSettings();
+    const t = tokens.authenticate(header);
+    const bot = t && { token: t.id, user: { id: t.owner.id, login: t.owner.login, token: t.id, grant: { role: t.role, networks: t.networks } } };
+    // A demoted or removed account takes its tokens with it at once.
+    return bot && accessFor(settings, bot.user) ? { bot } : { status: 401, error: 'API token unknown, revoked or expired' };
+  };
+  const SESSION_ONLY = 'This needs a signed-in account; API tokens operate networks only';
   app.use('/api', (req, res, next) => {
     if (!presentsApiToken(req.get('authorization'))) return next();
-    const t = tokens.authenticate(req.get('authorization'));
-    const bot = t && { token: t.id, user: { id: t.owner.id, login: t.owner.login, token: t.id, grant: { role: t.role, networks: t.networks } } };
-    // Checked against the settings on disk: a revoked account loses its tokens at once.
-    if (!bot || !accessFor(reloadSettings(), bot.user)) return res.status(401).json({ error: 'API token unknown, revoked or expired' });
-    req.bot = bot;
+    const r = resolveBot(req.get('authorization'));
+    if (!r.bot) return res.status(r.status).json({ error: r.error });
+    if (req.path === '/session' || req.path.startsWith('/auth/')) return res.status(403).json({ error: SESSION_ONLY });
+    req.bot = r.bot;
     next();
   });
+  // An open stream has no next request: it re-checks its token as it goes.
+  const botGone = (req) => !!req.bot && !resolveBot(req.get('authorization')).bot;
+  auth.install(app);
 
   // The limited Mainnet board is fed by a separately managed observer/fullnode
   // (not the existing mainnet-support fleet). Keep this write path token-only,
@@ -145,7 +159,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   // CSRF protects cookies. A bearer token is not sent by a browser on its own.
   const csrf = (req, res, next) => (req.bot ? next() : auth.csrf(req, res, next));
   const signedIn = (req, res, next) => {
-    if (req.bot) return res.status(403).json({ error: 'This needs a signed-in account; API tokens operate networks only' });
+    if (req.bot) return res.status(403).json({ error: SESSION_ONLY });
     const s = auth.session(req);
     if (!s) return res.status(401).json({ error: 'Sign in required' });
     req.session = s; next();
@@ -154,6 +168,9 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   const isMember = (req, network) => memberOf(settings, user(req), network);
   const isAdmin = (req) => adminFor(settings, user(req));
   const visible = (req) => settings.networks.filter((n) => n.public || isMember(req, n.name));
+  // The CI and AWS pages are not divided by network. An account with any access
+  // sees them whole; a token does only when its grant covers every network.
+  const seesInfrastructure = (u) => !!memberOf(settings, u) && (!u.grant || accessFor(settings, u).networks.includes('*'));
   const stateOf = (name) => readJSON(join(dirs.state, `${name}.json`));
 
   function view(network, operator) {
@@ -213,12 +230,19 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     const client = { res, req, user: user(req) };
     clients.add(client);
     res.write(`retry: 3000\n\n`);
-    const ping = setInterval(() => res.write(`: ping\n\n`), 25_000);
+    const ping = setInterval(() => (dropIfGone(client) ? clearInterval(ping) : res.write(`: ping\n\n`)), 25_000);
     req.on('close', () => { clearInterval(ping); clients.delete(client); });
   });
+  // A revoked or expired token stops receiving events, and its stream is closed.
+  const dropIfGone = (c) => {
+    if (!botGone(c.req)) return false;
+    clients.delete(c);
+    c.res.end(`event: error\ndata: ${JSON.stringify({ error: 'API token unknown, revoked or expired' })}\n\n`);
+    return true;
+  };
   const push = (event, payload, filter = () => true) => {
     const data = `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
-    for (const c of clients) if (filter(c)) c.res.write(data);
+    for (const c of [...clients]) if (!dropIfGone(c) && filter(c)) c.res.write(data);
   };
   const debounce = new Map();
   // A change to a private job is announced to members only: its timing is private too.
@@ -228,7 +252,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     for (const members of scope === 'all' ? [true, false] : [true]) {
       const key = `ci-queue|${members}`;
       clearTimeout(debounce.get(key));
-      debounce.set(key, setTimeout(() => push('ci-queue', { at: new Date(clock()).toISOString() }, (c) => !!memberOf(settings, c.user) === members), 1000));
+      debounce.set(key, setTimeout(() => push('ci-queue', { at: new Date(clock()).toISOString() }, (c) => seesInfrastructure(c.user) === members), 1000));
     }
   };
   function onStateFile(file) {
@@ -365,6 +389,12 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
     res.flushHeaders();
     const send = () => {
+      // A token is checked again on every tick: revoked, expired or no longer
+      // granted this network, it gets no more of the log.
+      if (req.bot && (botGone(req) || !memberOf(settings, req.bot.user, req.network))) {
+        clearInterval(timer);
+        return res.end(`event: error\ndata: ${JSON.stringify({ error: 'API token unknown, revoked or expired' })}\n\n`);
+      }
       try {
         if (!existsSync(path)) return;
         const size = statSync(path).size;
@@ -376,9 +406,9 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
         res.write(`event: log\ndata: ${JSON.stringify({ text: buf.toString(), offset })}\n\n`);
       } catch (e) { res.write(`event: error\ndata: ${JSON.stringify({ error: e.message })}\n\n`); }
     };
-    send();
     const timer = setInterval(send, 1000);
     req.on('close', () => clearInterval(timer));
+    send();
   });
   for (const type of ['confirm', 'cancel', 'resume']) {
     app.post(`/api/ops/:id/${type}`, requireOperator, csrf, (req, res) => {
@@ -477,12 +507,12 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   // sanitized view (statistics, nothing identifying). Spend is never shown
   // before sign-in.
   const cached = ttlCache(clock);
-  app.get('/api/ci', (req, res) => res.json(memberOf(settings, user(req)) ? ci.summary({ admin: isAdmin(req) }) : cached('ci', () => ci.publicSummary())));
+  app.get('/api/ci', (req, res) => res.json(seesInfrastructure(user(req)) ? ci.summary({ admin: isAdmin(req) }) : cached('ci', () => ci.publicSummary())));
   app.get('/api/ci/queue/capacity', (req, res) => {
     const window = typeof req.query.window === 'string' ? req.query.window : '7d';
-    res.json(orgQueue.capacity({ full: !!memberOf(settings, user(req)), window }));
+    res.json(orgQueue.capacity({ full: seesInfrastructure(user(req)), window }));
   });
-  app.get('/api/ci/queue', (req, res) => res.json(memberOf(settings, user(req)) ? orgQueue.summary({ full: true }) : cached('ci-queue', () => orgQueue.summary())));
+  app.get('/api/ci/queue', (req, res) => res.json(seesInfrastructure(user(req)) ? orgQueue.summary({ full: true }) : cached('ci-queue', () => orgQueue.summary())));
   app.post('/api/ci/reporters', ...adminWrite, (req, res) => {
     try {
       const { id, token } = ci.addReporter(req.body?.label);
@@ -498,7 +528,9 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     const viewer = user(req);
     // Cost visibility follows the authenticated session, never query parameters.
     // Keep signed-in summaries separate from the anonymous projection cache.
-    res.vary('Cookie').json(memberOf(settings, viewer) ? inv : cached(`aws|${viewer ? 'signed-in' : 'public'}|${inv.at}`, () => publicInventory(inv, { includeCosts: !!viewer })));
+    // A token narrowed to some networks gets the anonymous projection, without costs.
+    const browser = !!viewer && !req.bot;
+    res.vary('Cookie').json(seesInfrastructure(viewer) ? inv : cached(`aws|${browser ? 'signed-in' : 'public'}|${inv.at}`, () => publicInventory(inv, { includeCosts: browser })));
   });
 
   // GitHub account lookup so admins can grant access by login.

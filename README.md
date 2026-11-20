@@ -339,9 +339,14 @@ The token is shown once; the console keeps only its SHA-256 in
 export DASH_STATUS_TOKEN=dst_...        # from a secret store, never a script or a log
 api() { curl -fsS -H "Authorization: Bearer $DASH_STATUS_TOKEN" -H 'Content-Type: application/json' "$@"; }
 api https://status.testnet.networks.dash.org/api/me
+# A health check runs at once and ends succeeded or failed:
 id=$(api -X POST https://status.testnet.networks.dash.org/api/networks/devnet-x/ops -d '{"action":"doctor","nodes":[]}' | jq -r .id)
-api https://status.testnet.networks.dash.org/api/ops/$id            # status, steps, review, log tail
-api -X POST https://status.testnet.networks.dash.org/api/ops/$id/confirm -d '{"planId":"<review.planId>"}'
+api https://status.testnet.networks.dash.org/api/ops/$id            # status, steps, result, log tail
+# An upgrade or a Platform reset prepares a plan and waits in `review` until it is confirmed:
+id=$(api -X POST https://status.testnet.networks.dash.org/api/networks/devnet-x/ops \
+  -d '{"action":"platform-reset","images":{"drive":"dashpay/drive:5.0.3","dapi":"dashpay/rs-dapi:5.0.3"}}' | jq -r .id)
+plan=$(api https://status.testnet.networks.dash.org/api/ops/$id | jq -r .review.planId)   # once status is "review"; read the review first
+api -X POST https://status.testnet.networks.dash.org/api/ops/$id/confirm -d "{\"planId\":\"$plan\"}"
 ```
 
 - A token **acts for the admin account that issued it** and can only narrow that
@@ -351,6 +356,12 @@ api -X POST https://status.testnet.networks.dash.org/api/ops/$id/confirm -d '{"p
 - Token requests need no cookie, `Origin` or CSRF value. A request that presents a
   token is that token or nothing; an unknown, revoked or expired one is `401` and
   never falls back to a browser session.
+- The CI and AWS pages are not divided by network, so a token sees them in full
+  only when its grant covers every network; otherwise it gets the public view.
+- Open streams (`/api/stream`, an operation's log) re-check their token as they
+  go and end when it is revoked, expires or loses the network.
+- If `settings.json` cannot be read or does not validate, token requests answer
+  `503`: a token is never authorized by the built-in default settings.
 - Tokens operate networks: read granted networks, operations and logs; create,
   confirm, cancel and resume operations their role allows (an `admin` token
   includes devnet lifecycle and Platform resets). They never change settings,

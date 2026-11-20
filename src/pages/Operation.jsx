@@ -44,7 +44,7 @@ export default function Operation({ name, id }) {
         <div><span className="text-dim">requested by </span>{op.actor.login}{op.actor.token && <span className="text-dim"> via API token <span className="mono">{op.actor.token}</span></span>} <span className="text-dim">{ago(op.createdAt, now)} ago</span></div>
         <div className="truncate"><span className="text-dim">nodes </span><span className="mono">{q.nodes.length > 6 ? `${q.nodes.slice(0, 6).join(', ')} +${q.nodes.length - 6}` : q.nodes.join(', ')}</span></div>
         <div className="truncate"><span className="text-dim">images </span><span className="mono">{Object.values(q.images || {}).join(' ') || (q.components || []).join(', ') || '—'}</span></div>
-        {op.confirmedBy && <div><span className="text-dim">confirmed by </span>{op.confirmedBy.login} <span className="text-dim">{clock(op.confirmedAt)}</span></div>}
+        {op.confirmedBy && <div><span className="text-dim">confirmed by </span>{op.confirmedBy.login}{op.confirmedBy.token && <span className="text-dim"> via API token <span className="mono">{op.confirmedBy.token}</span></span>} <span className="text-dim">{clock(op.confirmedAt)}</span></div>}
         {op.runner && <div><span className="text-dim">dashnet runner </span><span className="mono">{op.runner}</span></div>}
         {q.options?.observationWindow && <div><span className="text-dim">observation window </span><span className="mono">{q.options.observationWindow}</span></div>}
         {op.finishedAt && <div><span className="text-dim">finished </span>{clock(op.finishedAt)}</div>}

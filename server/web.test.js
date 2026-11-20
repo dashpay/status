@@ -516,7 +516,10 @@ test('API tokens: an admin issues one; a bot queues and confirms operations with
     assert.deepEqual([issued.role, issued.networks, issued.owner], ['admin', ['*'], { id: 9920871, login: 'someone' }]);
     // Only the hash is kept, and the list never returns the token.
     const stored = readFileSync(join(w.dataDir, 'api-tokens.json'), 'utf8');
-    assert.ok(!stored.includes(issued.token) && !stored.includes(issued.token.split('_')[2]));
+    // The secret is base64url and may itself contain or start with an underscore.
+    const secret = issued.token.slice(`dst_${issued.id}_`.length);
+    assert.equal(secret.length, 43);
+    assert.ok(!stored.includes(issued.token) && !stored.includes(secret));
     const listed = await (await w.req('/api/tokens')).json();
     assert.deepEqual(listed.tokens.map((t) => [t.id, t.label, t.token]), [[issued.id, 'infraclaw', undefined]]);
 
@@ -576,7 +579,7 @@ test('API tokens operate networks only: no settings, access, tokens, remediation
       assert.match((await r.json()).error, /signed-in account/, `${method} ${path}`);
     }
     assert.equal(Object.keys(JSON.parse(readFileSync(join(w.dataDir, 'api-tokens.json'), 'utf8'))).length, 1);
-    assert.equal((await call('/api/auth/logout', { method: 'POST' })).status, 401);
+    assert.equal((await call('/api/auth/logout', { method: 'POST' })).status, 403);
     // Admin tokens do manage devnet lifecycle and Platform resets, which is what a bot is for.
     const reset = await call('/api/networks/devnet-palmatum/ops', { method: 'POST', body: JSON.stringify({ action: 'platform-reset', images: { drive: 'dashpay/drive:5.0.3' }, options: { genesisProtocolVersion: 14 } }) });
     assert.equal(reset.status, 202);
@@ -618,5 +621,97 @@ test('API tokens narrow their account: role, networks, expiry, and the account l
     writeFileSync(join(w.dataDir, 'settings.json'), JSON.stringify(s));
     assert.equal((await wide('/api/me')).status, 401, 'account removed');
     assert.equal((await viewer('/api/networks/testnet/ops')).status, 401);
+  } finally { w.close(); }
+});
+
+test('API tokens: a presented token is enforced on the session routes, and never authorized by default settings', async () => {
+  const w = await start();
+  try {
+    const csrf = await w.login();
+    const { token } = await issueToken(w, csrf, { label: 'bot', role: 'admin' });
+    // The browser's own cookie is attached to every one of these.
+    const withToken = (path, t, opts = {}) => w.req(path, { ...opts, headers: { authorization: `Bearer ${t}`, 'x-csrf-token': csrf, ...(opts.headers || {}) } });
+    assert.equal((await withToken('/api/session', 'dst_nope')).status, 401, 'a wrong token does not fall back to the session');
+    assert.equal((await withToken('/api/session', token)).status, 403);
+    assert.equal((await withToken('/api/auth/logout', token, { method: 'POST' })).status, 403);
+    assert.equal((await withToken('/api/auth/github', token)).status, 403);
+    assert.equal((await (await w.req('/api/session')).json()).user.id, 9920871, 'the browser session survived');
+
+    // Unreadable or invalid settings: loadSettings falls back to defaults that name an admin.
+    const saved = readFileSync(join(w.dataDir, 'settings.json'), 'utf8');
+    for (const broken of ['{ not json', JSON.stringify({ ...JSON.parse(saved), pollSeconds: 1 })]) {
+      writeFileSync(join(w.dataDir, 'settings.json'), broken);
+      const r = await bot(w, token)('/api/me');
+      assert.equal(r.status, 503);
+      assert.match((await r.json()).error, /settings unavailable/);
+      assert.equal((await bot(w, token)('/api/networks/testnet/ops', { method: 'POST', body: JSON.stringify({ action: 'doctor', nodes: ['seed-2'] }) })).status, 503);
+    }
+    rmSync(join(w.dataDir, 'settings.json'));
+    assert.equal((await bot(w, token)('/api/me')).status, 503, 'no settings file');
+    assert.equal((await bot(w)('/api/overview')).status, 200, 'the public board still answers');
+    writeFileSync(join(w.dataDir, 'settings.json'), saved);
+    assert.equal((await bot(w, token)('/api/me')).status, 200);
+  } finally { w.close(); }
+});
+
+test('API tokens: CI and AWS detail only for a grant that covers every network', async () => {
+  const w = await start();
+  try {
+    const csrf = await w.login();
+    mkdirSync(join(w.dataDir, 'aws'), { recursive: true });
+    writeFileSync(join(w.dataDir, 'aws', 'inventory.json'), JSON.stringify({ at: 'now', regions: ['us-west-2'], errors: [],
+      instances: [{ region: 'us-west-2', id: 'i-0123456789abcdef0', type: 't4g.small', state: 'running', arch: 'arm64', publicIp: '192.0.2.9', tags: { Name: 'dn-devnet-secret-1', DashNetwork: 'devnet-secret' }, vcpus: 2, memoryMiB: 2048 }],
+      volumes: [], addresses: [], natGateways: [], loadBalancers: [], lambda: [], dynamodb: [], ecr: [], snapshots: [], cloudfront: [], s3: [],
+      costs: { at: 'now', month: '2026-11', monthToDate: 100, monthEndEstimate: 200, lastMonth: 150, byService: [], daily: [] } }));
+    const narrow = bot(w, (await issueToken(w, csrf, { label: 'testnet only', role: 'operator', networks: ['testnet'] })).token);
+    const wide = bot(w, (await issueToken(w, csrf, { label: 'everything', role: 'viewer', networks: ['*'] })).token);
+    const aws = await (await narrow('/api/aws')).json();
+    assert.equal(aws.public, true);
+    assert.equal(aws.costs, undefined, 'no spend for a narrowed token');
+    for (const leak of ['192.0.2.9', 'i-0123456789abcdef0', 'dn-devnet-secret-1']) assert.ok(!JSON.stringify(aws).includes(leak), `leaked ${leak}`);
+    assert.equal((await (await narrow('/api/ci')).json()).public, true);
+    assert.equal((await (await narrow('/api/ci/queue')).json()).public, true);
+    const all = await (await wide('/api/aws')).json();
+    assert.equal(all.instances[0].publicIp, '192.0.2.9');
+    assert.equal((await (await wide('/api/ci')).json()).public, undefined);
+    // The browser account keeps its view, and the anonymous cache is not poisoned by either.
+    assert.equal((await (await w.req('/api/aws')).json()).instances[0].id, 'i-0123456789abcdef0');
+    assert.equal((await (await bot(w)('/api/aws')).json()).costs, undefined);
+  } finally { w.close(); }
+});
+
+test('API tokens: an open operation log and event stream end when the token is revoked', async () => {
+  const w = await start();
+  try {
+    const csrf = await w.login();
+    const issued = await issueToken(w, csrf, { label: 'stream', role: 'admin' });
+    const id = '6c8139ad-e92f-40da-943d-1e001efaccb5';
+    mkdirSync(join(w.dataDir, 'ops'), { recursive: true });
+    writeFileSync(join(w.dataDir, 'ops', `${id}.json`), JSON.stringify({ id, network: 'testnet', status: 'running', request: { action: 'upgrade' }, createdAt: new Date().toISOString() }));
+    writeFileSync(join(w.dataDir, 'ops', `${id}.log`), 'first line\n');
+    const text = new TextDecoder();
+    // Reads until the server ends the stream; fails the test if it is still open after the limit.
+    const drain = async (response, limitMs) => {
+      const reader = response.body.getReader();
+      let seen = '';
+      const timeout = setTimeout(() => reader.cancel('still open'), limitMs);
+      try { for (;;) { const { done, value } = await reader.read(); if (done) break; seen += text.decode(value); } } finally { clearTimeout(timeout); }
+      return seen;
+    };
+    const log = await bot(w, issued.token)(`/api/ops/${id}/log`);
+    const events = await bot(w, issued.token)('/api/stream');
+    assert.equal(log.status, 200); assert.equal(events.status, 200);
+    const logDone = drain(log, 8000), eventsDone = drain(events, 8000);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal((await w.req(`/api/tokens/${issued.id}`, { method: 'DELETE', headers: { 'x-csrf-token': csrf } })).status, 200);
+    writeFileSync(join(w.dataDir, 'ops', `${id}.log`), 'first line\nwritten after the token was revoked\n');
+    // The event stream is checked on its next event: an operation change is one.
+    writeFileSync(join(w.dataDir, 'ops', `${id}.json`), JSON.stringify({ id, network: 'testnet', status: 'succeeded', request: { action: 'upgrade' }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }));
+    const [logText, eventText] = await Promise.all([logDone, eventsDone]);
+    assert.match(logText, /first line/);
+    assert.ok(!logText.includes('written after the token was revoked'), 'nothing after revocation');
+    assert.match(logText, /event: error\ndata: \{"error":"API token unknown, revoked or expired"\}/);
+    assert.match(eventText, /event: error/);
+    assert.ok(!eventText.includes('"status":"succeeded"'), 'no event after revocation');
   } finally { w.close(); }
 });

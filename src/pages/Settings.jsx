@@ -246,16 +246,20 @@ function ApiTokens({ names }) {
   const [networks, setNetworks] = useState([]);
   const [days, setDays] = useState('');
   const [issued, setIssued] = useState(null);
+  const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
   useEffect(() => { api('/api/tokens').then((r) => setTokens(r.tokens), setErr); }, []);
   const toggle = (n) => setNetworks((l) => (l.includes(n) ? l.filter((x) => x !== n) : [...l, n]));
   const issue = async (e) => {
-    e.preventDefault(); setErr(null); setIssued(null);
+    e.preventDefault();
+    // One token per submit: a second token's secret would replace the first on screen.
+    if (busy) return;
+    setBusy(true); setErr(null); setIssued(null);
     try {
       const t = await api('/api/tokens', { method: 'POST', body: { label, role, networks: role === 'admin' ? ['*'] : networks, ...(days ? { expiresDays: Number(days) } : {}) } });
       setIssued(t); setLabel(''); setNetworks([]); setDays('');
       setTokens((await api('/api/tokens')).tokens);
-    } catch (x) { setErr(x); }
+    } catch (x) { setErr(x); } finally { setBusy(false); }
   };
   const revoke = async (t) => {
     if (!window.confirm(`Revoke API token "${t.label}" (${t.id})? It stops working at once.`)) return;
@@ -266,13 +270,13 @@ function ApiTokens({ names }) {
     <Section title={`API tokens · ${tokens?.length ?? 0}`}>
       <form onSubmit={issue} className="panel p-3 mb-2 flex flex-wrap items-center gap-3">
         <span className="text-dim text-[12px]">Issue a token for a bot</span>
-        <input className="input w-56" placeholder="label, e.g. infraclaw" value={label} onChange={(e) => setLabel(e.target.value)} />
-        <select className="input" value={role} onChange={(e) => setRole(e.target.value)}>
+        <input className="input w-56" aria-label="Token label" placeholder="label, e.g. infraclaw" value={label} onChange={(e) => setLabel(e.target.value)} />
+        <select className="input" aria-label="Token role" value={role} onChange={(e) => setRole(e.target.value)}>
           <option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option>
         </select>
-        {role !== 'admin' && <div className="flex flex-wrap gap-1">{['*', ...names].map((n) => <span key={n} className={`chip ${networks.includes(n) ? 'on' : ''}`} onClick={() => toggle(n)}>{n === '*' ? 'all networks' : n}</span>)}</div>}
-        <input className="input w-36" inputMode="numeric" placeholder="expires in days" value={days} onChange={(e) => setDays(e.target.value.replace(/\D/g, ''))} />
-        <button className="btn btn-primary" disabled={!label.trim() || (role !== 'admin' && !networks.length)}>Issue token</button>
+        {role !== 'admin' && <div className="flex flex-wrap gap-1" role="group" aria-label="Token networks">{['*', ...names].map((n) => <button type="button" key={n} aria-pressed={networks.includes(n)} className={`chip ${networks.includes(n) ? 'on' : ''}`} onClick={() => toggle(n)}>{n === '*' ? 'all networks' : n}</button>)}</div>}
+        <input className="input w-36" aria-label="Token expiry in days" inputMode="numeric" placeholder="expires in days" value={days} onChange={(e) => setDays(e.target.value.replace(/\D/g, ''))} />
+        <button className="btn btn-primary" disabled={busy || !label.trim() || (role !== 'admin' && !networks.length)}>{busy ? 'Issuing…' : 'Issue token'}</button>
         <span className="text-dim text-[11.5px] w-full">{TOKEN_ROLE_TEXT[role]}. Sent as <span className="mono">Authorization: Bearer …</span>. Tokens never change settings, access or tokens and never read private keys.</span>
         {issued && (
           <div className="w-full border-t border-line pt-3">
