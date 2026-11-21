@@ -26,6 +26,7 @@ import { createApiTokens, presentsApiToken } from './api-tokens.js';
 import { devnetFiles } from '../shared/devnet-files.js';
 import { validateRequest } from '../agent/ops.js';
 import { validateMainnetReport } from '../shared/mainnet.js';
+import { readGenesisSync, validatePlatformSyncReport } from './platform-sync.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -46,7 +47,7 @@ export function ttlCache(clock, ttl = 15_000) {
   return Object.assign(cached, { delete: (key) => entries.delete(key), size: () => entries.size });
 }
 
-export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, clock = Date.now, ciGithub = null, ciQueue = {}, mainnetReportToken = process.env.MAINNET_REPORT_TOKEN, keyReader = requestDevnetKeys, keySocket = process.env.DEVNET_KEYS_SOCKET } = {}) {
+export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, clock = Date.now, ciGithub = null, ciQueue = {}, mainnetReportToken = process.env.MAINNET_REPORT_TOKEN, platformSyncReportToken = process.env.PLATFORM_SYNC_REPORT_TOKEN, keyReader = requestDevnetKeys, keySocket = process.env.DEVNET_KEYS_SOCKET } = {}) {
   const settingsPath = join(dataDir, 'settings.json');
   const dirs = { state: join(dataDir, 'state'), requests: join(dataDir, 'requests'), ops: join(dataDir, 'ops') };
   for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
@@ -151,6 +152,21 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     } catch (e) { res.status(400).json({ error: e.message }); }
   });
 
+  // The from-genesis sync host (dashpay/infra, platform-sync) reports the same
+  // way: its own token, an explicit schema, public facts only.
+  app.post('/api/platform-sync/report', (req, res) => {
+    if (!platformSyncReportToken || req.get('authorization') !== `Bearer ${platformSyncReportToken}`) return res.status(401).json({ error: 'platform-sync authorization required' });
+    try {
+      const report = validatePlatformSyncReport(req.body, clock());
+      const file = join(dirs.state, `platform-sync-${report.network}.json`);
+      const previous = readJSON(file);
+      if (previous?.generatedAt && Date.parse(report.generatedAt) < Date.parse(previous.generatedAt)) throw new Error('out-of-order report');
+      writeAtomic(file, JSON.stringify(report));
+      push('network', { name: report.network, at: report.generatedAt });
+      res.status(202).json({ accepted: true, generatedAt: report.generatedAt });
+    } catch (e) { res.status(400).json({ error: e.message }); }
+  });
+
   // Who is asking: an API token (req.bot) or the signed-in browser session.
   const principal = (req) => req.bot || auth.session(req);
   const user = (req) => principal(req)?.user || null;
@@ -220,7 +236,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   app.get('/api/networks/:name', (req, res) => {
     const n = visible(req).find((x) => x.name === req.params.name);
     if (!n) return res.status(404).json({ error: 'Network not found' });
-    res.json(view(n, isMember(req, n.name)));
+    res.json({ ...view(n, isMember(req, n.name)), genesisSync: readGenesisSync(dataDir, n.name, clock()) });
   });
 
   // Live updates: agent state rewrites and operation changes are pushed.
