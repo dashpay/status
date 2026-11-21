@@ -95,11 +95,15 @@ function GenesisSync({ g, now }) {
   const run = g.run, last = g.lastPassed, image = run?.image || last?.image;
   const version = image?.version || '—';
   const running = ['starting', 'syncing', 'verifying'].includes(g.phase);
-  const value = g.stale ? 'no report' : running ? (g.progress != null ? `${Math.floor(g.progress * 100)}%` : 'starting') : run?.result || '—';
-  const sub = g.stale ? `last heard ${ago(g.generatedAt, now)} ago`
+  // The page does not refetch on a timer, so a report that stops arriving goes stale by this clock (same 15 minutes as the server).
+  const stale = g.stale || now - Date.parse(g.generatedAt) > 15 * 60_000;
+  // A failed phase is a failure even when the report carries no run record.
+  const result = run?.result || (g.phase === 'failed' ? 'failed' : null);
+  const value = stale ? 'no report' : running ? (g.progress != null ? `${Math.floor(g.progress * 100)}%` : 'starting') : result || '—';
+  const sub = stale ? `last heard ${ago(g.generatedAt, now)} ago`
     : running ? `${version} · ${num(g.height)}${g.etaSeconds != null ? ` · ${duration(g.etaSeconds)} left` : ''}`
       : run?.finishedAt ? `${version} · ${ago(run.finishedAt, now)} ago` : version;
-  const level = g.stale || (g.phase === 'following' && g.healthy === false) ? 'warn' : run?.result === 'failed' ? 'down' : run?.result === 'passed' ? 'ok' : undefined;
+  const level = stale || (g.phase === 'following' && g.healthy === false) ? 'warn' : result === 'failed' ? 'down' : result === 'passed' ? 'ok' : undefined;
   // internetRx is what the stack's firewall counted; older reports only carry p2p message sizes.
   const received = run?.bytes ? (run.bytes.internetRx != null ? ['internetRx', 'image'] : ['platformRx', 'coreRx', 'image']).reduce((a, k) => a + (run.bytes[k] || 0), 0) : null;
   const title = ['Platform replayed from genesis with the newest published Drive',
