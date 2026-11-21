@@ -12,7 +12,7 @@ const report = (over = {}) => ({ schema: 1, network: 'testnet', updatedAt: at(0)
   core: { height: 1595500, headers: 1595500, syncing: false }, disk: { sizeGiB: 117.6, usedGiB: 60, freeGiB: 57.6 },
   run: { id: 'gh-123-1-testnet', network: 'testnet', requestedImage: 'auto', result: null, reason: null, startedAt: at(200),
     image: { ref: 'dashpay/drive:5.1.0-dev.2', id: 'sha256:abc', source: 'release', version: '5.1.0-dev.2', revision: 'a'.repeat(40), notes: ['x'] },
-    tenderdash: '2.0.0-dev.3', restarts: { drive_abci: 0 }, bytes: { platformRx: 1500000000, platformTx: 20000, coreRx: 100, coreTx: 5, image: 62113044 } },
+    tenderdash: '2.0.0-dev.3', restarts: { drive_abci: 0 }, bytes: { internetRx: 1700000000, internetTx: 30000, platformRx: 1500000000, platformTx: 20000, coreRx: 100, coreTx: 5, image: 62113044 } },
   lastPassed: { id: 'gh-100-1-testnet', finishedAt: at(1500), durationSeconds: 21000, height: 715000, image: { ref: 'dashpay/drive:5.1.0-dev.1', version: '5.1.0-dev.1' } },
   ...over });
 
@@ -22,6 +22,7 @@ test('a report keeps only the allowlisted public fields', () => {
   assert.deepEqual(r.run.image, { ref: 'dashpay/drive:5.1.0-dev.2', version: '5.1.0-dev.2', revision: 'a'.repeat(40) });
   assert.equal(r.run.id, undefined);
   assert.equal(r.run.bytes.platformRx, 1500000000);
+  assert.equal(r.run.bytes.internetRx, 1700000000);
   assert.equal(r.lastPassed.height, 715000);
   assert.equal(r.onHold, false);
   assert.equal(JSON.stringify(r).includes('gh-123'), false);

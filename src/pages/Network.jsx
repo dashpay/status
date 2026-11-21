@@ -100,7 +100,8 @@ function GenesisSync({ g, now }) {
     : running ? `${version} · ${num(g.height)}${g.etaSeconds != null ? ` · ${duration(g.etaSeconds)} left` : ''}`
       : run?.finishedAt ? `${version} · ${ago(run.finishedAt, now)} ago` : version;
   const level = g.stale || (g.phase === 'following' && g.healthy === false) ? 'warn' : run?.result === 'failed' ? 'down' : run?.result === 'passed' ? 'ok' : undefined;
-  const received = run?.bytes ? ['platformRx', 'coreRx', 'image'].reduce((a, k) => a + (run.bytes[k] || 0), 0) : null;
+  // internetRx is what the stack's firewall counted; older reports only carry p2p message sizes.
+  const received = run?.bytes ? (run.bytes.internetRx != null ? ['internetRx', 'image'] : ['platformRx', 'coreRx', 'image']).reduce((a, k) => a + (run.bytes[k] || 0), 0) : null;
   const title = ['Platform replayed from genesis with the newest published Drive',
     image?.ref && `image ${image.ref}${image.revision ? ` (${short(image.revision, 10)})` : ''}`,
     run?.tenderdash && `Tenderdash ${run.tenderdash}`,

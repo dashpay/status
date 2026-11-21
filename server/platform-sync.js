@@ -8,7 +8,7 @@ import { join } from 'node:path';
 export const SYNC_NETWORKS = ['testnet', 'mainnet'];
 const PHASES = ['idle', 'starting', 'syncing', 'verifying', 'following', 'failed'];
 const RESULTS = ['passed', 'failed'];
-const BYTES = ['platformRx', 'platformTx', 'coreRx', 'coreTx', 'image'];
+const BYTES = ['internetRx', 'internetTx', 'platformRx', 'platformTx', 'coreRx', 'coreTx', 'image'];
 const FRESH_MS = 180_000, STALE_MS = 15 * 60_000;
 
 const integer = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
