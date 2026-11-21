@@ -2,6 +2,12 @@
 export const COMPONENTS = ['core', 'drive', 'tenderdash', 'dapi', 'gateway', 'helper'];
 export const REPOS = { core: 'dashpay/dashd', drive: 'dashpay/drive', tenderdash: 'dashpay/tenderdash', dapi: 'dashpay/rs-dapi', gateway: 'dashpay/envoy', helper: 'dashpay/dashmate-helper' };
 export const OPERABLE = ['validator', 'masternode', 'seed'];
+
+// Nodes replaced together unless the operator chooses otherwise. A devnet is
+// owned outright and disposable, so it starts at several; the engine still
+// trims any batch to what the observed quorum can spare. Testnet stays serial.
+export const DEVNET_CONCURRENCY = 4;
+export const defaultConcurrency = (network) => (network?.chainType === 'devnet' ? DEVNET_CONCURRENCY : 1);
 // Running release per component, from what the nodes report.
 const SEMVER = /^v?(\d+)\.(\d+)\.(\d+)(?:-([a-z]+)\.(\d+))?$/;
 export function reported(h, c) {

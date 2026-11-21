@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { newestRelease, reported } from './releases.js';
+import { defaultConcurrency, newestRelease, reported } from './releases.js';
+
+test('a devnet rolls several nodes at once by default; every other network stays serial', () => {
+  assert.equal(defaultConcurrency({ chainType: 'devnet', kind: 'dashnet' }), 4);
+  assert.equal(defaultConcurrency({ chainType: 'devnet' }), 4);
+  for (const network of [{ chainType: 'testnet' }, { chainType: 'mainnet' }, {}, null, undefined]) assert.equal(defaultConcurrency(network), 1);
+});
 
 const tags = (...names) => names.map((name) => ({ name }));
 

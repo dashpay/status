@@ -3,7 +3,7 @@ import { Fragment, useEffect, useMemo, useState } from 'react';
 import { ago, api, bytes, canOperate, canSee, clock, dash, duration, navigate, num, short, span, useNow, useResource, useSession, ROLE_LABEL } from '../lib.js';
 import { Delta, Dot, Empty, EndpointDot, Err, Level, Link, Meter, Section, Stat } from '../ui.jsx';
 import Operations from './Operations.jsx';
-import { cmp, COMPONENTS, helperFor, imageTag, newestRelease, OPERABLE, reported, REPOS } from '../releases.js';
+import { cmp, COMPONENTS, defaultConcurrency, helperFor, imageTag, newestRelease, OPERABLE, reported, REPOS } from '../releases.js';
 import Connect from './Connect.jsx';
 
 const ROLE_ORDER = ['validator', 'masternode', 'seed', 'fullnode', 'web', 'wallet', 'miner', 'mixer', 'quorums', 'metrics', 'logs', 'vpn', 'other'];
@@ -420,7 +420,7 @@ function Updates({ n }) {
   const [state, setState] = useState({ network: null, updates: [] });
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [concurrency, setConcurrency] = useState(1);
+  const [concurrency, setConcurrency] = useState(() => defaultConcurrency(n));
   const [pauseMining, setPauseMining] = useState(false);
   const native = n.kind === 'dashnet';
   const hosts = n.hosts.filter((h) => OPERABLE.includes(h.role) && !h.duplicate && h.state === 'running' && h.level !== 'unreachable');

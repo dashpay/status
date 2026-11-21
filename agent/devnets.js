@@ -38,6 +38,16 @@ export { shortName };
 // dash-network-go devnets whose services each release's dashmate renders; the
 // helper image is then that dashmate, and Platform upgrades re-render with it.
 export const DASHMATE_PROFILE = 'devnet-dashmate-compose';
+
+// A build operates plans that bind its own recipe, and any earlier recipe it
+// lists as accepted (`dashnet recipes`: nodeAccepts, upgradeAccepts, comma-
+// separated). The rule is the engine's; a build that predates those fields
+// lists none, and then only the same recipe is compatible.
+export function recipeAccepted(recipes, kind, digest) {
+  if (recipes?.[kind] === digest) return true;
+  const accepted = recipes?.[`${kind}Accepts`];
+  return typeof digest === 'string' && digest !== '' && typeof accepted === 'string' && accepted.split(',').includes(digest);
+}
 // The images a devnet runs now: its network file after any upgrade.
 export function imagesOf(yaml) {
   const out = {};
@@ -173,39 +183,41 @@ export function createDevnets({ ctx, dirs, key, pool, getSettings, region, log =
     return /or core \(Core only/.test(`${p.stdout}${p.stderr}`) ? ['platform', 'tenderdash', 'core'] : ['platform', 'tenderdash'];
   }
   // An upgrade runs with the binary that planned it, but a resume may move to a
-  // strictly newer build whose recipes the plans still accept (same upgrade
-  // and node recipes), e.g. to pick up a runner fix.
+  // strictly newer build whose recipes the plans still accept (the same upgrade
+  // and node recipes, or ones that build lists as accepted), e.g. to pick up a
+  // runner fix.
   function refreshSnapshot(r, dir, plan) {
     const dep = readJSON(join(dir, 'deployment.json'));
     if (!binary || !existsSync(binary) || !r.artifacts.bin || !dep) return;
     const p = spawnSync(binary, ['recipes'], { encoding: 'utf8', timeout: 10_000 });
     let rec; try { rec = JSON.parse(p.stdout); } catch { return; }
-    if (rec.upgrade !== plan.recipeSha256 || rec.node !== dep.recipeSha256 || (plan.rollout?.miningRecipe && rec.mining !== plan.rollout.miningRecipe)) return;
+    if (!recipeAccepted(rec, 'upgrade', plan.recipeSha256) || !recipeAccepted(rec, 'node', dep.recipeSha256) || (plan.rollout?.miningRecipe && rec.mining !== plan.rollout.miningRecipe)) return;
     const [was, now] = [versionOf(r.artifacts.bin), versionOf(binary)];
     if (!dated(now) || (dated(was) && dated(was) >= dated(now))) return;
     copyFileSync(binary, `${r.artifacts.bin}.next`); chmodSync(`${r.artifacts.bin}.next`, 0o700); renameSync(`${r.artifacts.bin}.next`, r.artifacts.bin);
-    write(r.id, `resuming with dashnet ${now.slice(0, 16)} (same upgrade and node recipes as the reviewed plan)`);
+    write(r.id, `resuming with dashnet ${now.slice(0, 16)} (${rec.upgrade === plan.recipeSha256 && rec.node === dep.recipeSha256 ? 'same upgrade and node recipes as' : 'accepts the upgrade and node recipes of'} the reviewed plan)`);
   }
   const versionOf = (bin) => spawnSync(bin, ['version'], { encoding: 'utf8', timeout: 10_000 }).stdout.trim();
   const dated = (v) => /^(\d{8}T\d{6}Z)-[0-9a-f]{40}$/.exec(v || '')?.[1];
 
   // A devnet is pinned to the dashnet that created it: its plans bind that
   // binary's recipes. A newer binary reporting the same node and bootstrap
-  // recipes (dashnet recipes) can operate it, so fixes reach existing devnets.
+  // recipes (dashnet recipes), or listing the devnet's node recipe as one it
+  // accepts, can operate it, so fixes reach existing devnets.
   function adoptCompatible(r, name) {
     const dir = join(dirs.private, 'devnets', name), pinned = join(dir, 'dashnet');
     const dep = readJSON(join(dir, 'deployment.json')), boot = readJSON(join(dir, 'bootstrap-plan.json'));
     if (!binary || !existsSync(binary) || !existsSync(pinned) || !dep || !boot) return;
     const p = spawnSync(binary, ['recipes'], { encoding: 'utf8', timeout: 10_000 });
     let rec; try { rec = JSON.parse(p.stdout); } catch { return; }
-    if (rec.node !== dep.recipeSha256 || rec.bootstrap !== boot.recipeSha256) return;
+    if (!recipeAccepted(rec, 'node', dep.recipeSha256) || rec.bootstrap !== boot.recipeSha256) return;
     // Versions are <commit date>-<commit>; adopt only a strictly newer build
     // (never downgrade on an agent rollback; undated pins are older).
     const [was, now] = [versionOf(pinned), versionOf(binary)];
     if (!dated(now) || (dated(was) && dated(was) >= dated(now))) return;
     copyFileSync(binary, `${pinned}.next`); chmodSync(`${pinned}.next`, 0o700); renameSync(`${pinned}.next`, pinned);
     register(name, { upgradeScopes: upgradeScopes(name), dashnet: now });
-    write(r.id, `dashnet ${was.slice(0, 12)} -> ${now.slice(0, 12)} for ${name} (same node and bootstrap recipes)`);
+    write(r.id, `dashnet ${was.slice(0, 12)} -> ${now.slice(0, 12)} for ${name} (${rec.node === dep.recipeSha256 ? 'same node and bootstrap recipes' : 'accepts this devnet\'s node recipe; same bootstrap recipe'})`);
   }
 
   // Current images, and whether dashmate renders the devnet, for the console.
