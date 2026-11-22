@@ -5,7 +5,7 @@ import { operationMaintenance, operationRecords, heldByOperation } from './opera
 import { createCi } from './ci.js';
 import { loadReleaseInbox, reconcileReleaseTasks } from './release-webhook.js';
 import { loadSettings, readJSON } from '../shared/settings.js';
-import { deriveIssues, reconcile, loadIncidentState, saveIncidentState, readSecret, signedHeaders, validateDestination } from './incidents.js';
+import { compactBacklog, deriveIssues, reconcile, loadIncidentState, saveIncidentState, readSecret, signedHeaders, validateDestination } from './incidents.js';
 import { recognizeActivity } from './change-activity.js';
 import { stallAlert, validateAlertUrl } from './stall-alert.js';
 import { againstReceiver, loadControl, wireControl } from './remediation-control.js';
@@ -21,11 +21,12 @@ export async function cycle({ dataDir, ci, destination, secret, alertUrl = null,
   // Upgrades, redeploys and reboots seen in live observations are held like
   // dashboard operations, so their expected downtime never reaches the queue.
   const activity = recognizeActivity({ settings, states, previous: previous?.activity, now });
-  const derived = deriveIssues({ settings, states, operations, maintenance, activity, ci: (ci || createCi({ dataDir })).summary({ admin: true }), aws, now });
+  const derived = deriveIssues({ settings, states, operations, maintenance, activity, ci: (ci || createCi({ dataDir })).summary({ admin: true, whole: true }), aws, now });
   const state = reconcile(previous, derived, now);
   state.maintenance = maintenance;
   state.activity = activity;
   reconcileReleaseTasks(state, loadReleaseInbox(dataDir), now);
+  compactBacklog(state);
   // Commit events before any attempt; lost acknowledgements replay eventId safely.
   saveIncidentState(dataDir, state);
   if (destination && secret && (!state.delivery?.nextAttemptAt || Date.parse(state.delivery.nextAttemptAt) <= now)) {
@@ -66,6 +67,12 @@ export async function cycle({ dataDir, ci, destination, secret, alertUrl = null,
       if (!Array.isArray(ack.accepted) || events.some((e) => !ack.accepted.includes(e.eventId))) throw new Error('receiver acknowledgement incomplete');
       const sent = new Set(events.map((e) => e.eventId));
       state.outbox = state.outbox.filter((e) => !sent.has(e.eventId));
+      // What the receiver now knows of each issue (see compactBacklog).
+      const known = new Map(state.issues.map((i) => [i.id, i]));
+      for (const e of events) {
+        const issue = known.get(e.issue?.id);
+        if (issue && Number.isSafeInteger(e.issue.revision)) issue.delivered = Math.max(issue.delivered || 0, e.issue.revision);
+      }
       state.delivery = { configured: true, lastAckAt: new Date(now).toISOString(), error: null, receiver: ack.health || null };
     } catch (e) {
       const attempts = (state.delivery?.attempts || 0) + 1;

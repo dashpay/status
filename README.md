@@ -431,6 +431,31 @@ already-delivered events from starting repairs. Removing the ID re-enables
 admission after a fresh observation. This does not cancel an already-running
 response; settle that owner separately before changing its work.
 
+### CI jobs that are not CI faults
+
+Some jobs fail to say something about the change under test: a pull request
+without a milestone, a title that fails the lint, a review bot's verdict. They
+are not faults of the runners. List them in `remediation.ignoredCiJobs` in
+`settings.json` and no case is filed when they fail; cases already filed for
+them are closed.
+
+```json
+"remediation": {
+  "ignoredCiJobs": [
+    { "workflow": "Check PR milestone", "note": "a pull request without a milestone" },
+    { "repo": "dashpay/platform", "workflow": "Pull Request Linter" },
+    { "repo": "dashpay/dash-evo-tool", "job": "Platform pin guard" }
+  ]
+}
+```
+
+An entry takes `repo`, `workflow`, `job`, `event` and `branch`, and needs at
+least a `workflow` or a `job`. Every field given must match; `*` matches any run
+of characters and case is ignored. `note` is for the reader. The failures still
+appear on the CI page and in its counts: only the remediation cases go. The
+console refuses to save a malformed list; a list damaged on disk ignores
+nothing. How cases end in general is in `deploy/INCIDENTS.md`.
+
 Console GitHub login sessions last seven days from sign-in (both the server session and browser cookie). Existing sessions keep their original expiry; sign in again to receive the new lifetime.
 
 After a console deployment, verify retained capabilities as well as legacy APIs:

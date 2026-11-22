@@ -222,6 +222,13 @@ try {
       lastResponse: outcome ? { outcome, summary: `Private ${id} response`, blocker: id === 'blocked' ? 'Root cause still open' : null,
         nextAction: 'Existing owner retains follow-up', changes: ['Verified supporting-service correction'] } : null });
   }
+  // The same job failing twice is one line that opens into its two cases, each
+  // saying what failed. An ended case says why it ended.
+  for (const n of [1, 2]) board.issues.push({ id: `job-${n}`, domain: 'ci', scope: 'private-ci-host', target: `dashpay/platform/${n}/private-ci-host`,
+    code: 'job_failed', severity: 'warning', status: 'open', firstSeen: at, lastSeen: at,
+    evidence: { repo: 'dashpay/platform', runId: 100 + n, attempt: 1, jobName: 'Swift SDK build', workflow: 'Tests', branch: 'private-branch', runner: 'private-ci-host' } });
+  board.issues.push({ id: 'gone', domain: 'network', scope: 'testnet', target: 'private-gone-host', code: 'host_health', severity: 'critical', status: 'resolved',
+    firstSeen: at, lastSeen: at, resolvedAt: at, resolutionEvidence: { reason: 'target_removed' } });
   const boardFile = join(dataDir, 'incidents', 'state.json');
   writeFileSync(boardFile, JSON.stringify(board));
   const boardErrors = [];
@@ -230,6 +237,15 @@ try {
     await page.setViewportSize(viewport);
     await page.getByRole('link', { name: 'Remediation', exact: true }).click();
     await page.getByText('Autonomous dispatch enabled').waitFor();
+    // The page opens on what is wrong now: six open faults, the ended ones a click away.
+    assert.match(await page.locator('[data-fault-summary]').innerText(), /OPEN FAULTS\s*6/i);
+    assert.equal(await page.locator('[data-issue-id="followup"]').count(), 0, 'a recovered case is not listed among open faults');
+    assert.equal(await page.locator('[data-issue-group]').count(), 1);
+    await page.locator('[data-issue-group] > summary').click();
+    assert.match(await page.locator('[data-issue-id="job-1"] [data-issue-detail]').innerText(), /dashpay\/platform · Tests · Swift SDK build · private-branch/);
+    await page.getByLabel('Remediation state').selectOption('history');
+    assert.match(await page.locator('[data-issue-id="gone"]').innerText(), /Closed[\s\S]*no longer exists/);
+    await page.getByLabel('Remediation state').selectOption('all');
     await page.locator('[data-issue-id="blocked"] summary').click();
     await page.getByText('Root cause still open').waitFor();
     assert.ok((await page.locator('[data-issue-id="blocked"]').innerText()).includes('Blocked'));
@@ -259,7 +275,18 @@ try {
   board.delivery.receiver.remediation.enabled = false;
   writeFileSync(boardFile, JSON.stringify(board));
   await anon.getByText('New dispatch paused', { exact: true }).waitFor({ timeout: 10_000 });
+  // The worker stops reporting while dispatch is switched off in the console
+  // (no control file means off): the page is a list of faults, not a stalled queue.
   board.delivery.receiver.remediation.generatedAt = '2020-01-01T00:00:00Z';
+  writeFileSync(boardFile, JSON.stringify(board));
+  await anon.getByText('Automatic repair is switched off', { exact: true }).waitFor({ timeout: 10_000 });
+  assert.equal(await anon.locator('[data-repair-summary]').count(), 0);
+  assert.equal(await anon.getByText('Remediation cannot make progress').count(), 0);
+  await anon.setViewportSize({ width: 390, height: 844 });
+  await anon.screenshot({ path: 'artifacts/remediation-off-mobile.png', fullPage: true });
+  assert.ok(await anon.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'faults list fits a phone');
+  // Switched on in the console with the worker still silent: that is a gap.
+  writeFileSync(join(dataDir, 'remediation-control.json'), JSON.stringify({ schemaVersion: 1, seq: 1, dispatch: 'on', clearSeq: 0 }));
   writeFileSync(boardFile, JSON.stringify(board));
   await anon.getByText('Remediation status is stale or unavailable').waitFor({ timeout: 10_000 });
   assert.deepEqual(boardErrors, []);

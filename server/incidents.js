@@ -110,13 +110,61 @@ export const TITLES = {
   runner_offline: 'CI runner unavailable', disk_pressure: 'Disk space pressure', memory_pressure: 'Memory pressure',
   queue_stale: 'CI queue observation missing or stale', queue_wait: 'Self-hosted CI job waiting over 15 minutes', job_failed: 'CI job failed',
   aws_stale: 'AWS inventory missing or stale', aws_collection_failed: 'AWS collection incomplete',
-  aws_instance_impaired: 'EC2 status check failed', aws_alarm: 'CloudWatch alarm is active',
+  aws_instance_impaired: 'EC2 status check failed', aws_alarm: 'CloudWatch alarm is active', aws_scaling_control: 'Scale-in control alarm (informational)',
   aws_health_missing: 'AWS runtime health collection unavailable', aws_scheduled_event: 'EC2 scheduled maintenance event', idle_volume: 'Unattached EBS volume requires ownership review',
   idle_address: 'Unassociated public address requires ownership review',
 };
 
+// A case that can never be proven recovered must still end. These periods say
+// when: they close the case, they do not claim the fault was repaired.
+export const JOB_FAILED_MAX_AGE_MS = 24 * 3600_000; // the producer sees finished jobs for a day
+export const QUEUE_WAIT_UNSEEN_MS = 24 * 3600_000; // GitHub itself gives up on a job queued for a day
+export const GONE_AFTER_MS = 10 * 60_000; // a target missing from complete inventories this long is gone
+export const QUIET_SAMPLES = 10; // healthy samples before a host fault with no proof of its own is dropped
+
+// settings.remediation.ignoredCiJobs: jobs whose failure is a verdict on the
+// change under test (title lint, milestone, review bots), not a CI fault. Each
+// entry names at least a workflow or a job; every field given must match. `*`
+// matches any run of characters; case is ignored. A field the job record does
+// not carry never matches, so an old record cannot be ignored by accident.
+const IGNORE_FIELDS = ['repo', 'workflow', 'job', 'event', 'branch'];
+export function validIgnoredCiJobs(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 200) throw new Error('remediation.ignoredCiJobs must be a list of at most 200 entries');
+  for (const e of value) {
+    if (!object(e) || Object.keys(e).some((k) => ![...IGNORE_FIELDS, 'note'].includes(k))) throw new Error(`remediation.ignoredCiJobs entries take ${IGNORE_FIELDS.join(', ')} and note`);
+    for (const k of [...IGNORE_FIELDS, 'note']) if (e[k] !== undefined && (typeof e[k] !== 'string' || !e[k].trim() || e[k].length > 300)) throw new Error(`remediation.ignoredCiJobs: ${k} must be a non-empty string`);
+    if (e.workflow === undefined && e.job === undefined) throw new Error('remediation.ignoredCiJobs: each entry needs a workflow or a job');
+  }
+  return value;
+}
+const literal = (part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+const glob = (pattern) => new RegExp('^' + pattern.trim().split('*').map(literal).join('.*') + '$', 'i');
+export function ciJobIgnored(settings) {
+  let entries;
+  // A damaged list ignores nothing: failures stay visible rather than hidden.
+  try { entries = validIgnoredCiJobs(settings?.remediation?.ignoredCiJobs); } catch { entries = []; }
+  const rules = entries.map((e) => IGNORE_FIELDS.filter((k) => e[k] !== undefined).map((k) => [k, glob(e[k])]));
+  return (job) => rules.some((rule) => rule.every(([k, pattern]) => typeof job?.[k] === 'string' && pattern.test(job[k])));
+}
+const branchOf = (j) => (text(j?.headRef) ? j.headRef : text(j?.ref) ? j.ref : null);
+const attemptKey = (repo, runId, name) => JSON.stringify([repo, runId, name]);
+const branchKey = (repo, workflow, name, branch) => (text(workflow) && text(branch) ? JSON.stringify([repo, workflow, name, branch]) : null);
+// `job` is the evidence of a failed job. It passed later when a later attempt
+// of the same run succeeded, or a later run of the same workflow job on the
+// same branch did. Either must have finished after the failure.
+function passedLater(passed, job) {
+  const again = passed?.attempts?.get(attemptKey(job.repo, job.runId, job.jobName));
+  if (again && height(job.attempt) && again.attempt > job.attempt && Date.parse(again.end) > Date.parse(job.end)) return { reason: 'later_attempt_passed', ...again };
+  const next = passed?.branches?.get(branchKey(job.repo, job.workflow, job.jobName, job.branch));
+  return next && Date.parse(next.end) > Date.parse(job.end) ? { reason: 'later_run_passed', ...next } : null;
+}
+
 export function deriveIssues({ settings, states, ci, aws, operations = [], maintenance = {}, activity = null, now = Date.now() }) {
   const issues = [], sources = {}, checks = {}, samples = {}, suppressions = {}, heldInstances = new Set();
+  // Where a target that is absent can be told from a target that was not
+  // looked at: only a complete, current inventory says "it is not there".
+  const inventories = {};
   const source = (key, at, complete, max) => {
     sources[key] = { observedAt: Number.isFinite(Date.parse(at)) ? at : null, fresh: fresh(at, now, max), complete: complete === true, maxAgeMs: max };
     return sources[key].fresh && sources[key].complete;
@@ -180,6 +228,7 @@ export function deriveIssues({ settings, states, ci, aws, operations = [], maint
     const dk = `${key}:discovery`;
     const discoveryOk = source(dk, n.source === 'report' ? s.generatedAt : s.discovery?.at,
       n.source === 'report' || (object(s.discovery) && !s.discovery.error), Math.max(900_000, settings.discoverySeconds * 3000));
+    inventories[key] = discoveryOk;
     check('network', n.name, 'discovery', 'discovery_failed', dk, discoveryOk, identity, { suppressed });
     if (!discoveryOk) add('network', n.name, 'discovery', 'discovery_failed', 'warning', `${key}:monitor`,
       { error: String(s.discovery?.error || 'stale discovery').slice(0, 300) }, iso(now), identity);
@@ -188,6 +237,7 @@ export function deriveIssues({ settings, states, ci, aws, operations = [], maint
     catch {
       // A malformed nested report cannot turn a previously failing fleet green.
       sources[key].complete = false; checks[idFor('network', n.name, 'collector', 'collector_stale', identity)].clear = false;
+      inventories[key] = false;
       add('network', n.name, 'collector', 'collector_stale', 'critical', `${key}:monitor`, { error: 'malformed network observation' }, iso(now), identity);
       continue;
     }
@@ -242,6 +292,7 @@ export function deriveIssues({ settings, states, ci, aws, operations = [], maint
       && Date.parse(measuredAt) <= Date.parse(h.receivedAt) + 60_000, 180_000);
     for (const code of ['reporter_missing', 'reporter_stale']) check('ci', reg.id, reg.id, code, key, current);
     if (!h || !current) { add('ci', reg.id, reg.id, h ? 'reporter_stale' : 'reporter_missing', 'warning', `${key}:monitor`, { lastObservationAt: sources[key].observedAt }); continue; }
+    inventories[key] = true;
     for (const d of list(h.disks)) {
       if (!text(d.path)) continue;
       const used = num(d.free) ? pct(d.total - d.free, d.total) : null;
@@ -265,24 +316,42 @@ export function deriveIssues({ settings, states, ci, aws, operations = [], maint
   else for (const j of list(ci.queue.jobs)) {
     if (!text(j.repo) || !height(j.id)) continue;
     const target = `${j.repo}/${j.id}`;
-    // Disappearance from the truncated 50-job summary is never recovery.
     check('ci', 'github', target, 'queue_wait', 'ci:queue', ['in_progress', 'completed'].includes(j.status));
     if ((!j.status || j.status === 'queued') && Number.isFinite(Date.parse(j.createdAt)) && Date.parse(j.createdAt) < now - 15 * 60_000)
-      add('ci', 'github', target, 'queue_wait', 'warning', 'ci:queue', { repo: j.repo, jobId: j.id, createdAt: j.createdAt }, ci.queue.at);
+      add('ci', 'github', target, 'queue_wait', 'warning', 'ci:queue', { repo: j.repo, jobId: j.id, createdAt: j.createdAt,
+        ...(Number.isFinite(Date.parse(j.runCreatedAt)) ? { runCreatedAt: j.runCreatedAt } : {}),
+        ...Object.fromEntries(['name', 'workflow', 'branch', 'url'].filter((k) => text(j[k])).map((k) => [k, j[k].slice(0, 300)])) }, ci.queue.at);
   }
-  const jobSuccesses = [];
-  const jobs = list(ci?.recent).filter((j) => fresh(j.end, now, 24 * 3600_000) && Date.parse(j.start) <= Date.parse(j.end));
+  // A job that is not listed has left the queue only where the listing is
+  // whole: not cut to a display size, and complete for the job's repository.
+  const queue = { current: queueCurrent, observedAt: ci?.queue?.at || null, windowMs: num(ci?.queue?.windowMs) ? ci.queue.windowMs : 0,
+    covered: queueCurrent && !(Number.isSafeInteger(ci.queue.total) && ci.queue.total > ci.queue.jobs.length) && Array.isArray(ci.queue.covered) ? ci.queue.covered.filter(text) : [] };
+  const ignored = ciJobIgnored(settings);
+  // The newest pass of each job: by run (a later attempt) and by branch (a later run).
+  const passed = { attempts: new Map(), branches: new Map() };
+  const jobs = list(ci?.recent).filter((j) => fresh(j.end, now, JOB_FAILED_MAX_AGE_MS) && Date.parse(j.start) <= Date.parse(j.end));
   for (const j of jobs) {
-    const jk = `ci:job:${issueId(j.host, j.repo, j.runId, j.name, j.attempt, j.start)}`;
-    source(jk, j.end, true, 24 * 3600_000);
-    const evidence = { repo: j.repo, runId: j.runId, attempt: j.attempt, jobName: j.name, runner: j.runnerName, end: j.end };
-    if (j.result === 'Succeeded' && text(j.repo) && height(j.runId) && text(j.name) && height(j.attempt)) jobSuccesses.push({ ...evidence, sourceKey: jk });
+    if (j.result !== 'Succeeded' || !text(j.repo) || !height(j.runId) || !text(j.name) || !height(j.attempt)) continue;
+    const proof = { runId: j.runId, attempt: j.attempt, end: j.end };
+    const ak = attemptKey(j.repo, j.runId, j.name), bk = branchKey(j.repo, j.workflow, j.name, branchOf(j));
+    if (!(passed.attempts.get(ak)?.attempt >= j.attempt)) passed.attempts.set(ak, proof);
+    if (bk && !(Date.parse(passed.branches.get(bk)?.end) >= Date.parse(j.end))) passed.branches.set(bk, proof);
   }
-  for (const j of jobs) if (j.result === 'Failed' && !jobSuccesses.some((s) => s.repo === j.repo && s.runId === j.runId && s.jobName === j.name
-    && height(j.attempt) && s.attempt > j.attempt && Date.parse(s.end) > Date.parse(j.end))) {
+  // Failed jobs in the ledger that are not cases, by the id their case has or
+  // would have: the ledger knows the workflow and branch of a job whose case was
+  // filed before those were kept in its evidence.
+  const jobEndings = new Map();
+  for (const j of jobs) {
+    if (j.result !== 'Failed') continue;
+    const scope = j.host || 'github', target = `${j.repo}/${j.runId}/${j.runnerName}/${j.start}`;
+    const pass = passedLater(passed, { repo: j.repo, runId: j.runId, jobName: j.name, attempt: j.attempt, workflow: j.workflow, branch: branchOf(j), end: j.end });
+    const ending = ignored({ repo: j.repo, workflow: j.workflow, job: j.name, event: j.event, branch: branchOf(j) }) ? { reason: 'ignored_job' } : pass;
+    if (ending) { jobEndings.set(idFor('ci', scope, target, 'job_failed', [j.name, j.attempt]), ending); continue; }
     const jk = `ci:job:${issueId(j.host, j.repo, j.runId, j.name, j.attempt, j.start)}`;
-    add('ci', j.host || 'github', `${j.repo}/${j.runId}/${j.runnerName}/${j.start}`, 'job_failed', 'warning', jk,
-      { repo: j.repo, runId: j.runId, attempt: j.attempt, jobName: j.name, runner: j.runnerName, end: j.end }, j.end, [j.name, j.attempt]);
+    source(jk, j.end, true, JOB_FAILED_MAX_AGE_MS);
+    add('ci', scope, target, 'job_failed', 'warning', jk,
+      { repo: j.repo, runId: j.runId, attempt: j.attempt, jobName: j.name, runner: j.runnerName, end: j.end,
+        ...Object.fromEntries([['workflow', j.workflow], ['event', j.event], ['branch', branchOf(j)]].filter(([, v]) => text(v)).map(([k, v]) => [k, v.slice(0, 200)])) }, j.end, [j.name, j.attempt]);
   }
   source('aws:monitor', iso(now), true, 180_000);
   const awsCurrent = source('aws:inventory', aws?.at, Array.isArray(aws?.errors) && !aws.errors.length && Array.isArray(aws.volumes) && Array.isArray(aws.addresses), 30 * 60_000);
@@ -299,6 +368,7 @@ export function deriveIssues({ settings, states, ci, aws, operations = [], maint
       const valid = source(pk, aws.at, Array.isArray(aws.errors) && Array.isArray(aws[field]) && !aws.errors.some((e) => e?.region === region && e?.scope === scope), 30 * 60_000);
       check('aws', region, scope, 'aws_collection_failed', pk, valid);
     }
+    inventories['aws:inventory'] = awsCurrent;
     if (awsCurrent) {
       for (const v of list(aws.volumes)) {
         check('aws', v.region, v.id, 'idle_volume', 'aws:inventory', v.state === 'in-use' && text(v.attachedTo));
@@ -317,6 +387,7 @@ export function deriveIssues({ settings, states, ci, aws, operations = [], maint
   check('aws', 'account', 'health', 'aws_health_missing', 'aws:health', healthySource);
   if (!healthySource) add('aws', 'account', 'health', 'aws_health_missing', 'warning', 'aws:monitor', { errors: list(health?.errors).slice(0, 20) });
   if (fresh(health?.at, now, 10 * 60_000)) {
+    inventories['aws:health'] = healthySource;
     for (const i of list(health.instances)) {
       // An instance of a host or network under a recognised change is held with it.
       check('aws', i.region, i.id, 'aws_instance_impaired', 'aws:health', i.state === 'running' && i.instanceStatus === 'ok' && i.systemStatus === 'ok',
@@ -333,13 +404,15 @@ export function deriveIssues({ settings, states, ci, aws, operations = [], maint
         alarmArn: a.arn, state: a.state, verifiedAt: health.at, ...control } : null;
       check('aws', a.region, a.name, 'aws_alarm', 'aws:health', a.state === 'OK' || !!resolutionEvidence,
         [], resolutionEvidence ? { resolutionEvidence } : {});
-      check('aws', a.region, a.name, 'aws_scaling_control', 'aws:health', a.state === 'OK');
-      if (a.state === 'ALARM' && control) add('aws', a.region, a.name, 'aws_scaling_control', 'info', 'aws:health',
-        { state: a.state, alarmArn: a.arn, ...control, action: 'informational scale-in control; no service recovery asserted' }, health.at);
-      else if (a.state === 'ALARM') add('aws', a.region, a.name, 'aws_alarm', 'warning', 'aws:health', { state: a.state }, health.at);
+      // A verified scale-in control is in ALARM whenever its table is idle. That
+      // is its design, so it is not a case; cases earlier releases filed for it end.
+      check('aws', a.region, a.name, 'aws_scaling_control', 'aws:health', a.state === 'OK' || !!resolutionEvidence,
+        [], resolutionEvidence ? { resolutionEvidence } : {});
+      if (a.state === 'ALARM' && !control) add('aws', a.region, a.name, 'aws_alarm', 'warning', 'aws:health', { state: a.state }, health.at);
     }
   }
-  return { issues, sources, checks, samples, suppressions, jobSuccesses,
+  return { issues, sources, checks, samples, suppressions, inventories, queue, passed, ignored, jobEndings,
+    networks: list(settings.networks).map((n) => n.name), reporters: Array.isArray(ci?.reporters) ? list(ci.reporters).map((r) => r.id) : null,
     excludedCiHosts: (Array.isArray(settings.remediation?.excludedCiHosts) ? settings.remediation.excludedCiHosts : []).filter((id) => typeof id === 'string') };
 }
 
@@ -388,6 +461,60 @@ export function reconcile(previous, derived, now = Date.now()) {
     }
     return rules;
   };
+  // A fault the evaluator has stopped reporting, on a host whose observation is
+  // valid, counts one quiet sample per new probe. After QUIET_SAMPLES in a row
+  // it is dropped even without a proof of its own: a task container that no
+  // longer exists, or a fact no rule recognises, can never be proven healthy.
+  const quietFaults = (issue, check, incoming) => {
+    const quiet = {}, counted = positive(issue, check);
+    for (const f of knownFaults(issue)) {
+      if (incoming.includes(f)) continue;
+      const old = issue.quiet?.[f];
+      quiet[f] = counted && old?.at !== check.observedAt ? { n: (old?.n || 0) + 1, at: check.observedAt } : old || { n: 0, at: null };
+    }
+    return quiet;
+  };
+  const settled = (quiet) => new Set(Object.entries(quiet).filter(([, v]) => v.n >= QUIET_SAMPLES).map(([f]) => f));
+  // Why an open case is over although nothing recovered. Checked before holds
+  // and exclusions: neither keeps alive a case whose subject no longer exists.
+  const GONE = { host_health: (i) => `network:${i.scope}`, endpoint_failed: (i) => `network:${i.scope}`,
+    disk_pressure: (i) => `ci:host:${i.scope}`, runner_offline: (i) => `ci:host:${i.scope}`,
+    idle_volume: () => 'aws:inventory', idle_address: () => 'aws:inventory', aws_instance_impaired: () => 'aws:health',
+    aws_scheduled_event: () => 'aws:health', aws_alarm: () => 'aws:health', aws_scaling_control: () => 'aws:health' };
+  const REPORTER = ['reporter_missing', 'reporter_stale', 'disk_pressure', 'memory_pressure', 'runner_offline'];
+  const gone = (issue, check) => {
+    if (issue.domain === 'network' && Array.isArray(derived.networks)) {
+      if (!derived.networks.includes(issue.scope)) return { reason: 'network_removed', sure: true };
+    } else if (issue.domain === 'ci' && REPORTER.includes(issue.code) && Array.isArray(derived.reporters) && !derived.reporters.includes(issue.scope)) return { reason: 'target_removed', sure: true };
+    if (check || !Object.hasOwn(GONE, issue.code)) return null;
+    return { reason: 'target_removed', sure: derived.inventories?.[GONE[issue.code](issue)] === true };
+  };
+  const ended = (issue, check) => {
+    const missing = gone(issue, check);
+    if (!missing) delete issue.missingSince;
+    else {
+      // The clock starts at the first complete inventory without the target and
+      // is kept through incomplete ones; only a complete one may end the case.
+      if (missing.sure) issue.missingSince ||= iso(now);
+      if (missing.sure && now - Date.parse(issue.missingSince) >= GONE_AFTER_MS) return { reason: missing.reason, missingSince: issue.missingSince };
+    }
+    const e = issue.evidence || {};
+    if (issue.code === 'job_failed') {
+      if (derived.jobEndings?.get(issue.id)?.reason === 'ignored_job'
+        || derived.ignored?.({ repo: e.repo, workflow: e.workflow, job: e.jobName, event: e.event, branch: e.branch })) return { reason: 'ignored_job' };
+      const failedAt = Date.parse(e.end || issue.lastFaultAt || issue.firstSeen);
+      if (Number.isFinite(failedAt) && now - failedAt >= JOB_FAILED_MAX_AGE_MS) return { reason: 'expired', after: 'a day without a later pass on record' };
+    }
+    if (issue.code === 'queue_wait' && derived.queue?.current && now - Date.parse(issue.lastSeen || issue.firstSeen) >= QUEUE_WAIT_UNSEEN_MS)
+      return { reason: 'expired', after: 'a day without being seen waiting' };
+    return null;
+  };
+  const close = (issue, at, evidence) => {
+    issue.status = 'resolved'; issue.resolvedAt = iso(now); if (at) issue.observedAt = at;
+    if (evidence) issue.resolutionEvidence = evidence; else delete issue.resolutionEvidence;
+    issue.suppressed = false; delete issue.missingSince; delete issue.quiet;
+    emit(issue, 'resolved');
+  };
   const signature = (issue) => issue.code === 'host_health' ? JSON.stringify(knownFaults(issue))
     : issue.code === 'aws_instance_impaired' ? JSON.stringify([issue.evidence?.instanceStatus === 'impaired', issue.evidence?.systemStatus === 'impaired'])
       : issue.code === 'aws_scheduled_event' ? JSON.stringify(list(issue.evidence?.events).map((e) => [e.code, e.notBefore]).sort()) : issue.code;
@@ -406,9 +533,13 @@ export function reconcile(previous, derived, now = Date.now()) {
     const issue = { ...old, ...current, observedAt, status: 'open', firstSeen: old?.firstSeen || iso(now), lastSeen: iso(now), resolvedAt: null,
       lastFaultAt: observedAt, suppressed: maintenance || awaitingPostMaintenance };
     delete issue.resolutionEvidence; // a reopened fault cannot retain an earlier classification correction
+    delete issue.missingSince; delete issue.quiet;
     if (old?.status === 'open' && current.code === 'host_health') {
       const proofs = healthyRules(old, check), incoming = knownFaults(current), oldFaults = knownFaults(old);
-      const retained = oldFaults.filter((f) => !proofs.has(f) && !incoming.includes(f));
+      const quiet = quietFaults(old, check, incoming), dropped = settled(quiet);
+      const retained = oldFaults.filter((f) => !proofs.has(f) && !incoming.includes(f) && !dropped.has(f));
+      const waiting = Object.fromEntries(retained.map((f) => [f, quiet[f]]));
+      if (retained.length) issue.quiet = waiting;
       const faults = [...new Set([...incoming, ...retained])].sort();
       const faultLevels = { ...old.evidence?.faultLevels, ...current.evidence?.faultLevels };
       issue.evidence = { ...current.evidence, faults, faultLevels,
@@ -425,28 +556,39 @@ export function reconcile(previous, derived, now = Date.now()) {
   }
   for (const issue of existing.values()) if (issue.status === 'open' && !active.has(issue.id)) {
     const check = derived.checks?.[issue.id];
+    const over = ended(issue, check);
+    if (over) { close(issue, null, over); continue; }
     issue.suppressed = suppressed(issue, check);
     if (issue.suppressed) { issue.suppressedUntil = iso(now); continue; }
-    let clear = positive(issue, check), clearAt = check?.observedAt;
-    if (clear && check.kind === 'host') {
-      const proofs = healthyRules(issue, check);
-      clear = knownFaults(issue).every((f) => proofs.has(f));
+    let clear = positive(issue, check), clearAt = check?.observedAt, evidence = check?.resolutionEvidence;
+    if (check?.kind === 'host') {
+      // Recovered when every fault is either proven healthy or has stayed
+      // unreported through enough valid samples.
+      const proofs = healthyRules(issue, check), quiet = quietFaults(issue, check, []), dropped = settled(quiet);
+      issue.quiet = quiet;
+      const unproven = knownFaults(issue).filter((f) => !proofs.has(f));
+      clear = clear && unproven.every((f) => dropped.has(f));
+      if (clear && unproven.length) evidence = { reason: 'quiet', samples: QUIET_SAMPLES, faults: unproven.slice(0, 30) };
     }
-    // Failed jobs remain unresolved when omitted or aged out. Only a later
-    // successful attempt of the exact logical job is positive recovery.
+    // An omitted failed job proves nothing. A later attempt of the same job, or
+    // a later run of it on the same branch, that passed after the failure does.
     if (!clear && issue.code === 'job_failed') {
       const e = issue.evidence || {};
-      for (const j of derived.jobSuccesses || []) if (text(e.repo) && text(e.jobName) && height(e.runId) && height(e.attempt)
-        && j.repo === e.repo && j.runId === e.runId && j.jobName === e.jobName && j.attempt > e.attempt) {
-        const candidate = { sourceKey: j.sourceKey, observedAt: j.end, clear: true };
-        if (positive(issue, candidate)) { clear = true; clearAt = candidate.observedAt; break; }
-      }
+      const known = derived.jobEndings?.get(issue.id);
+      const pass = known?.end ? known : text(e.repo) && text(e.jobName) && height(e.runId) ? passedLater(derived.passed, { ...e, end: e.end || issue.lastFaultAt }) : null;
+      if (pass) { clear = true; clearAt = pass.end; evidence = pass; }
     }
-    if (clear) {
-      issue.status = 'resolved'; issue.resolvedAt = iso(now); issue.observedAt = clearAt;
-      if (check?.resolutionEvidence) issue.resolutionEvidence = check.resolutionEvidence;
-      emit(issue, 'resolved');
+    // Not listed as waiting by a whole, current listing of its repository, for
+    // a run the listing still follows: it started, finished or was cancelled.
+    if (!clear && issue.code === 'queue_wait') {
+      const q = derived.queue, e = issue.evidence || {}, seen = Date.parse(q?.observedAt);
+      // Cases filed before the run's start was recorded only know when the job
+      // was created, which is later: half the window allows for that.
+      const runAt = Number.isFinite(Date.parse(e.runCreatedAt)) ? Date.parse(e.runCreatedAt) : Date.parse(e.createdAt) - (q?.windowMs || 0) / 2;
+      if (q?.current && q.covered.includes(e.repo) && Number.isFinite(runAt) && seen - runAt < q.windowMs - GONE_AFTER_MS
+        && seen > Date.parse(issue.lastFaultAt || issue.observedAt || issue.firstSeen)) { clear = true; clearAt = q.observedAt; evidence = { reason: 'left_queue' }; }
     }
+    if (clear) close(issue, clearAt, evidence);
   }
   state.issues = [...existing.values()].filter((i) => i.status === 'open' || now - Date.parse(i.resolvedAt) < 30 * 86400_000);
   // Exclusion is not recovery. Retain observations/history and withdraw only
@@ -468,6 +610,30 @@ export function reconcile(previous, derived, now = Date.now()) {
   // No unbounded probe history. Expired identities cannot verify recovery.
   state.explorerSamples = Object.fromEntries(Object.entries(samples).filter(([, s]) => !derived.suppressions?.[s.scope] && fresh(s.probe?.at, now, 180_000)));
   state.generatedAt = iso(now); state.sources = derived.sources;
+  return state;
+}
+
+// More than one delivery batch waiting is a backlog: the receiver is away or
+// behind. It acts on the newest state of an issue, so older revisions that were
+// never delivered are dropped, and an issue that opened and ended without the
+// receiver ever hearing of it is not reported to it at all. Otherwise a
+// receiver that returns is handed days of faults that are long over, hours
+// before the events that say so.
+export const BACKLOG_EVENTS = 50;
+export function compactBacklog(state) {
+  const outbox = state.outbox || [];
+  if (outbox.length <= BACKLOG_EVENTS) return state;
+  const issues = new Map((state.issues || []).map((i) => [i.id, i]));
+  const first = new Map(), last = new Map();
+  for (const e of outbox) { const id = e.issue?.id; if (!first.has(id)) first.set(id, e); last.set(id, e); }
+  // `delivered` is the highest revision the receiver acknowledged. Releases
+  // before this one did not record it: events of one issue are delivered in
+  // order, so it is everything below the oldest revision still waiting.
+  for (const [id, e] of first) {
+    const issue = issues.get(id);
+    if (issue && !Number.isSafeInteger(issue.delivered)) issue.delivered = Math.max(0, (Number.isSafeInteger(e.issue.revision) ? e.issue.revision : 1) - 1);
+  }
+  state.outbox = outbox.filter((e) => last.get(e.issue?.id) === e && !(e.issue.status === 'resolved' && issues.get(e.issue.id)?.delivered === 0));
   return state;
 }
 

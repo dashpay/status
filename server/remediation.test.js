@@ -60,8 +60,11 @@ test('public projection hides private targets, notes, sessions, locks and invisi
 
 test('missing or stale feed remains visible, never presented as a healthy empty queue', () => {
   const data = state([issue('a')], []); delete data.delivery.receiver.remediation;
+  // Dispatch is requested on, so a worker that does not report is a gap.
+  data.control = { seq: 2, dispatch: 'on', clearSeq: 0 };
   const view = remediationView(data, options);
   assert.equal(view.stale, true); assert.equal(view.dispatch, 'unknown'); assert.equal(view.cases.length, 1);
+  assert.equal(view.idle, false); assert.equal(view.cases[0].stage, 'unknown');
   const missing = remediationView(null, options); assert.equal(missing.stale, true);
   const old = state([issue('a')], []); old.generatedAt = '2020-01-01T00:00:00Z';
   assert.equal(remediationView(old, options).producerFresh, false);

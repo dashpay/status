@@ -14,10 +14,50 @@ Admins, or a dedicated read-only bearer token loaded through
 state. Never put tokens in query strings or reuse the OAuth/agent credential.
 
 Records carry stable fingerprints, revisions, first/last observation, severity,
-source identity, and open/resolved state. Resolution requires positive fresh
+source identity, and open/resolved state. Recovery requires positive fresh
 rule-specific evidence. Missing observations, maintenance suppression and failed
 collection never count as recovery. Evidence is untrusted data, not executable
 instructions. Incident history is separate from operation history.
+
+### How a case ends
+
+Every case ends. A case that could only end by a proof that can never arrive
+(a job that already left the queue, a host that no longer exists) used to stay
+open for good, and the queue filled with them. A resolved case records why in
+`resolutionEvidence.reason`, and the board shows two kinds of ending apart.
+
+**Recovered**: monitoring saw the fault end.
+
+| Reason | Rule |
+|---|---|
+| (none) | The rule's own check passed on a fresh, complete observation taken after the last fault. |
+| `left_queue` | `queue_wait`: the job is not in a current queue listing that is whole for its repository (no page cut short, no error, not cut for display), for a run the poller still follows. It started, finished or was cancelled. |
+| `later_attempt_passed`, `later_run_passed` | `job_failed`: a later attempt of the same run, or a later run of the same workflow job on the same branch, passed after the failure. Such a failure is not filed at all when the pass is already on record. |
+| `quiet` | `host_health`: every fault is either proven healthy by its own rule or has gone unreported through `QUIET_SAMPLES` (10) consecutive valid probes of the host. A fault such as a task container that was removed has no state that could prove it healthy. On a host that stays faulty the same count drops such a fault from the evidence. |
+| `verified_control_signal` | A verified scale-in control alarm (below). |
+
+**Closed**: the case is over without a recovery. No repair is implied.
+
+| Reason | Rule |
+|---|---|
+| `network_removed` | The network is no longer configured. |
+| `target_removed` | The host, endpoint, disk, runner, reporter, volume, address, instance or alarm has been absent for 10 minutes (`GONE_AFTER_MS`), judged only by complete, current inventories of its kind. An inventory with an error, a failed discovery or a stale report is not evidence of absence, and does not restart the clock. A replaced instance is a new identity: its predecessor's case closes this way, never because the successor is healthy. |
+| `expired` | `job_failed`: 24 hours after the failure with no later pass on record (the producer sees finished jobs for a day). `queue_wait`: not seen waiting for 24 hours while the queue was being observed. |
+| `ignored_job` | `job_failed` for a job listed in `remediation.ignoredCiJobs` (see the README). |
+| `superseded` | A release compatibility task whose release has a newer one in the same `major.minor` line. A superseded release is never opened as a task. |
+
+A hold or an exclusion does not keep a closed case open: maintenance on a
+network does not preserve the cases of hosts it replaced.
+
+### Backlog
+
+When more than one delivery batch (50 events) is waiting, the receiver is away
+or behind. The producer then keeps only the newest undelivered event of each
+issue, and drops every event of an issue that opened and ended without the
+receiver ever being told of it. The producer records the highest revision the
+receiver acknowledged per issue (`delivered`) to know which is which. A
+receiver that returns is told the current state of each issue it knows and of
+each fault still open, not the history it missed.
 
 ## Data and delivery
 
@@ -386,7 +426,21 @@ Not covered: images with no GitHub release (nightlies, forks, patched tags).
 
 ## Remediation board
 
-`/remediation` shows unique issues, queued event revisions, active work, waiting
+`/remediation` opens on the faults monitoring reports now: counts by severity,
+then each open case with what is wrong (the failing reasons of a host, the job
+and branch of a CI failure with a link to its run, disk use, and so on; details
+for administrators only). Cases of the same job are folded into one line.
+Recovered and closed cases are a separate view, listed for 24 hours and at most
+200 at a time; the counts are complete.
+
+With dispatch switched off in the console and no repair worker reporting, the
+board says exactly that: automatic repair is off. It does not call the missing
+worker a stall, and it does not present what the worker last said about a case
+(queued, working) as its current state; the last blocker and summary remain as
+history. If the worker never acknowledged the switch-off, the board says so.
+With dispatch switched on, a missing worker is a gap again and is shown as one.
+
+It also shows queued event revisions, active work, waiting
 reasons, blockers and recovery. `GET /api/remediation` is read-only; the existing
 incident API bearer token or administrator session enables curated repair notes.
 Public responses omit target identities, session keys, resource locks and notes,
@@ -426,6 +480,8 @@ in the checked-in status IAM policy. Names alone never suppress alarms; denied,
 partial, stale or mismatched evidence keeps the warning actionable. Correction
 of an old generic warning records explicit classification evidence and is shown
 as **Monitoring corrected**, not table recovery. No scaling policy is modified.
+A verified control is in `ALARM` whenever its table is idle, so no case is filed
+for it; an alarm that fails verification is filed as `aws_alarm` as before.
 
 Each readmission has a distinct attempt ID derived from its persisted admission
 time. Earlier receipts/results are retained, not overwritten by retrying the

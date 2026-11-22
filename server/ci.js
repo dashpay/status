@@ -20,6 +20,8 @@ const STALE_MS = 3 * 60_000;
 // Busy spans are kept for the 48-hour strip; one per single-use runner.
 const SPAN_KEEP_MS = 49 * 3_600_000;
 const SPAN_MAX = 2000;
+// The queue poll follows runs created within this window.
+const QUEUE_WINDOW_MS = DAY;
 const ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const REPO = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 const TS = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/;
@@ -234,24 +236,36 @@ export function createCi({ dataDir, fetcher = fetch, clock = Date.now, github = 
     const repos = [...new Set(jobs.filter((j) => j.repo && j.visibility === 'public' && Date.parse(j.start) > now - 7 * DAY).map((j) => j.repo))].slice(0, 8);
     const served = servedLabels();
     const waiting = [];
+    // Repositories whose waiting jobs were listed in full: for these, a job
+    // that is not listed is not waiting. A cut-off page proves nothing.
+    const covered = [];
     let error = null;
     for (const repo of repos) {
       try {
         const runs = new Map(); // a run can move from queued to in progress between the two calls
-        for (const status of ['queued', 'in_progress']) for (const r of (await api(`/repos/${repo}/actions/runs?status=${status}&per_page=30`))?.workflow_runs || []) runs.set(r.id, r);
-        for (const run of [...runs.values()].filter((r) => Date.parse(r.created_at) > now - DAY).slice(0, 25)) {
+        let whole = true;
+        for (const status of ['queued', 'in_progress']) {
+          const page = (await api(`/repos/${repo}/actions/runs?status=${status}&per_page=30`))?.workflow_runs || [];
+          if (page.length >= 30) whole = false;
+          for (const r of page) runs.set(r.id, r);
+        }
+        const recent = [...runs.values()].filter((r) => Date.parse(r.created_at) > now - QUEUE_WINDOW_MS);
+        if (recent.length > 25) whole = false;
+        for (const run of recent.slice(0, 25)) {
           const v = await api(`/repos/${repo}/actions/runs/${run.id}/jobs?filter=latest&per_page=100`);
+          if (!v || (v.jobs || []).length >= 100) whole = false;
           for (const j of (v?.jobs || []).map(compactJob)) {
             // Waiting for a runner only (not for approval or a concurrency group).
             if (j.status !== 'queued') continue;
             const labels = j.labels.map((l) => l.toLowerCase());
             if (!labels.includes('self-hosted') && !served.has(JSON.stringify([...j.labels].sort()))) continue;
-            waiting.push({ id: j.id, repo, workflow: String(run.name || '').slice(0, 200), name: j.name, labels: j.labels, createdAt: j.createdAt, url: j.url, branch: String(run.head_branch || '').slice(0, 200) });
+            waiting.push({ id: j.id, repo, workflow: String(run.name || '').slice(0, 200), name: j.name, labels: j.labels, createdAt: j.createdAt, runCreatedAt: run.created_at, url: j.url, branch: String(run.head_branch || '').slice(0, 200) });
           }
         }
+        if (whole) covered.push(repo);
       } catch (err) { error = err.message; if (/rate limit/.test(err.message)) break; }
     }
-    gh.queue = { at: new Date(now).toISOString(), repos, jobs: waiting.sort((a, b) => a.createdAt.localeCompare(b.createdAt)), error };
+    gh.queue = { at: new Date(now).toISOString(), repos, covered, windowMs: QUEUE_WINDOW_MS, jobs: waiting.sort((a, b) => a.createdAt.localeCompare(b.createdAt)), error };
   }
 
   let lastQueue = 0, ticking = false;
@@ -282,7 +296,10 @@ export function createCi({ dataDir, fetcher = fetch, clock = Date.now, github = 
     return { queueSec: Number.isFinite(q) && q >= 0 ? Math.round(q) : null, url: best.g.url, labels: best.g.labels };
   }
 
-  function summary({ admin = false } = {}) {
+  // `whole` is for the incident producer: every waiting job and every job that
+  // finished in the last day, instead of the lists cut for display. Closing a
+  // case because its job left the queue, or passed later, needs the whole list.
+  function summary({ admin = false, whole = false } = {}) {
     const now = clock();
     const hosts = list(dirs.hosts);
     const regs = reporters();
@@ -397,10 +414,10 @@ export function createCi({ dataDir, fetcher = fetch, clock = Date.now, github = 
       hosts: hosts.map((h) => ({ id: h.id, label: regs[h.id]?.label || h.id, receivedAt: h.receivedAt, measuredAt: h.at, stale: now - Date.parse(h.receivedAt) > STALE_MS, reporter: h.reporter, python: h.python, ...h.host })).sort((a, b) => a.label.localeCompare(b.label)),
       runners,
       pools,
-      queue: gh.queue ? { ...gh.queue, jobs: queued.slice(0, 50) } : null,
+      queue: gh.queue ? { ...gh.queue, total: queued.length, jobs: whole ? queued : queued.slice(0, 50) } : null,
       workflows: workflows.slice(0, 40),
       daily,
-      recent: jobs.filter((j) => j.end).sort((a, b) => b.end.localeCompare(a.end)).slice(0, 60)
+      recent: (whole ? jobs.filter((j) => j.end && Date.parse(j.end) > now - DAY) : jobs.filter((j) => j.end)).sort((a, b) => b.end.localeCompare(a.end)).slice(0, whole ? 20_000 : 60)
         .map((j) => ({ ...j, durationSec: dur(j), url: j.url || (j.repo && j.runId ? `https://github.com/${j.repo}/actions/runs/${j.runId}` : null) })),
       github: { enabled: !!github, rate: gh.rate, enriched: Object.values(gh.runs).filter((e) => e.jobs).length },
       ...(admin ? { reporters: Object.entries(regs).map(([id, r]) => ({ id, label: r.label, createdAt: r.createdAt, lastSeen: hosts.find((h) => h.id === id)?.receivedAt || null })) } : {}),

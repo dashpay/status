@@ -90,6 +90,38 @@ export function validCompatibility(proof, release) {
     && Array.isArray(proof.tests) && proof.tests.length > 0 && proof.tests.every((t) => typeof t === 'string' && t.length > 0);
 }
 
+// Semantic-version order within one release line (major.minor). A release with
+// a newer one in its own line is superseded: nothing will deploy it, so checking
+// dash-network-go against it is no longer work anyone needs.
+const version = (tag) => {
+  const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(typeof tag === 'string' ? tag : '');
+  return m ? { line: `${m[1]}.${m[2]}`, patch: Number(m[3]), pre: m[4] ? m[4].split('.') : null } : null;
+};
+function newer(a, b) {
+  if (a.patch !== b.patch) return a.patch > b.patch;
+  if (!a.pre || !b.pre) return !a.pre && !!b.pre;
+  for (let i = 0; i < Math.max(a.pre.length, b.pre.length); i++) {
+    const x = a.pre[i], y = b.pre[i];
+    if (x === undefined || y === undefined) return y === undefined && x !== undefined;
+    if (x === y) continue;
+    const nx = /^\d+$/.test(x), ny = /^\d+$/.test(y);
+    if (nx && ny) return Number(x) > Number(y);
+    if (nx !== ny) return ny;
+    return x > y;
+  }
+  return false;
+}
+export function supersededBy(release, releases) {
+  const mine = version(release.tag);
+  if (!mine) return null;
+  let best = null;
+  for (const other of releases) {
+    const theirs = other.repository === release.repository && other.releaseId !== release.releaseId ? version(other.tag) : null;
+    if (theirs && theirs.line === mine.line && newer(theirs, mine) && (!best || newer(theirs, version(best.tag)))) best = other;
+  }
+  return best;
+}
+
 // Called only by the incident-state single writer. No health-fault derivation or
 // six-hour reminder loop: a release is durable work, not a recurring outage.
 export function reconcileReleaseTasks(state, releases, now = Date.now()) {
@@ -110,9 +142,11 @@ export function reconcileReleaseTasks(state, releases, now = Date.now()) {
       state.revisionCounters[id] = issue.revision; issue.lastEventAt = iso(now);
       state.outbox.push({ schemaVersion: 1, eventId: `${id}:${issue.revision}`, occurredAt: iso(now), transition, issue: structuredClone(issue) });
     };
+    const successor = supersededBy(release, releases);
     if (!issue) {
       // Counters survive display retention; never re-enqueue an old webhook file.
-      if (state.revisionCounters[id]) continue;
+      // A release that is already superseded never becomes a task.
+      if (state.revisionCounters[id] || successor) continue;
       issue = { id, domain: 'maintenance', scope: 'dash-network-go', target: `${source.component} ${release.tag}`, code: source.code,
         sourceKey: `github-release:${release.repositoryId}:${release.releaseId}`, severity: 'info', status: 'open',
         summary: `Check and fix dash-network-go compatibility with ${source.component} ${release.tag}`,
@@ -125,6 +159,11 @@ export function reconcileReleaseTasks(state, releases, now = Date.now()) {
         && validCompatibility(response.lastResponse.compatibility, release)) {
       issue.status = 'resolved'; issue.resolvedAt = iso(now); issue.observedAt = iso(now);
       issue.resolutionEvidence = { reason: 'compatibility_report', ...response.lastResponse.compatibility };
+      emit('resolved');
+    } else if (issue.status === 'open' && successor) {
+      // Ended, not verified: no compatibility is claimed for this release.
+      issue.status = 'resolved'; issue.resolvedAt = iso(now); issue.observedAt = iso(now);
+      issue.resolutionEvidence = { reason: 'superseded', by: successor.tag, releaseId: successor.releaseId };
       emit('resolved');
     }
   }
