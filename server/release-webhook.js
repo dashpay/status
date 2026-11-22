@@ -91,8 +91,9 @@ export function validCompatibility(proof, release) {
 }
 
 // Semantic-version order within one release line (major.minor). A release with
-// a newer one in its own line is superseded: nothing will deploy it, so checking
-// dash-network-go against it is no longer work anyone needs.
+// a newer one in its own line is superseded: checking dash-network-go against
+// it is no longer work anyone needs. A release is superseded only by a newer
+// release, a prerelease by anything newer.
 const version = (tag) => {
   const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(typeof tag === 'string' ? tag : '');
   return m ? { line: `${m[1]}.${m[2]}`, patch: Number(m[3]), pre: m[4] ? m[4].split('.') : null } : null;
@@ -117,7 +118,8 @@ export function supersededBy(release, releases) {
   let best = null;
   for (const other of releases) {
     const theirs = other.repository === release.repository && other.releaseId !== release.releaseId ? version(other.tag) : null;
-    if (theirs && theirs.line === mine.line && newer(theirs, mine) && (!best || newer(theirs, version(best.tag)))) best = other;
+    // A prerelease does not supersede a release: 5.0.3 stays in service while 5.0.4-rc.1 is tried.
+    if (theirs && theirs.line === mine.line && !(theirs.pre && !mine.pre) && newer(theirs, mine) && (!best || newer(theirs, version(best.tag)))) best = other;
   }
   return best;
 }

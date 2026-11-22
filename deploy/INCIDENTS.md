@@ -21,17 +21,24 @@ instructions. Incident history is separate from operation history.
 
 ### How a case ends
 
-Every case ends. A case that could only end by a proof that can never arrive
-(a job that already left the queue, a host that no longer exists) used to stay
-open for good, and the queue filled with them. A resolved case records why in
-`resolutionEvidence.reason`, and the board shows two kinds of ending apart.
+A case that could only end by a proof that can never arrive (a job that already
+left the queue, a host that no longer exists) used to stay open for good, and
+the queue filled with them. The rules below end them. A resolved case records
+why in `resolutionEvidence.reason`, and the board shows two kinds of ending
+apart.
+
+Three kinds of case still wait for their own proof and can stay open: an
+`aws_collection_failed` for a scan that is not refreshed with every inventory
+(it has no completeness clock of its own), an `aws_alarm` that moved from
+`ALARM` to `INSUFFICIENT_DATA`, and every case of a CI host listed in
+`remediation.excludedCiHosts`, which is left exactly as it is while excluded.
 
 **Recovered**: monitoring saw the fault end.
 
 | Reason | Rule |
 |---|---|
 | (none) | The rule's own check passed on a fresh, complete observation taken after the last fault. |
-| `left_queue` | `queue_wait`: GitHub recorded the job starting on one of our runners; or the job is not among the queued jobs of a current listing that is whole for its repository (every page answered, none cut short, not cut for display, every queued job counted whatever its labels), for a run the poller still follows. Then it started, finished or was cancelled. A case that does not record when its run began cannot use the listing. |
+| `left_queue` | `queue_wait`: GitHub recorded the job starting on one of our runners; or the job is not among the queued jobs of a current listing that is whole for its repository (every page answered, none cut short, not cut for display, every queued job counted whatever its labels), for a run the poller still follows, in two listings in a row (one listing can miss a run that changes status between its two requests). Then it started, finished or was cancelled. A case that does not record when its run began cannot use the listing. |
 | `later_attempt_passed`, `later_run_passed` | `job_failed`: a later attempt of the same run, or a later run (a higher run id) of the same workflow job on the same refs, passed after the failure. An older run that was slow to pass does not count. The refs are the head branch and the run's own ref, so pull requests from two forks with the same branch name stay apart, except under `pull_request_target`, where the ref is the base branch. Such a failure is not filed at all when the pass is already on record, and a pass still on record wins over expiry. |
 | `quiet` | `host_health`: every fault is either proven healthy by its own rule or has gone unreported through `QUIET_SAMPLES` (10) consecutive valid probes of the host. A fault such as a task container that was removed has no state that could prove it healthy. On a host that stays faulty the same count drops such a fault from the evidence. |
 | `verified_control_signal` | A verified scale-in control alarm (below). |
@@ -41,13 +48,13 @@ open for good, and the queue filled with them. A resolved case records why in
 | Reason | Rule |
 |---|---|
 | `network_removed` | The network is no longer configured. |
-| `target_removed` | The host, endpoint, disk, runner, reporter, volume, address, instance or alarm has been absent for 10 minutes (`GONE_AFTER_MS`), judged only by complete, current inventories of its kind. An inventory with an error, a failed discovery, a stale report, or a host report that lists only the first six of more disks is not evidence of absence, and does not restart the clock. A replaced instance is a new identity: its predecessor's case closes this way, never because the successor is healthy. |
+| `target_removed` | The host, endpoint, disk, runner, reporter, volume, address, instance or alarm has been absent for 10 minutes (`GONE_AFTER_MS`), judged only by complete, current inventories of its kind. The 10 minutes are measured between the inventories' own times, so it takes a later inventory to end a case; the same one read again counts once. The collector and discovery cases of a network generation that a reset replaced end the same way. An inventory with an error, a failed discovery, a stale report, or a host report that lists only the first six of more disks is not evidence of absence, and does not restart the clock. A replaced instance is a new identity: its predecessor's case closes this way, never because the successor is healthy. |
 | `expired` | `job_failed`: 24 hours after the failure with no later pass on record (the producer sees finished jobs for a day). `queue_wait`: not seen waiting for 24 hours while the queue was being observed. |
 | `ignored_job` | `job_failed` for a job listed in `remediation.ignoredCiJobs` (see the README). |
-| `superseded` | A release compatibility task whose release has a newer one in the same `major.minor` line. A superseded release is never opened as a task. |
+| `superseded` | A release compatibility task whose release has a newer one in the same `major.minor` line. A release is superseded only by a newer release; a prerelease by any newer version. A superseded release is never opened as a task. |
 
-A hold or an exclusion does not keep a closed case open: maintenance on a
-network does not preserve the cases of hosts it replaced.
+A maintenance hold does not keep a closed case open: an operation on a network
+does not preserve the cases of the hosts it replaced.
 
 ### Backlog
 

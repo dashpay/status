@@ -39,9 +39,18 @@ test('a waiting job that leaves a whole listing of its repository is recovered, 
   // stopped reporting): GitHub lists it as queued, so it has not left.
   const hidden = reconcile(s, deriveCi(now + 4 * MIN, { ...ciHost(now + 4 * MIN), queue: queueOf(now + 4 * MIN, [], { queued: [7] }) }), now + 4 * MIN);
   assert.equal(only(hidden, 'queue_wait').status, 'open');
+  // One listing without it is not enough: a run that changes status between the
+  // listing's two requests is in neither. The same listing read again is still one.
   s = reconcile(s, deriveCi(now + 4 * MIN, { ...ciHost(now + 4 * MIN), queue: queueOf(now + 4 * MIN, []) }), now + 4 * MIN);
+  assert.deepEqual([only(s, 'queue_wait').status, only(s, 'queue_wait').absentAt], ['open', stamp(now + 4 * MIN)]);
+  s = reconcile(s, deriveCi(now + 5 * MIN, { ...ciHost(now + 5 * MIN), queue: queueOf(now + 4 * MIN, []) }), now + 5 * MIN);
+  assert.equal(only(s, 'queue_wait').status, 'open');
+  // Back in the next listing: it never left, and the count starts over.
+  const back = reconcile(s, deriveCi(now + 6 * MIN, { ...ciHost(now + 6 * MIN), queue: queueOf(now + 6 * MIN, [waiting(now)]) }), now + 6 * MIN);
+  assert.deepEqual([only(back, 'queue_wait').status, only(back, 'queue_wait').absentAt, back.outbox.length], ['open', undefined, s.outbox.length]);
+  s = reconcile(s, deriveCi(now + 6 * MIN, { ...ciHost(now + 6 * MIN), queue: queueOf(now + 6 * MIN, []) }), now + 6 * MIN);
   const left = only(s, 'queue_wait');
-  assert.deepEqual([left.status, reason(left), left.resolutionEvidence.how, left.observedAt], ['resolved', 'left_queue', 'no longer queued', stamp(now + 4 * MIN)]);
+  assert.deepEqual([left.status, reason(left), left.resolutionEvidence.how, left.observedAt, left.absentAt], ['resolved', 'left_queue', 'no longer queued', stamp(now + 6 * MIN), undefined]);
   assert.equal(s.outbox.at(-1).transition, 'resolved');
 });
 
@@ -92,6 +101,9 @@ test('a failed job is recovered by a later attempt or a later run on its branch,
   assert.deepEqual([rerun.status, reason(rerun), rerun.observedAt], ['resolved', 'later_attempt_passed', stamp(now + 20 * MIN)]);
   const next = after([pass()]);
   assert.deepEqual([next.status, reason(next), next.resolutionEvidence.runId, next.observedAt], ['resolved', 'later_run_passed', 10, stamp(now + 20 * MIN)]);
+  // The newest run passed before the failure finished; the one before it passed after. That one counts.
+  const outOfOrder = after([pass({ runId: 12, start: stamp(now - 20 * MIN), end: stamp(now - 5 * MIN) }), pass({ runId: 11 })]);
+  assert.deepEqual([reason(outOfOrder), outOfOrder.resolutionEvidence.runId], ['later_run_passed', 11]);
   // A case filed before workflow and branch were kept in its evidence: the ledger still knows them.
   const stripped = structuredClone(initial);
   for (const key of ['workflow', 'branch', 'event', 'headRef', 'ref']) delete only(stripped, 'job_failed').evidence[key];
@@ -181,6 +193,10 @@ test('a disk or runner missing from a current report for ten minutes is gone; a 
   // A stale report is not an inventory: it neither ends the case nor restarts the clock.
   const stale = reconcile(s, deriveCi(now + HOUR, without(now + 30 * MIN)), now + HOUR);
   assert.equal(byCode(stale, 'disk_pressure').filter((i) => i.status === 'open').length, 2);
+  assert.equal(byCode(stale, 'disk_pressure').find((i) => i.target === '/data').missingSince, stamp(now + MIN));
+  // The clock is read off the reports, not the cycles: the last report read again an hour on is still the last report.
+  const reread = reconcile(s, deriveCi(now + MIN + GONE_AFTER_MS, { ...without(now + MIN + GONE_AFTER_MS - 1), hosts: [{ ...without(now + MIN + GONE_AFTER_MS - 1).hosts[0], receivedAt: stamp(now + MIN + GONE_AFTER_MS) }] }), now + MIN + GONE_AFTER_MS);
+  assert.equal(byCode(reread, 'disk_pressure').filter((i) => i.status === 'open').length, 2);
   const ended = reconcile(s, deriveCi(now + MIN + GONE_AFTER_MS, without(now + MIN + GONE_AFTER_MS)), now + MIN + GONE_AFTER_MS);
   const disks = Object.fromEntries(byCode(ended, 'disk_pressure').map((i) => [i.target, [i.status, reason(i) || null]]));
   assert.deepEqual(disks, { '/': ['open', null], '/data': ['resolved', 'target_removed'] });
@@ -198,6 +214,26 @@ test('a disk or runner missing from a current report for ten minutes is gone; a 
   assert.ok([...byCode(gone, 'disk_pressure'), ...byCode(gone, 'runner_offline')].every((i) => i.status === 'open'));
   gone = reconcile(gone, removed(now + MIN + GONE_AFTER_MS), now + MIN + GONE_AFTER_MS);
   assert.ok([...byCode(gone, 'disk_pressure'), ...byCode(gone, 'runner_offline')].every((i) => i.status === 'resolved' && reason(i) === 'target_removed'));
+});
+
+test('cases of a host excluded from remediation are left as they are: nothing ends them, nothing is parked for them', () => {
+  const remediation = { excludedCiHosts: ['shared'] };
+  const bad = ciHost(now, { disks: [{ path: '/', total: 100, free: 5 }, { path: '/data', total: 100, free: 5 }] });
+  const failure = failed(now);
+  let s = reconcile(null, deriveCi(now, { ...bad, recent: [failure] }), now);
+  const parked = () => (s.quarantined || []).length;
+  // Excluded from then on; the disk goes, the reporter is deregistered, the failure ages out.
+  s = reconcile(s, deriveCi(now + MIN, { ...ciHost(now + MIN, { disks: [{ path: '/', total: 100, free: 5 }] }), recent: [failure] }, remediation), now + MIN);
+  const before = parked();
+  for (const ms of [now + 20 * MIN, now + 40 * MIN, now + 25 * HOUR, now + 26 * HOUR]) s = reconcile(s, deriveCi(ms, { reporters: [], hosts: [], runners: [], recent: [] }, remediation), ms);
+  assert.deepEqual(s.issues.filter((i) => i.scope === 'shared').map((i) => [i.code, i.status, i.remediationExcluded]).sort(),
+    [['disk_pressure', 'open', true], ['disk_pressure', 'open', true], ['job_failed', 'open', true]]);
+  assert.equal(parked(), before, 'no ending is emitted only to be quarantined');
+  // The exclusion is lifted: the cases end by the ordinary rules, and their endings are sent.
+  s = reconcile(s, deriveCi(now + 27 * HOUR, { reporters: [], hosts: [], runners: [], recent: [] }), now + 27 * HOUR);
+  s = reconcile(s, deriveCi(now + 28 * HOUR, { reporters: [], hosts: [], runners: [], recent: [] }), now + 28 * HOUR);
+  assert.deepEqual(s.issues.filter((i) => i.scope === 'shared').map((i) => [i.code, reason(i)]).sort(), [['disk_pressure', 'target_removed'], ['disk_pressure', 'target_removed'], ['job_failed', 'expired']]);
+  assert.equal(s.outbox.filter((e) => e.issue.scope === 'shared' && e.transition === 'resolved').length, 3);
 });
 
 // ---- networks ------------------------------------------------------------
@@ -245,6 +281,17 @@ test('a host missing from a failed or stale discovery is not gone, and a hold do
   assert.equal(only(s, 'host_health').status, 'open');
   s = reconcile(s, held(now + 3 * HOUR + GONE_AFTER_MS), now + 3 * HOUR + GONE_AFTER_MS);
   assert.deepEqual([only(s, 'host_health').status, reason(only(s, 'host_health'))], ['resolved', 'target_removed']);
+});
+
+test('after a reset, the collector and discovery cases of the old generation end once the new one is being observed', () => {
+  const broken = (ms) => ({ testnet: network(ms, [], [], { error: 'AccessDenied' }) });
+  let s = reconcile(null, deriveNet(now, broken(now), settingsFor(['testnet'], { generation: 1 })), now);
+  assert.equal(only(s, 'discovery_failed').status, 'open');
+  const reset = (ms) => deriveNet(ms, { testnet: network(ms, [host(ms, {})]) }, settingsFor(['testnet'], { generation: 2 }));
+  s = reconcile(s, reset(now + MIN), now + MIN);
+  assert.equal(only(s, 'discovery_failed').status, 'open');
+  s = reconcile(s, reset(now + MIN + GONE_AFTER_MS), now + MIN + GONE_AFTER_MS);
+  assert.deepEqual([only(s, 'discovery_failed').status, reason(only(s, 'discovery_failed'))], ['resolved', 'target_removed']);
 });
 
 test('AWS cases end when the resource is gone from a complete inventory, not from a partial one', () => {
@@ -319,6 +366,10 @@ test('a release with a newer one in its line is superseded: its task closes, and
   assert.equal(supersededBy(release('v5.0.0-beta.3', 1), [release('v5.0.0-beta.3', 1), release('v5.0.0-beta.10', 2), release('v5.0.0-alpha.99', 3)]).tag, 'v5.0.0-beta.10', 'numeric identifiers compare as numbers');
   assert.equal(supersededBy(release('v5.0.0-rc.1', 1), [release('v5.0.0-rc.1.1', 2)]).tag, 'v5.0.0-rc.1.1');
   assert.equal(supersededBy(release('v5.0.0', 1), [release('v5.0.0-rc.9', 2), release('v6.0.0', 3), release('v5.0.1', 4, 'dashpay/dash', 19352450)]), null, 'a prerelease, another line and another repository do not supersede');
+  // 5.0.3 stays in service while 5.0.4-rc.1 is tried: a prerelease supersedes prereleases only.
+  const trial = [release('v5.0.3', 1), release('v5.0.4-rc.1', 2), release('v5.0.4-beta.2', 3)];
+  assert.deepEqual(trial.map((r) => supersededBy(r, trial)?.tag || null), [null, null, 'v5.0.4-rc.1']);
+  assert.equal(supersededBy(trial[1], [...trial, release('v5.0.4', 4)]).tag, 'v5.0.4');
   // Tasks filed one by one as the releases came out, none of them ever worked on.
   const state = { schemaVersion: 1, issues: [], outbox: [], revisionCounters: {}, delivery: { receiver: {} } };
   reconcileReleaseTasks(state, releases.slice(0, 1), now);
@@ -373,9 +424,11 @@ test('a receiver that accepted an opening and lost its answer is still told the 
   await cycle({ dataDir, ci, destination, secret: 'test-secret', now: clock, fetcher: async (_, opts) => { stored.push(...JSON.parse(opts.body).events); throw new Error('connection lost after acceptance'); } });
   const openThere = new Set(stored.filter((e) => e.issue.code === 'queue_wait').map((e) => e.issue.id));
   assert.ok(openThere.size > 0 && openThere.size < 60, 'one batch of the sixty openings is with the receiver, unacknowledged');
-  // The receiver goes away; every job then leaves the queue.
-  clock += 5 * MIN; queue = queueOf(clock, []);
-  await cycle({ dataDir, ci, destination, secret: 'test-secret', now: clock, fetcher: async () => { throw new Error('connection refused'); } });
+  // The receiver goes away; every job then leaves the queue (two listings say so).
+  for (const minutes of [5, 2]) {
+    clock += minutes * MIN; queue = queueOf(clock, []);
+    await cycle({ dataDir, ci, destination, secret: 'test-secret', now: clock, fetcher: async () => { throw new Error('connection refused'); } });
+  }
   const state = loadIncidentState(dataDir);
   assert.ok(byCode(state, 'queue_wait').every((i) => i.status === 'resolved'));
   const pending = state.outbox.filter((e) => e.issue.code === 'queue_wait');

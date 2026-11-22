@@ -319,8 +319,11 @@ test('a job missing from a cut or partial queue listing is still waiting; an omi
     assert.equal(byCode(s, 'queue_wait')[0].status, 'open', JSON.stringify(queue));
     assert.equal(byCode(s, 'job_failed')[0].status, 'open', JSON.stringify(queue));
   }
-  const left = { ...ciHost(later), queue: { at: stamp(later), error: null, windowMs: 86400_000, jobs: [], ...whole }, recent: [] };
-  assert.equal(byCode(reconcile(initial, deriveCi(later, left), later), 'queue_wait')[0].resolutionEvidence.reason, 'left_queue');
+  // Two whole listings in a row without it: it left.
+  const absent = (ms) => deriveCi(ms, { ...ciHost(ms), queue: { at: stamp(ms), error: null, windowMs: 86400_000, jobs: [], ...whole }, recent: [] });
+  const once = reconcile(initial, absent(later), later);
+  assert.equal(byCode(once, 'queue_wait')[0].status, 'open');
+  assert.equal(byCode(reconcile(once, absent(later + 120_000), later + 120_000), 'queue_wait')[0].resolutionEvidence.reason, 'left_queue');
   const moved = { ...ci, queue: { ...ci.queue, at: stamp(now + 60_000), jobs: [{ ...ci.queue.jobs[0], status: 'in_progress' }] } };
   const recovered = reconcile(initial, deriveCi(now + 60_000, moved), now + 60_000);
   assert.equal(byCode(recovered, 'queue_wait')[0].status, 'resolved');

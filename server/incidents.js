@@ -175,14 +175,18 @@ const branchKey = (repo, workflow, name, headRef, ref) => (text(workflow) && (te
 function passedLater(passed, job) {
   const again = passed?.attempts?.get(attemptKey(job.repo, job.runId, job.jobName));
   if (again && height(job.attempt) && again.attempt > job.attempt && Date.parse(again.end) > Date.parse(job.end)) return { reason: 'later_attempt_passed', ...again };
-  const next = passed?.branches?.get(branchKey(job.repo, job.workflow, job.jobName, job.headRef, job.ref));
-  return next && height(job.runId) && next.runId > job.runId && Date.parse(next.end) > Date.parse(job.end) ? { reason: 'later_run_passed', ...next } : null;
+  // Run ids only grow, so a higher one is a later run. The earliest such pass is the one named.
+  const next = height(job.runId) ? (passed?.branches?.get(branchKey(job.repo, job.workflow, job.jobName, job.headRef, job.ref)) || [])
+    .filter((p) => p.runId > job.runId && Date.parse(p.end) > Date.parse(job.end)).sort((a, b) => a.runId - b.runId)[0] : null;
+  return next ? { reason: 'later_run_passed', ...next } : null;
 }
 
 export function deriveIssues({ settings, states, ci, aws, operations = [], maintenance = {}, activity = null, now = Date.now() }) {
   const issues = [], sources = {}, checks = {}, samples = {}, suppressions = {}, heldInstances = new Set();
   // Where a target that is absent can be told from a target that was not
-  // looked at: only a complete, current inventory says "it is not there".
+  // looked at: only a complete, current inventory says "it is not there". The
+  // value is when that inventory was taken, so that the same one read twice
+  // counts once; anything else means there is none.
   const inventories = {};
   const source = (key, at, complete, max) => {
     sources[key] = { observedAt: Number.isFinite(Date.parse(at)) ? at : null, fresh: fresh(at, now, max), complete: complete === true, maxAgeMs: max };
@@ -247,7 +251,7 @@ export function deriveIssues({ settings, states, ci, aws, operations = [], maint
     const dk = `${key}:discovery`;
     const discoveryOk = source(dk, n.source === 'report' ? s.generatedAt : s.discovery?.at,
       n.source === 'report' || (object(s.discovery) && !s.discovery.error), Math.max(900_000, settings.discoverySeconds * 3000));
-    inventories[key] = discoveryOk;
+    inventories[key] = discoveryOk && sources[key].observedAt;
     check('network', n.name, 'discovery', 'discovery_failed', dk, discoveryOk, identity, { suppressed });
     if (!discoveryOk) add('network', n.name, 'discovery', 'discovery_failed', 'warning', `${key}:monitor`,
       { error: String(s.discovery?.error || 'stale discovery').slice(0, 300) }, iso(now), identity);
@@ -311,10 +315,10 @@ export function deriveIssues({ settings, states, ci, aws, operations = [], maint
       && Date.parse(measuredAt) <= Date.parse(h.receivedAt) + 60_000, 180_000);
     for (const code of ['reporter_missing', 'reporter_stale']) check('ci', reg.id, reg.id, code, key, current);
     if (!h || !current) { add('ci', reg.id, reg.id, h ? 'reporter_stale' : 'reporter_missing', 'warning', `${key}:monitor`, { lastObservationAt: sources[key].observedAt }); continue; }
-    inventories[key] = true;
+    inventories[key] = measuredAt;
     // The reporter keeps a host's first six disks: beyond that a disk it does
     // not list may still be mounted.
-    inventories[`${key}:disks`] = h.disksCut !== true;
+    inventories[`${key}:disks`] = h.disksCut !== true && measuredAt;
     for (const d of list(h.disks)) {
       if (!text(d.path)) continue;
       const used = num(d.free) ? pct(d.total - d.free, d.total) : null;
@@ -363,8 +367,7 @@ export function deriveIssues({ settings, states, ci, aws, operations = [], maint
     const proof = { runId: j.runId, attempt: j.attempt, end: j.end };
     const ak = attemptKey(j.repo, j.runId, j.name), bk = branchKey(j.repo, j.workflow, j.name, j.headRef, j.ref);
     if (!(passed.attempts.get(ak)?.attempt >= j.attempt)) passed.attempts.set(ak, proof);
-    // The pass of the latest run: run ids only grow.
-    if (bk && !(passed.branches.get(bk)?.runId >= j.runId)) passed.branches.set(bk, proof);
+    if (bk) passed.branches.set(bk, [...(passed.branches.get(bk) || []), proof]);
   }
   // Failed jobs in the ledger that are not cases, by the id their case has or
   // would have: the ledger knows the workflow and branch of a job whose case was
@@ -397,7 +400,7 @@ export function deriveIssues({ settings, states, ci, aws, operations = [], maint
       const valid = source(pk, aws.at, Array.isArray(aws.errors) && Array.isArray(aws[field]) && !aws.errors.some((e) => e?.region === region && e?.scope === scope), 30 * 60_000);
       check('aws', region, scope, 'aws_collection_failed', pk, valid);
     }
-    inventories['aws:inventory'] = awsCurrent;
+    inventories['aws:inventory'] = awsCurrent && aws.at;
     if (awsCurrent) {
       for (const v of list(aws.volumes)) {
         check('aws', v.region, v.id, 'idle_volume', 'aws:inventory', v.state === 'in-use' && text(v.attachedTo));
@@ -416,7 +419,7 @@ export function deriveIssues({ settings, states, ci, aws, operations = [], maint
   check('aws', 'account', 'health', 'aws_health_missing', 'aws:health', healthySource);
   if (!healthySource) add('aws', 'account', 'health', 'aws_health_missing', 'warning', 'aws:monitor', { errors: list(health?.errors).slice(0, 20) });
   if (fresh(health?.at, now, 10 * 60_000)) {
-    inventories['aws:health'] = healthySource;
+    inventories['aws:health'] = healthySource && health.at;
     for (const i of list(health.instances)) {
       // An instance of a host or network under a recognised change is held with it.
       check('aws', i.region, i.id, 'aws_instance_impaired', 'aws:health', i.state === 'running' && i.instanceStatus === 'ok' && i.systemStatus === 'ok',
@@ -506,17 +509,22 @@ export function reconcile(previous, derived, now = Date.now()) {
   const settled = (quiet) => new Set(Object.entries(quiet).filter(([, v]) => v.n >= QUIET_SAMPLES).map(([f]) => f));
   // Why an open case is over although nothing recovered. Checked before holds
   // and exclusions: neither keeps alive a case whose subject no longer exists.
+  // (A network's own collector and discovery cases always have a check while
+  // their generation is current; one left over from before a reset has none.)
   const GONE = { host_health: (i) => `network:${i.scope}`, endpoint_failed: (i) => `network:${i.scope}`,
+    collector_stale: (i) => `network:${i.scope}`, discovery_failed: (i) => `network:${i.scope}`,
     disk_pressure: (i) => `ci:host:${i.scope}:disks`, runner_offline: (i) => `ci:host:${i.scope}`,
     idle_volume: () => 'aws:inventory', idle_address: () => 'aws:inventory', aws_instance_impaired: () => 'aws:health',
     aws_scheduled_event: () => 'aws:health', aws_alarm: () => 'aws:health', aws_scaling_control: () => 'aws:health' };
   const REPORTER = ['reporter_missing', 'reporter_stale', 'disk_pressure', 'memory_pressure', 'runner_offline'];
   const gone = (issue, check) => {
+    // Settings and the reporter register are read afresh each cycle: now is when they were seen.
     if (issue.domain === 'network' && Array.isArray(derived.networks)) {
-      if (!derived.networks.includes(issue.scope)) return { reason: 'network_removed', sure: true };
-    } else if (issue.domain === 'ci' && REPORTER.includes(issue.code) && Array.isArray(derived.reporters) && !derived.reporters.includes(issue.scope)) return { reason: 'target_removed', sure: true };
+      if (!derived.networks.includes(issue.scope)) return { reason: 'network_removed', at: iso(now) };
+    } else if (issue.domain === 'ci' && REPORTER.includes(issue.code) && Array.isArray(derived.reporters) && !derived.reporters.includes(issue.scope)) return { reason: 'target_removed', at: iso(now) };
     if (check || !Object.hasOwn(GONE, issue.code)) return null;
-    return { reason: 'target_removed', sure: derived.inventories?.[GONE[issue.code](issue)] === true };
+    const taken = derived.inventories?.[GONE[issue.code](issue)];
+    return { reason: 'target_removed', at: text(taken) && Number.isFinite(Date.parse(taken)) ? taken : null };
   };
   // The pass that ends a failed job's case: known for the job while the ledger
   // has it, otherwise matched from what the case recorded.
@@ -530,9 +538,11 @@ export function reconcile(previous, derived, now = Date.now()) {
     if (!missing) delete issue.missingSince;
     else {
       // The clock starts at the first complete inventory without the target and
-      // is kept through incomplete ones; only a complete one may end the case.
-      if (missing.sure) issue.missingSince ||= iso(now);
-      if (missing.sure && now - Date.parse(issue.missingSince) >= GONE_AFTER_MS) return { reason: missing.reason, missingSince: issue.missingSince };
+      // is kept through incomplete ones. It is read off the inventories' own
+      // times, so it takes a later inventory to end the case: one inventory
+      // read on eleven cycles is still one observation.
+      if (missing.at) issue.missingSince ||= missing.at;
+      if (missing.at && Date.parse(missing.at) - Date.parse(issue.missingSince) >= GONE_AFTER_MS) return { reason: missing.reason, missingSince: issue.missingSince };
     }
     const e = issue.evidence || {};
     if (issue.code === 'job_failed') {
@@ -550,7 +560,7 @@ export function reconcile(previous, derived, now = Date.now()) {
   const close = (issue, at, evidence) => {
     issue.status = 'resolved'; issue.resolvedAt = iso(now); if (at) issue.observedAt = at;
     if (evidence) issue.resolutionEvidence = evidence; else delete issue.resolutionEvidence;
-    issue.suppressed = false; delete issue.missingSince; delete issue.quiet;
+    issue.suppressed = false; delete issue.missingSince; delete issue.quiet; delete issue.absentAt;
     emit(issue, 'resolved');
   };
   const signature = (issue) => issue.code === 'host_health' ? JSON.stringify(knownFaults(issue))
@@ -571,7 +581,7 @@ export function reconcile(previous, derived, now = Date.now()) {
     const issue = { ...old, ...current, observedAt, status: 'open', firstSeen: old?.firstSeen || iso(now), lastSeen: iso(now), resolvedAt: null,
       lastFaultAt: observedAt, suppressed: maintenance || awaitingPostMaintenance };
     delete issue.resolutionEvidence; // a reopened fault cannot retain an earlier classification correction
-    delete issue.missingSince; delete issue.quiet;
+    delete issue.missingSince; delete issue.quiet; delete issue.absentAt;
     if (old?.status === 'open' && current.code === 'host_health') {
       const proofs = healthyRules(old, check), incoming = knownFaults(current), oldFaults = knownFaults(old);
       const quiet = quietFaults(old, check, incoming), dropped = settled(quiet);
@@ -595,7 +605,9 @@ export function reconcile(previous, derived, now = Date.now()) {
   }
   for (const issue of existing.values()) if (issue.status === 'open' && !active.has(issue.id)) {
     const check = derived.checks?.[issue.id];
-    const over = ended(issue, check);
+    // An excluded host's cases stay as they are: nothing about them is sent, so
+    // an ending could never be delivered either. Exclusion is not an ending.
+    const over = excluded(issue) ? null : ended(issue, check);
     if (over) { close(issue, null, over); continue; }
     issue.suppressed = suppressed(issue, check);
     if (issue.suppressed) { issue.suppressedUntil = iso(now); continue; }
@@ -623,8 +635,14 @@ export function reconcile(previous, derived, now = Date.now()) {
     if (!clear && issue.code === 'queue_wait') {
       const q = derived.queue, e = issue.evidence || {}, seen = Date.parse(q?.observedAt), runAt = Date.parse(e.runCreatedAt);
       if (q?.started?.has(e.jobId)) { clear = true; clearAt = q.current ? q.observedAt : null; evidence = { reason: 'left_queue', how: 'started on a runner' }; }
-      else if (q?.current && q.covered.includes(e.repo) && !q.queued.has(e.jobId) && Number.isFinite(runAt) && seen - runAt < q.windowMs - GONE_AFTER_MS
-        && seen > Date.parse(issue.lastFaultAt || issue.observedAt || issue.firstSeen)) { clear = true; clearAt = q.observedAt; evidence = { reason: 'left_queue', how: 'no longer queued' }; }
+      else if (q?.current && q.queued.has(e.jobId)) delete issue.absentAt; // queued, though not shown as ours
+      else if (q?.current && q.covered.includes(e.repo) && Number.isFinite(runAt) && seen - runAt < q.windowMs - GONE_AFTER_MS
+        && seen > Date.parse(issue.lastFaultAt || issue.observedAt || issue.firstSeen)) {
+        // One listing can miss a run that changes status between its two
+        // requests. Absent from a second, later listing as well: it has left.
+        if (seen > Date.parse(issue.absentAt)) { clear = true; clearAt = q.observedAt; evidence = { reason: 'left_queue', how: 'no longer queued', listings: [issue.absentAt, q.observedAt] }; }
+        else issue.absentAt ||= q.observedAt;
+      }
     }
     if (clear) close(issue, clearAt, evidence);
   }
