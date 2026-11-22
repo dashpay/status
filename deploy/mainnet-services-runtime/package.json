@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@dashevo/dapi-client": "^5.0.1"
+  }
+}
