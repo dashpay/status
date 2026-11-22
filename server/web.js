@@ -12,7 +12,7 @@ import { createAuth } from './auth.js';
 import { createCi } from './ci.js';
 import { createOrgQueue } from './ci-queue.js';
 import { operationMaintenance } from './operation-maintenance.js';
-import { loadIncidentState, publicIssues, apiAuthorized, readSecret } from './incidents.js';
+import { loadIncidentState, publicIssues, apiAuthorized, readSecret, validIgnoredCiJobs } from './incidents.js';
 import { remediationView } from './remediation.js';
 import { receiveRelease } from './release-webhook.js';
 import { againstReceiver, loadControl, requestClear, setDispatch } from './remediation-control.js';
@@ -441,6 +441,9 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
       // Access has its own endpoints; a page-wide save never carries a stale
       // operator list over them.
       const next = validateSettings({ ...req.body?.settings, operators: reloadSettings().operators });
+      // Checked on save only: a list damaged on disk ignores nothing, it does
+      // not take the rest of the settings down with it.
+      validIgnoredCiJobs(next.remediation?.ignoredCiJobs);
       settings = saveSettings(settingsPath, next);
       push('settings', { at: new Date(clock()).toISOString() });
       res.json({ settings });

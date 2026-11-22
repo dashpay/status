@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createAwsHealth } from './aws-health.js';
 import { writeAtomic, readJSON } from '../shared/settings.js';
 import { DEFAULT_SETTINGS } from '../shared/settings.js';
-import { deriveIssues, reconcile } from '../server/incidents.js';
+import { deriveIssues, issueId, reconcile } from '../server/incidents.js';
 
 const fixture = JSON.parse(readFileSync(new URL('../shared/fixtures/dynamodb-scale-in.json', import.meta.url)));
 const now = Date.parse('2026-10-02T18:00:00Z');
@@ -60,7 +60,17 @@ test('exact read/write alarms replay as verified informational controls and posi
   assert.equal(prior.issues.filter((i) => i.code === 'aws_alarm').length, 2);
   const current = derive(health);
   assert.equal(current.issues.filter((i) => i.code === 'aws_alarm').length, 0);
-  assert.equal(current.issues.filter((i) => i.code === 'aws_scaling_control' && i.severity === 'info').length, 2);
+  assert.equal(current.issues.filter((i) => i.code === 'aws_scaling_control').length, 0, 'a verified control alarms by design: it is not a case');
+  // Cases an earlier release filed for these controls end; none is filed again.
+  const legacy = health.alarms.map((a) => ({ id: issueId('aws', a.region, a.name, 'aws_scaling_control'), domain: 'aws', scope: a.region, target: a.name,
+    code: 'aws_scaling_control', severity: 'info', status: 'open', sourceKey: 'aws:health', revision: 203,
+    observedAt: oldHealth.at, firstSeen: oldHealth.at, lastSeen: oldHealth.at, lastFaultAt: oldHealth.at, lastEventAt: oldHealth.at }));
+  const controls = (state) => state.issues.filter((i) => i.code === 'aws_scaling_control');
+  const ended = reconcile({ schemaVersion: 1, issues: legacy, outbox: [] }, current, now);
+  assert.equal(controls(ended).length, 2);
+  for (const issue of controls(ended)) assert.deepEqual([issue.status, issue.resolutionEvidence.reason, issue.revision], ['resolved', 'verified_control_signal', 204]);
+  const later = { ...health, at: new Date(now + 60_000).toISOString(), alarms: health.alarms.map((a) => ({ ...a, scalingControl: { ...a.scalingControl, verifiedAt: new Date(now + 60_000).toISOString() } })) };
+  assert.deepEqual(controls(reconcile(ended, derive(later, now + 60_000), now + 60_000)).map((i) => i.status), ['resolved', 'resolved'], 'still in ALARM, and not filed again');
   const next = reconcile(prior, current, now);
   for (const issue of next.issues.filter((i) => i.code === 'aws_alarm')) {
     assert.equal(issue.status, 'resolved');
