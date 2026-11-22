@@ -66,6 +66,21 @@ class Tests(unittest.TestCase):
   for result in [{'ok':False,'count':0},{'ok':True,'count':0}]:
    with patch.object(s,'command',return_value=json.dumps(result)):
     with self.assertRaises(ValueError):s.bootstrap()
+ def test_failed_quorum_list_keeps_the_chain_reference(self):
+  chain={'chain':'main','initialblockdownload':False,'blocks':10}
+  def no_quorums(*args):
+   if args[0]=='quorum':raise TimeoutError()
+   return dict(chain)
+  with patch.object(s,'cli',no_quorums):
+   reference=s.core_reference()
+  self.assertEqual(reference,chain)
+  with patch.object(s,'get',side_effect=[{'success':True,'data':[{'quorum_hash':'a','height':10}]},{'success':True,'data':[{}]}]):
+   self.assertEqual(s.quorum(reference),{'ok':None,'reason':'reference-unavailable'})
+  with patch.object(s,'cli',side_effect=[dict(chain),{'llmq_100_67':['a']}]):
+   self.assertEqual(s.core_reference()['quorums'],['a'])
+  for bad in [dict(chain,chain='test'),dict(chain,initialblockdownload=True)]:
+   with patch.object(s,'cli',return_value=bad):self.assertIsNone(s.core_reference())
+  with patch.object(s,'cli',side_effect=TimeoutError()):self.assertIsNone(s.core_reference())
  def test_quorum_valid_but_stale_and_reference_missing(self):
   with patch.object(s,'get',side_effect=[{'success':True,'data':[{'quorum_hash':'old','height':10}]},{'success':True,'data':[{}]}]):
    self.assertEqual(s.quorum({'quorums':['new']})['reason'],'stale-data')

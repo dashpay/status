@@ -109,16 +109,19 @@ def sampled(label, fn):
     except Exception as e: result = {'ok': False, 'reason': 'probe-failed', 'errorClass': type(e).__name__}
     return dict(result, id=label, ms=round((time.monotonic()-started)*1000))
 
-def collect():
-    reference = None
+def core_reference():
     try:
         reference = cli('getblockchaininfo')
-        if reference['chain'] != 'main' or reference['initialblockdownload']: reference = None
-        else:
-            q = cli('quorum', 'list')
-            reference['quorums'] = q.get('llmq_100_67')
-    except Exception: reference = None
-    jobs = {'quorums': lambda: quorum(reference), 'insight': lambda: insight(reference),
+        if reference['chain'] != 'main' or reference['initialblockdownload']: return None
+    except Exception: return None
+    # A failed quorum list leaves only the quorum check without a reference.
+    try: reference['quorums'] = cli('quorum', 'list').get('llmq_100_67')
+    except Exception: pass
+    return reference
+
+def collect():
+    reference = core_reference()
+    jobs ={'quorums': lambda: quorum(reference), 'insight': lambda: insight(reference),
             'bootstrap': lambda: {'ok': True, 'reason': 'healthy', 'count': bootstrap()}}
     for n, host in enumerate(SEEDS,1): jobs[f'seed-{n}'] = lambda host=host: seed(host)
     for name, host in [('quorums-tls','quorums.mainnet.networks.dash.org'),('insight-tls','insight.dash.org')]:

@@ -48,8 +48,11 @@ install -m 0644 deploy/mainnet-services-runtime/package.json \
 docker run --rm -v /opt/dash-mainnet-services/runtime:/work -w /work \
   "$(sed -n "s/^NODE_IMAGE = '\(.*\)'$/\1/p" deploy/mainnet-services.py)" \
   npm ci --omit=dev --ignore-scripts
+install -m 0644 deploy/mainnet-services.py deploy/test_mainnet_services.py /opt/dash-mainnet-services/
+(cd /opt/dash-mainnet-services && python3 -m unittest test_mainnet_services.py)
 install -m 0644 deploy/dash-mainnet-services.service deploy/dash-mainnet-services.timer /etc/systemd/system/
 systemctl daemon-reload
+systemctl enable --now dash-mainnet-services.timer
 ```
 
 To replace the script: stop `dash-mainnet-services.timer`, wait until
