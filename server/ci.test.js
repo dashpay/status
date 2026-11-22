@@ -102,8 +102,17 @@ test('a queue listing that was cut short or failed does not claim to cover its r
   let mode = 'whole';
   const fetcher = async (url) => {
     if (url.includes('/attempts/')) return new Response('{}', { status: 404, headers });
-    const runs = mode === 'many-runs' ? 30 : 1;
-    if (url.includes('status=queued')) return Response.json({ workflow_runs: Array.from({ length: runs }, (_, n) => ({ id: 500 + n, name: 'Tests', created_at: iso(T0 - 30 * 60_000), head_branch: 'x' })) }, { headers });
+    if (url.includes('status=queued')) {
+      assert.match(url, /per_page=100/);
+      const run = (n, ageMs) => ({ id: 500 + n, name: 'Tests', created_at: iso(T0 - ageMs), head_branch: 'x' });
+      const fresh = Array.from({ length: mode === 'many-runs' ? 30 : mode === 'leftovers' ? 2 : 1 }, (_, n) => run(n, 30 * 60_000));
+      // Runs that have sat "queued" for two months: listed, but too old to be followed.
+      const old = Array.from({ length: mode === 'leftovers' ? 40 : mode === 'full-page' ? 99 : 0 }, (_, n) => run(100 + n, 60 * 86_400_000));
+      const body = { workflow_runs: [...fresh, ...old] };
+      if (mode === 'leftovers') body.total_count = 42;
+      if (mode === 'more-than-listed') body.total_count = 101;
+      return Response.json(body, { headers });
+    }
     if (url.includes('status=in_progress')) return mode === 'not-found' ? new Response('{}', { status: 404, headers }) : Response.json({ workflow_runs: [] }, { headers });
     if (url.includes('/jobs')) {
       if (mode === 'error') return new Response('{}', { status: 502, headers });
@@ -123,8 +132,14 @@ test('a queue listing that was cut short or failed does not claim to cover its r
   assert.deepEqual([whole.queue.jobs.length, whole.queue.total, whole.queue.covered, whole.recent.length], [60, 60, ['dashpay/platform'], 70]);
   assert.equal(ci.publicSummary().queue.covered, undefined);
   assert.equal(whole.queue.queued.length, 60);
-  // A listing that was cut short, failed or answered "not found" covers nothing.
-  for (const cut of ['many-runs', 'many-jobs', 'not-found', 'jobs-not-found', 'error']) {
+  // Forty runs left "queued" for months do not hide a listing that has all 42:
+  // the repository is covered, and only its two recent runs are looked into.
+  mode = 'leftovers'; now += 3 * 60_000; ci.ingest(id, report());
+  await ci.tick();
+  assert.deepEqual([ci.summary({ whole: true }).queue.covered, ci.summary({ whole: true }).queue.queued.length], [['dashpay/platform'], 120]);
+  // A listing that was cut short (by GitHub's count, or a full page without one),
+  // failed or answered "not found" covers nothing.
+  for (const cut of ['many-runs', 'more-than-listed', 'full-page', 'many-jobs', 'not-found', 'jobs-not-found', 'error']) {
     mode = cut; now += 3 * 60_000; ci.ingest(id, report());
     await ci.tick();
     assert.deepEqual(ci.summary({ whole: true }).queue.covered, [], cut);
