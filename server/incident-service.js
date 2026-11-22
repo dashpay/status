@@ -67,12 +67,6 @@ export async function cycle({ dataDir, ci, destination, secret, alertUrl = null,
       if (!Array.isArray(ack.accepted) || events.some((e) => !ack.accepted.includes(e.eventId))) throw new Error('receiver acknowledgement incomplete');
       const sent = new Set(events.map((e) => e.eventId));
       state.outbox = state.outbox.filter((e) => !sent.has(e.eventId));
-      // What the receiver now knows of each issue (see compactBacklog).
-      const known = new Map(state.issues.map((i) => [i.id, i]));
-      for (const e of events) {
-        const issue = known.get(e.issue?.id);
-        if (issue && Number.isSafeInteger(e.issue.revision)) issue.delivered = Math.max(issue.delivered || 0, e.issue.revision);
-      }
       state.delivery = { configured: true, lastAckAt: new Date(now).toISOString(), error: null, receiver: ack.health || null };
     } catch (e) {
       const attempts = (state.delivery?.attempts || 0) + 1;

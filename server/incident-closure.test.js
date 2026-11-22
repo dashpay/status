@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BACKLOG_EVENTS, GONE_AFTER_MS, JOB_FAILED_MAX_AGE_MS, QUEUE_WAIT_UNSEEN_MS, QUIET_SAMPLES,
-  ciJobIgnored, compactBacklog, deriveIssues, loadIncidentState, reconcile, saveIncidentState, validIgnoredCiJobs } from './incidents.js';
+  ciJobIgnored, compactBacklog, deriveIssues, loadIncidentState, reconcile, saveIncidentState, validIgnoredCiJobs, wildcard } from './incidents.js';
 import { cycle } from './incident-service.js';
 import { reconcileReleaseTasks, supersededBy } from './release-webhook.js';
 import { remediationView, HISTORY_MAX, HISTORY_MS } from './remediation.js';
@@ -26,7 +26,7 @@ const ciHost = (ms, overrides = {}) => ({ reporters: [{ id: 'shared' }], hosts: 
 const deriveCi = (ms, ci, remediation) => deriveIssues({ settings: { ...DEFAULT_SETTINGS, networks: [], ...(remediation ? { remediation } : {}) }, states: {}, ci, now: ms });
 const waiting = (ms, overrides = {}) => ({ repo: 'dashpay/platform', id: 7, name: 'Swift SDK build', workflow: 'Tests', branch: 'feat/x',
   url: 'https://github.com/dashpay/platform/actions/runs/5/job/7', createdAt: stamp(ms - 20 * MIN), runCreatedAt: stamp(ms - 30 * MIN), ...overrides });
-const queueOf = (ms, jobs, overrides = {}) => ({ at: stamp(ms), error: null, repos: ['dashpay/platform'], covered: ['dashpay/platform'], windowMs: 24 * HOUR, total: jobs.length, jobs, ...overrides });
+const queueOf = (ms, jobs, overrides = {}) => ({ at: stamp(ms), error: null, repos: ['dashpay/platform'], covered: ['dashpay/platform'], queued: jobs.map((j) => j.id), windowMs: 24 * HOUR, total: jobs.length, jobs, ...overrides });
 
 test('a waiting job that leaves a whole listing of its repository is recovered, and says how', () => {
   let s = reconcile(null, deriveCi(now, { ...ciHost(now), queue: queueOf(now, [waiting(now)]) }), now);
@@ -35,9 +35,13 @@ test('a waiting job that leaves a whole listing of its repository is recovered, 
   // Still listed: still open, however often it is seen.
   s = reconcile(s, deriveCi(now + 2 * MIN, { ...ciHost(now + 2 * MIN), queue: queueOf(now + 2 * MIN, [waiting(now)]) }), now + 2 * MIN);
   assert.equal(only(s, 'queue_wait').status, 'open');
+  // Still queued, but no longer shown as ours (the runner that served its labels
+  // stopped reporting): GitHub lists it as queued, so it has not left.
+  const hidden = reconcile(s, deriveCi(now + 4 * MIN, { ...ciHost(now + 4 * MIN), queue: queueOf(now + 4 * MIN, [], { queued: [7] }) }), now + 4 * MIN);
+  assert.equal(only(hidden, 'queue_wait').status, 'open');
   s = reconcile(s, deriveCi(now + 4 * MIN, { ...ciHost(now + 4 * MIN), queue: queueOf(now + 4 * MIN, []) }), now + 4 * MIN);
   const left = only(s, 'queue_wait');
-  assert.deepEqual([left.status, reason(left), left.observedAt], ['resolved', 'left_queue', stamp(now + 4 * MIN)]);
+  assert.deepEqual([left.status, reason(left), left.resolutionEvidence.how, left.observedAt], ['resolved', 'left_queue', 'no longer queued', stamp(now + 4 * MIN)]);
   assert.equal(s.outbox.at(-1).transition, 'resolved');
 });
 
@@ -47,15 +51,20 @@ test('a run the poller no longer follows cannot prove its job left; the case end
   const initial = reconcile(null, deriveCi(now, { ...ciHost(now), queue: queueOf(now, [old]) }), now);
   const gone = (ms, overrides) => reconcile(initial, deriveCi(ms, { ...ciHost(ms), queue: queueOf(ms, [], overrides) }), ms);
   assert.equal(only(gone(now + 10 * MIN), 'queue_wait').status, 'open', 'the run has left the window the poller lists');
-  // A case filed before the run's start was recorded: the job's own creation
-  // time stands in for it, with half the window as allowance.
-  const legacy = (createdAt) => {
+  // A case filed before the run's start was recorded cannot use the listing at
+  // all, however recently its job was created: a job is younger than its run.
+  const legacy = (ci) => {
     const state = structuredClone(initial), evidence = state.issues.find((i) => i.code === 'queue_wait').evidence;
-    delete evidence.runCreatedAt; evidence.createdAt = createdAt;
-    return only(reconcile(state, deriveCi(now + 10 * MIN, { ...ciHost(now + 10 * MIN), queue: queueOf(now + 10 * MIN, []) }), now + 10 * MIN), 'queue_wait');
+    delete evidence.runCreatedAt; evidence.createdAt = stamp(now - 20 * MIN);
+    return only(reconcile(state, deriveCi(now + 10 * MIN, { ...ciHost(now + 10 * MIN), queue: queueOf(now + 10 * MIN, []), ...ci }), now + 10 * MIN), 'queue_wait');
   };
-  assert.equal(reason(legacy(stamp(now - 20 * MIN))), 'left_queue');
-  assert.equal(legacy(stamp(now - 13 * HOUR)).status, 'open');
+  assert.equal(legacy({}).status, 'open');
+  // What does end it: GitHub recorded the job starting on one of our runners.
+  // That is a fact about the job, and needs neither window nor a current listing.
+  assert.equal(legacy({ startedJobs: [8, 9] }).status, 'open');
+  const started = legacy({ startedJobs: [7] });
+  assert.deepEqual([started.status, reason(started), started.resolutionEvidence.how], ['resolved', 'left_queue', 'started on a runner']);
+  assert.equal(reason(legacy({ startedJobs: [7], queue: queueOf(now + 10 * MIN, [], { error: 'GitHub 502' }) })), 'left_queue');
   assert.equal(only(gone(now + QUEUE_WAIT_UNSEEN_MS - MIN), 'queue_wait').status, 'open');
   const expired = only(gone(now + QUEUE_WAIT_UNSEEN_MS), 'queue_wait');
   assert.deepEqual([expired.status, reason(expired)], ['resolved', 'expired']);
@@ -63,7 +72,7 @@ test('a run the poller no longer follows cannot prove its job left; the case end
   assert.equal(only(gone(now + 3 * QUEUE_WAIT_UNSEEN_MS, { error: 'GitHub 502' }), 'queue_wait').status, 'open');
 });
 
-const failed = (ms, overrides = {}) => ({ host: 'shared', repo: 'dashpay/platform', runId: 9, attempt: 1, name: 'Tests', workflow: 'CI', event: 'pull_request', headRef: 'feat/x',
+const failed = (ms, overrides = {}) => ({ host: 'shared', repo: 'dashpay/platform', runId: 9, attempt: 1, name: 'Tests', workflow: 'CI', event: 'pull_request', headRef: 'feat/x', ref: 'refs/pull/77/merge',
   runnerName: 'runner', start: stamp(ms - 10 * MIN), end: stamp(ms), result: 'Failed', ...overrides });
 
 test('a failed job is recovered by a later attempt or a later run on its branch, never by an earlier, other or failed one', () => {
@@ -73,7 +82,11 @@ test('a failed job is recovered by a later attempt or a later run on its branch,
   const after = (others) => byCode(reconcile(initial, deriveCi(now + 30 * MIN, { ...ciHost(now + 30 * MIN), recent: [failure, ...others] }), now + 30 * MIN), 'job_failed').find((i) => i.evidence.runId === 9 && i.evidence.attempt === 1);
   const pass = (overrides) => failed(now + 20 * MIN, { result: 'Succeeded', runId: 10, ...overrides });
   for (const other of [pass({ headRef: 'feat/y' }), pass({ workflow: 'Nightly' }), pass({ name: 'Lint' }), pass({ repo: 'dashpay/grovedb' }),
-    pass({ result: 'Failed' }), pass({ result: 'Canceled' }), pass({ end: stamp(now - MIN), start: stamp(now - 5 * MIN) }), pass({ headRef: undefined, ref: undefined })])
+    pass({ result: 'Failed' }), pass({ result: 'Canceled' }), pass({ end: stamp(now - MIN), start: stamp(now - 5 * MIN) }), pass({ headRef: undefined, ref: undefined }),
+    // An older run that was slow to pass says nothing about the newer run that failed.
+    pass({ runId: 8 }),
+    // Another fork's pull request with a branch of the same name: its own refs/pull/<n>/merge keeps it apart.
+    pass({ ref: 'refs/pull/78/merge' })])
     assert.equal(after([other]).status, 'open', JSON.stringify(other));
   const rerun = after([pass({ runId: 9, attempt: 2 })]);
   assert.deepEqual([rerun.status, reason(rerun), rerun.observedAt], ['resolved', 'later_attempt_passed', stamp(now + 20 * MIN)]);
@@ -81,7 +94,7 @@ test('a failed job is recovered by a later attempt or a later run on its branch,
   assert.deepEqual([next.status, reason(next), next.resolutionEvidence.runId, next.observedAt], ['resolved', 'later_run_passed', 10, stamp(now + 20 * MIN)]);
   // A case filed before workflow and branch were kept in its evidence: the ledger still knows them.
   const stripped = structuredClone(initial);
-  for (const key of ['workflow', 'branch', 'event']) delete only(stripped, 'job_failed').evidence[key];
+  for (const key of ['workflow', 'branch', 'event', 'headRef', 'ref']) delete only(stripped, 'job_failed').evidence[key];
   assert.equal(reason(only(reconcile(stripped, deriveCi(now + 30 * MIN, { ...ciHost(now + 30 * MIN), recent: [failure, pass()] }), now + 30 * MIN), 'job_failed')), 'later_run_passed');
   assert.equal(only(reconcile(stripped, deriveCi(now + 30 * MIN, { ...ciHost(now + 30 * MIN), recent: [pass()] }), now + 30 * MIN), 'job_failed').status, 'open', 'without the ledger entry or the evidence, nothing ties the pass to it');
   // A pass already on record when the failure is first seen: no case at all.
@@ -107,6 +120,12 @@ test('a failed job with no later pass is closed after a day, as expired and not 
   // The same failure reported again later does not come back.
   const again = reconcile(s, deriveCi(end + MIN, { ...ciHost(end + MIN), recent: [failure] }), end + MIN);
   assert.equal(only(again, 'job_failed').status, 'resolved');
+  // The failure has aged out of the ledger but a later pass is still in it:
+  // that is a recovery, whichever is noticed first.
+  const open = reconcile(null, deriveCi(now, { ...ciHost(now), recent: [failure] }), now);
+  const pass = failed(now + 23 * HOUR, { result: 'Succeeded', runId: 10 });
+  const noticed = reconcile(open, deriveCi(end, { ...ciHost(end), recent: [pass] }), end);
+  assert.deepEqual([only(noticed, 'job_failed').status, reason(only(noticed, 'job_failed')), only(noticed, 'job_failed').resolutionEvidence.runId], ['resolved', 'later_run_passed', 10]);
 });
 
 test('policy checks listed in settings are never filed; cases already filed for them end; nothing else is hidden', () => {
@@ -133,6 +152,14 @@ test('policy checks listed in settings are never filed; cases already filed for 
   assert.equal(ignored({ repo: 'dashpay/platform', job: 'POLICY / reconcile' }), true, 'case is ignored, * is a wildcard');
   assert.equal(ignored({ repo: 'dashpay/platform', job: 'xpolicy / reconcile' }), false, 'a pattern is anchored at both ends');
   assert.equal(ciJobIgnored({ remediation: { ignoredCiJobs: [{ job: 'a.b' }] } })({ job: 'aXb' }), false, 'only * is special');
+  for (const [pattern, value, expected] of [['', '', true], ['*', '', true], ['*', 'anything', true], ['a*', 'a', true], ['*a', 'ba', true], ['a*c', 'abc', true], ['a*c', 'ac', true],
+    ['a*c', 'abd', false], ['a**c', 'abbc', true], ['*a*b*', 'xaxbx', true], ['*a*b*', 'xbxax', false], ['abc', 'ABC', true], ['abc', 'abcd', false], [' abc ', 'abc', true],
+    ['a(b)[c]+?', 'a(b)[c]+?', true], ['a(b)[c]+?', 'abc', false], ['Check PR title*', 'Check PR title and description', true]])
+    assert.equal(wildcard(pattern, value), expected, JSON.stringify([pattern, value]));
+  // A rule cannot make a cycle slow, whatever it looks like.
+  const began = Date.now();
+  assert.equal(wildcard('*a*a*a*a*a*a*a*a*a*a*z', 'a'.repeat(20_000)), false);
+  assert.ok(Date.now() - began < 1000, 'matching is bounded by pattern times text');
   for (const bad of [{}, { repo: 'dashpay/dash' }, { job: '' }, { job: 5 }, { job: 'x', commands: 'y' }, 'Require a milestone'])
     assert.throws(() => validIgnoredCiJobs([bad]), /ignoredCiJobs/, JSON.stringify(bad));
   assert.throws(() => validIgnoredCiJobs('all'), /ignoredCiJobs/);
@@ -158,6 +185,9 @@ test('a disk or runner missing from a current report for ten minutes is gone; a 
   const disks = Object.fromEntries(byCode(ended, 'disk_pressure').map((i) => [i.target, [i.status, reason(i) || null]]));
   assert.deepEqual(disks, { '/': ['open', null], '/data': ['resolved', 'target_removed'] });
   assert.deepEqual([only(ended, 'runner_offline').status, reason(only(ended, 'runner_offline'))], ['resolved', 'target_removed']);
+  // The reporter keeps six disks of a host that has more: one it does not list may still be mounted.
+  const cut = reconcile(s, deriveCi(now + MIN + GONE_AFTER_MS, without(now + MIN + GONE_AFTER_MS, { disksCut: true })), now + MIN + GONE_AFTER_MS);
+  assert.deepEqual([byCode(cut, 'disk_pressure').filter((i) => i.status === 'open').length, only(cut, 'runner_offline').status], [2, 'resolved']);
   // Seen again before the ten minutes are up: the clock starts over.
   let back = reconcile(s, deriveCi(now + 8 * MIN, bad.hosts[0] && { ...ciHost(now + 8 * MIN, { disks: bad.hosts[0].disks }), runners: [{ ...bad.runners[0], receivedAt: stamp(now + 8 * MIN) }] }), now + 8 * MIN);
   back = reconcile(back, deriveCi(now + 12 * MIN, without(now + 12 * MIN)), now + 12 * MIN);
@@ -310,26 +340,25 @@ const event = (id, revision, status = 'open', transition = status === 'resolved'
   ({ schemaVersion: 1, eventId: `${id}:${revision}`, occurredAt: stamp(now), transition, issue: { id, revision, domain: 'ci', scope: 'github', target: id, code: 'queue_wait', severity: 'warning', status, sourceKey: 'ci:queue' } });
 const issueOf = (id, revision, status = 'open', extra = {}) => ({ id, revision, domain: 'ci', scope: 'github', target: id, code: 'queue_wait', severity: 'warning', status, ...extra });
 
-test('a backlog keeps the newest undelivered event of each issue and forgets issues that came and went unseen', () => {
+test('a backlog keeps only the newest waiting event of each issue, an ending included', () => {
   const filler = Array.from({ length: BACKLOG_EVENTS }, (_, n) => `f${n}`);
-  const state = { issues: [issueOf('seen', 9, 'resolved'), issueOf('unseen', 2, 'resolved'), issueOf('still', 3), issueOf('known', 7, 'resolved', { delivered: 4 }),
-    issueOf('never', 3, 'resolved', { delivered: 0 }), ...filler.map((id) => issueOf(id, 1))],
-  outbox: [event('seen', 7), event('unseen', 1), event('still', 1), event('seen', 8), event('known', 5), event('gone', 4), event('never', 2),
-    ...filler.map((id) => event(id, 1)), event('still', 2), event('unseen', 2, 'resolved'), event('seen', 9, 'resolved'), event('still', 3), event('known', 7, 'resolved'), event('gone', 5, 'resolved'), event('never', 3, 'resolved')] };
+  const issues = [issueOf('seen', 9, 'resolved'), issueOf('unseen', 2, 'resolved'), issueOf('still', 3), ...filler.map((id) => issueOf(id, 1))];
+  const state = { issues: structuredClone(issues), outbox: [event('seen', 7), event('unseen', 1), event('still', 1), event('seen', 8), event('gone', 4),
+    ...filler.map((id) => event(id, 1)), event('still', 2), event('unseen', 2, 'resolved'), event('seen', 9, 'resolved'), event('still', 3), event('gone', 5, 'resolved')] };
   const small = { issues: state.issues, outbox: state.outbox.slice(0, BACKLOG_EVENTS) };
   assert.equal(compactBacklog(structuredClone(small)).outbox.length, BACKLOG_EVENTS, 'one batch is not a backlog: every event is delivered as it is');
   compactBacklog(state);
-  const kept = state.outbox.filter((e) => !e.issue.id.startsWith('f')).map((e) => e.eventId);
-  // seen: revisions below 7 were delivered, so its ending is. unseen: opened and ended without the receiver hearing of it.
-  // gone: no longer in the issue list, so nothing says it was never delivered. never: recorded as never delivered.
-  assert.deepEqual(kept, ['seen:9', 'still:3', 'known:7', 'gone:5']);
+  // unseen opened and ended with nothing acknowledged, and its ending is kept all the
+  // same: its opening may have been accepted by a receiver whose answer was lost.
+  assert.deepEqual(state.outbox.filter((e) => !e.issue.id.startsWith('f')).map((e) => e.eventId), ['unseen:2', 'seen:9', 'still:3', 'gone:5']);
   assert.equal(state.outbox.length, BACKLOG_EVENTS + 4);
-  assert.deepEqual(['seen', 'unseen', 'still', 'known'].map((id) => state.issues.find((i) => i.id === id).delivered), [6, 0, 0, 4]);
-  // Stable: a second pass changes nothing, and what is left is still one event per issue.
+  assert.deepEqual(state.issues, issues, 'issues are not touched');
+  // Stable: a second pass changes nothing, and no event was rewritten.
   const once = structuredClone(state); compactBacklog(state); assert.deepEqual(state, once);
+  assert.deepEqual(state.outbox.at(-1), event('gone', 5, 'resolved'));
 });
 
-test('the producer records what the receiver acknowledged, so a later ending is told only to a receiver that knows the issue', async () => {
+test('a receiver that accepted an opening and lost its answer is still told the ending, once it returns', async () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'incidents-backlog-'));
   mkdirSync(join(dataDir, 'incidents'));
   writeFileSync(join(dataDir, 'settings.json'), JSON.stringify(DEFAULT_SETTINGS));
@@ -339,21 +368,24 @@ test('the producer records what the receiver acknowledged, so a later ending is 
   const destination = 'https://receiver.example-tailnet.ts.net:8444/v1/events';
   const sent = [];
   const accept = async (_, opts) => { const batch = JSON.parse(opts.body).events; sent.push(...batch); return Response.json({ accepted: batch.map((e) => e.eventId), health: { status: 'ok' } }); };
-  await cycle({ dataDir, ci, destination, secret: 'test-secret', now: clock, fetcher: accept });
-  let state = loadIncidentState(dataDir);
-  const waits = sent.filter((e) => e.issue.code === 'queue_wait');
-  assert.ok(waits.length > 0 && waits.length < 60, 'one batch of the sixty reached the receiver');
-  const told = new Set(waits.map((e) => e.issue.id));
-  assert.ok(byCode(state, 'queue_wait').every((i) => i.delivered === (told.has(i.id) ? 1 : 0)));
+  // The receiver stores the first batch; the connection drops before it answers.
+  const stored = [];
+  await cycle({ dataDir, ci, destination, secret: 'test-secret', now: clock, fetcher: async (_, opts) => { stored.push(...JSON.parse(opts.body).events); throw new Error('connection lost after acceptance'); } });
+  const openThere = new Set(stored.filter((e) => e.issue.code === 'queue_wait').map((e) => e.issue.id));
+  assert.ok(openThere.size > 0 && openThere.size < 60, 'one batch of the sixty openings is with the receiver, unacknowledged');
   // The receiver goes away; every job then leaves the queue.
   clock += 5 * MIN; queue = queueOf(clock, []);
-  sent.length = 0;
   await cycle({ dataDir, ci, destination, secret: 'test-secret', now: clock, fetcher: async () => { throw new Error('connection refused'); } });
-  state = loadIncidentState(dataDir);
+  const state = loadIncidentState(dataDir);
   assert.ok(byCode(state, 'queue_wait').every((i) => i.status === 'resolved'));
   const pending = state.outbox.filter((e) => e.issue.code === 'queue_wait');
-  assert.deepEqual(pending.map((e) => e.issue.id).sort(), [...told].sort(), 'only the endings of the jobs the receiver was told about are kept');
-  assert.ok(pending.every((e) => e.transition === 'resolved'));
+  assert.deepEqual([pending.length, pending.every((e) => e.transition === 'resolved')], [60, true], 'one waiting event per job: its ending');
+  // It returns: every ending arrives, each once, the ones it holds open among them.
+  for (let n = 0; n < 6 && loadIncidentState(dataDir).outbox.length; n++) { clock += 20 * MIN; queue = queueOf(clock, []); await cycle({ dataDir, ci, destination, secret: 'test-secret', now: clock, fetcher: accept }); }
+  const endings = sent.filter((e) => e.issue.code === 'queue_wait');
+  assert.deepEqual([endings.length, new Set(endings.map((e) => e.eventId)).size, endings.every((e) => e.transition === 'resolved')], [60, 60, true]);
+  assert.ok([...openThere].every((id) => endings.some((e) => e.issue.id === id)));
+  assert.equal(loadIncidentState(dataDir).outbox.filter((e) => e.issue.code === 'queue_wait').length, 0);
 });
 
 // ---- the page ------------------------------------------------------------
@@ -375,7 +407,7 @@ test('with repair switched off and no worker, the page lists open faults with wh
     closed('plain', undefined, { resolutionEvidence: undefined }),
   ];
   // The worker last reported four days ago, with dispatch on, and one repair "active".
-  const state = { generatedAt: at, issues, outbox: [{ eventId: 'job1:1', issue: { id: 'job1' } }], control: { seq: 6, dispatch: 'off', clearSeq: 4, updatedBy: 'admin' },
+  const state = { generatedAt: at, issues, outbox: [{ eventId: 'job1:1', issue: { id: 'job1' } }, { eventId: 'aged:2', issue: { id: 'aged' } }], control: { seq: 6, dispatch: 'off', clearSeq: 4, updatedBy: 'admin' },
     delivery: { configured: true, error: 'receiver HTTP 502', lastAckAt: stamp(now - 96 * HOUR), receiver: { workerAt: (now - 96 * HOUR) / 1000, control: { seq: 5, dispatch: 'on', clearSeq: 4 },
       remediation: { schemaVersion: 1, generatedAt: stamp(now - 96 * HOUR), enabled: true, truncated: true, cases: [{ issueId: 'host', active: true, workerState: 'running' }, { issueId: 'disk', workerState: 'queued', pendingEvents: 3 }] } } } };
   const view = remediationView(state, { full: true, visibleNetworks: ['testnet'], now });
@@ -404,18 +436,20 @@ test('with repair switched off and no worker, the page lists open faults with wh
   // Switched on again: an absent worker is a gap once more, and its last word is shown as it was.
   const on = remediationView({ ...state, control: { ...state.control, seq: 7, dispatch: 'on' } }, { full: true, visibleNetworks: ['testnet'], now });
   assert.deepEqual([on.idle, on.stale, on.stalled, on.cases.find((c) => c.id === 'host').stage, on.cases.find((c) => c.id === 'disk').stage, on.cases.find((c) => c.id === 'job1').stage], [false, true, true, 'working', 'queued', 'queued']);
+  assert.equal(on.cases.find((c) => c.id === 'aged').stage, 'closed', 'how a case ended does not wait for its event to be delivered');
 });
 
 test('the ended list is limited but fully counted, and clearing activity never hides a fault monitoring still sees', () => {
   const at = stamp(now);
   const ended = Array.from({ length: HISTORY_MAX + 50 }, (_, n) => ({ id: `e${n}`, domain: 'ci', scope: 'github', target: `e${n}`, code: 'queue_wait', severity: 'warning', status: 'resolved',
-    revision: 2, firstSeen: stamp(now - HOUR), lastSeen: stamp(now - HOUR), resolvedAt: stamp(now - n * 1000), resolutionEvidence: { reason: 'expired' } }));
+    revision: 2, firstSeen: stamp(now - 2 * HOUR), lastSeen: stamp(now - HOUR + n * 1000), resolvedAt: stamp(now - n * 1000), resolutionEvidence: { reason: 'expired' } }));
   const open = (id, lastSeen) => ({ id, domain: 'ci', scope: 'host', target: id, code: 'disk_pressure', severity: 'warning', status: 'open', revision: 5, firstSeen: stamp(now - 48 * HOUR), lastSeen });
   const state = { generatedAt: at, outbox: [], control: { dispatch: 'off' }, issues: [...ended, open('current', at), open('forgotten', stamp(now - 30 * HOUR))],
     activityHistory: { schemaVersion: 1, clearedAt: stamp(now - 24 * HOUR), clearedBy: 'admin', revisions: { current: 5, forgotten: 5 } } };
   const view = remediationView(state, { full: true, now });
   assert.deepEqual([view.faults.closed, view.counts.closed, view.history.unlisted, view.cases.filter((c) => c.stage === 'closed').length], [HISTORY_MAX + 50, HISTORY_MAX + 50, 50, HISTORY_MAX]);
   assert.ok(view.cases.some((c) => c.id === 'e0') && !view.cases.some((c) => c.id === `e${HISTORY_MAX}`), 'the newest endings are the ones listed');
+  assert.deepEqual(view.cases.filter((c) => c.stage === 'closed').slice(0, 3).map((c) => c.id), ['e0', 'e1', 'e2'], 'in the order they ended, not the order they were last seen');
   assert.deepEqual(view.cases.filter((c) => c.monitoring === 'open').map((c) => c.id), ['current'], 'seen since the clear: listed; not seen since: still hidden');
   assert.equal(view.activityHistory.hidden, 1);
 });
@@ -444,14 +478,14 @@ test('one cycle over a state full of cases that could never close leaves the fau
   assert.deepEqual([stale.filter((i) => i.status === 'resolved').length, stale.filter((i) => i.status === 'open').map((i) => i.code).every((c) => c === 'host_health')], [80, true]);
   assert.equal(state.issues.find((i) => i.id === 'real').status, 'open');
   const pending = (s, id) => s.outbox.filter((e) => e.issue.id === id).map((e) => e.transition);
-  for (const id of ['q0', 'q9', 'j0', 'j9']) assert.deepEqual(pending(state, id), [], `${id}: opened and ended unseen, so the receiver is told nothing`);
-  for (const id of ['q10', 'q39', 'j10', 'j39']) assert.deepEqual(pending(state, id), ['resolved'], `${id}: the receiver knows it, so it is told the ending`);
+  for (const id of ['q0', 'q9', 'j0', 'j9', 'q10', 'q39', 'j10', 'j39']) assert.deepEqual(pending(state, id), ['resolved'], `${id}: one waiting event, its ending`);
   assert.deepEqual(pending(state, 'd0'), ['opened']);
   await cycle({ dataDir, ci, now: now + GONE_AFTER_MS });
   const done = loadIncidentState(dataDir);
   assert.deepEqual(done.issues.filter((i) => i.status === 'open' && i.sourceKey === 'legacy').map((i) => i.id), ['real']);
   assert.ok(done.issues.filter((i) => i.scope === 'devnet-sakura').every((i) => reason(i) === 'network_removed'));
-  assert.ok(!done.outbox.some((e) => /^[qjd]\d$/.test(e.issue.id)), 'cases that opened and ended unseen leave nothing for the receiver');
+  assert.deepEqual(pending(done, 'd0'), ['resolved'], 'the opening that was never sent is replaced by the ending');
+  assert.equal(new Set(done.outbox.map((e) => e.issue.id)).size, done.outbox.length, 'one waiting event per issue');
   const view = remediationView({ ...done, control: { dispatch: 'off' } }, { full: true, now: now + GONE_AFTER_MS });
   assert.deepEqual(view.cases.filter((c) => ['job_failed', 'queue_wait', 'host_health'].includes(c.code) && c.monitoring === 'open').map((c) => c.id), ['real']);
 });

@@ -98,12 +98,14 @@ export function remediationView(state, { full = false, visibleNetworks = [], now
     else if (open && (issue.suppressed || (issue.domain === 'network' && state.maintenance?.[issue.scope]?.active))) {
       stage = 'maintenance'; reason = holdReason(state, issue);
     }
-    else if (!idle && (response?.workerState === 'queued' || state?.outbox?.some((e) => e.issue?.id === issue.id))) {
-      stage = 'queued'; reason = WAIT[response?.waitReason] || 'Awaiting delivery to the repair worker';
-    } else if (resolved && why === 'verified_control_signal') {
+    // How monitoring ended a case does not depend on whether the event that
+    // says so has reached the worker yet: pendingEvents reports that.
+    else if (resolved && why === 'verified_control_signal') {
       stage = 'classified'; reason = 'Verified scaling control; monitoring classification corrected, not a service recovery';
     } else if (resolved && Object.hasOwn(ENDED, why)) {
       stage = 'closed'; reason = why === 'superseded' && text(issue.resolutionEvidence.by, 100) ? `Superseded by ${text(issue.resolutionEvidence.by, 100)}` : ENDED[why];
+    } else if (!idle && (response?.workerState === 'queued' || state?.outbox?.some((e) => e.issue?.id === issue.id))) {
+      stage = 'queued'; reason = WAIT[response?.waitReason] || 'Awaiting delivery to the repair worker';
     } else if (last?.outcome === 'blocked') {
       stage = resolved ? 'followup' : 'blocked';
       reason = stage === 'followup' ? 'Monitoring recovered; root-cause or verification follow-up remains' : 'Investigation completed; a blocker remains';
@@ -146,7 +148,11 @@ export function remediationView(state, { full = false, visibleNetworks = [], now
   const ended = cases.filter((c) => ENDED_STAGES.includes(c.stage)).sort((a, b) => (b.resolvedAt || '').localeCompare(a.resolvedAt || ''));
   const unlisted = new Set(ended.slice(HISTORY_MAX).map((c) => c.id));
   const order = ['working', 'blocked', 'open', 'maintenance', 'queued', 'verifying', 'followup', 'unknown', 'review', 'fixed', 'recovered', 'closed', 'classified'];
-  cases.sort((a, b) => order.indexOf(a.stage) - order.indexOf(b.stage) || SEVERITY.indexOf(a.severity) - SEVERITY.indexOf(b.severity) || (b.observedAt || '').localeCompare(a.observedAt || ''));
+  // Current faults by severity, then newest seen. What has ended, by when it ended.
+  const over = (c) => c.monitoring === 'resolved';
+  cases.sort((a, b) => order.indexOf(a.stage) - order.indexOf(b.stage)
+    || (over(a) && over(b) ? (b.resolvedAt || '').localeCompare(a.resolvedAt || '') : SEVERITY.indexOf(a.severity) - SEVERITY.indexOf(b.severity))
+    || (b.observedAt || '').localeCompare(a.observedAt || ''));
   const counts = Object.fromEntries(order.map((stage) => [stage, cases.filter((c) => c.stage === stage).length]));
   // What monitoring says is wrong now, whatever the repair worker is doing.
   const openCases = cases.filter((c) => c.monitoring !== 'resolved');

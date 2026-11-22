@@ -138,26 +138,45 @@ export function validIgnoredCiJobs(value) {
   }
   return value;
 }
-const literal = (part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
-const glob = (pattern) => new RegExp('^' + pattern.trim().split('*').map(literal).join('.*') + '$', 'i');
+// Whole-string match, case ignored, `*` for any run of characters. Two pointers
+// that fall back to the last `*` only: the time is bounded by pattern × text,
+// whatever a rule looks like. Not a regular expression on purpose.
+export function wildcard(pattern, value) {
+  const p = pattern.trim().toLowerCase(), s = value.toLowerCase();
+  let i = 0, j = 0, star = -1, mark = 0;
+  while (i < s.length) {
+    if (j < p.length && p[j] !== '*' && p[j] === s[i]) { i++; j++; }
+    else if (j < p.length && p[j] === '*') { star = j++; mark = i; }
+    else if (star !== -1) { j = star + 1; i = ++mark; }
+    else return false;
+  }
+  while (p[j] === '*') j++;
+  return j === p.length;
+}
 export function ciJobIgnored(settings) {
   let entries;
   // A damaged list ignores nothing: failures stay visible rather than hidden.
   try { entries = validIgnoredCiJobs(settings?.remediation?.ignoredCiJobs); } catch { entries = []; }
-  const rules = entries.map((e) => IGNORE_FIELDS.filter((k) => e[k] !== undefined).map((k) => [k, glob(e[k])]));
-  return (job) => rules.some((rule) => rule.every(([k, pattern]) => typeof job?.[k] === 'string' && pattern.test(job[k])));
+  const rules = entries.map((e) => IGNORE_FIELDS.filter((k) => e[k] !== undefined).map((k) => [k, e[k]]));
+  return (job) => rules.some((rule) => rule.every(([k, pattern]) => typeof job?.[k] === 'string' && wildcard(pattern, job[k])));
 }
 const branchOf = (j) => (text(j?.headRef) ? j.headRef : text(j?.ref) ? j.ref : null);
 const attemptKey = (repo, runId, name) => JSON.stringify([repo, runId, name]);
-const branchKey = (repo, workflow, name, branch) => (text(workflow) && text(branch) ? JSON.stringify([repo, workflow, name, branch]) : null);
+// Both refs identify the line of work: for a pull request `ref` is its own
+// refs/pull/<n>/merge, so two forks that named their branch alike stay apart.
+// (Under pull_request_target `ref` is the base branch, and they do not.)
+const branchKey = (repo, workflow, name, headRef, ref) => (text(workflow) && (text(headRef) || text(ref))
+  ? JSON.stringify([repo, workflow, name, text(headRef) ? headRef : '', text(ref) ? ref : '']) : null);
 // `job` is the evidence of a failed job. It passed later when a later attempt
 // of the same run succeeded, or a later run of the same workflow job on the
-// same branch did. Either must have finished after the failure.
+// same refs did. Either must have finished after the failure, and the other run
+// must be a later one: an older run that was slow to pass says nothing about a
+// newer one that failed.
 function passedLater(passed, job) {
   const again = passed?.attempts?.get(attemptKey(job.repo, job.runId, job.jobName));
   if (again && height(job.attempt) && again.attempt > job.attempt && Date.parse(again.end) > Date.parse(job.end)) return { reason: 'later_attempt_passed', ...again };
-  const next = passed?.branches?.get(branchKey(job.repo, job.workflow, job.jobName, job.branch));
-  return next && Date.parse(next.end) > Date.parse(job.end) ? { reason: 'later_run_passed', ...next } : null;
+  const next = passed?.branches?.get(branchKey(job.repo, job.workflow, job.jobName, job.headRef, job.ref));
+  return next && height(job.runId) && next.runId > job.runId && Date.parse(next.end) > Date.parse(job.end) ? { reason: 'later_run_passed', ...next } : null;
 }
 
 export function deriveIssues({ settings, states, ci, aws, operations = [], maintenance = {}, activity = null, now = Date.now() }) {
@@ -293,6 +312,9 @@ export function deriveIssues({ settings, states, ci, aws, operations = [], maint
     for (const code of ['reporter_missing', 'reporter_stale']) check('ci', reg.id, reg.id, code, key, current);
     if (!h || !current) { add('ci', reg.id, reg.id, h ? 'reporter_stale' : 'reporter_missing', 'warning', `${key}:monitor`, { lastObservationAt: sources[key].observedAt }); continue; }
     inventories[key] = true;
+    // The reporter keeps a host's first six disks: beyond that a disk it does
+    // not list may still be mounted.
+    inventories[`${key}:disks`] = h.disksCut !== true;
     for (const d of list(h.disks)) {
       if (!text(d.path)) continue;
       const used = num(d.free) ? pct(d.total - d.free, d.total) : null;
@@ -323,9 +345,15 @@ export function deriveIssues({ settings, states, ci, aws, operations = [], maint
         ...Object.fromEntries(['name', 'workflow', 'branch', 'url'].filter((k) => text(j[k])).map((k) => [k, j[k].slice(0, 300)])) }, ci.queue.at);
   }
   // A job that is not listed has left the queue only where the listing is
-  // whole: not cut to a display size, and complete for the job's repository.
+  // whole: not cut to a display size, complete for the job's repository, and
+  // carrying every queued job, not only those whose labels our runners serve.
+  const queueWhole = queueCurrent && !(Number.isSafeInteger(ci.queue.total) && ci.queue.total > ci.queue.jobs.length)
+    && Array.isArray(ci.queue.covered) && Array.isArray(ci.queue.queued);
   const queue = { current: queueCurrent, observedAt: ci?.queue?.at || null, windowMs: num(ci?.queue?.windowMs) ? ci.queue.windowMs : 0,
-    covered: queueCurrent && !(Number.isSafeInteger(ci.queue.total) && ci.queue.total > ci.queue.jobs.length) && Array.isArray(ci.queue.covered) ? ci.queue.covered.filter(text) : [] };
+    covered: queueWhole ? ci.queue.covered.filter(text) : [], queued: new Set(queueWhole ? ci.queue.queued : []),
+    // Jobs GitHub recorded as started on one of our runners. A fact that does
+    // not age: it needs no current queue listing.
+    started: new Set(Array.isArray(ci?.startedJobs) ? ci.startedJobs.filter(height) : []) };
   const ignored = ciJobIgnored(settings);
   // The newest pass of each job: by run (a later attempt) and by branch (a later run).
   const passed = { attempts: new Map(), branches: new Map() };
@@ -333,9 +361,10 @@ export function deriveIssues({ settings, states, ci, aws, operations = [], maint
   for (const j of jobs) {
     if (j.result !== 'Succeeded' || !text(j.repo) || !height(j.runId) || !text(j.name) || !height(j.attempt)) continue;
     const proof = { runId: j.runId, attempt: j.attempt, end: j.end };
-    const ak = attemptKey(j.repo, j.runId, j.name), bk = branchKey(j.repo, j.workflow, j.name, branchOf(j));
+    const ak = attemptKey(j.repo, j.runId, j.name), bk = branchKey(j.repo, j.workflow, j.name, j.headRef, j.ref);
     if (!(passed.attempts.get(ak)?.attempt >= j.attempt)) passed.attempts.set(ak, proof);
-    if (bk && !(Date.parse(passed.branches.get(bk)?.end) >= Date.parse(j.end))) passed.branches.set(bk, proof);
+    // The pass of the latest run: run ids only grow.
+    if (bk && !(passed.branches.get(bk)?.runId >= j.runId)) passed.branches.set(bk, proof);
   }
   // Failed jobs in the ledger that are not cases, by the id their case has or
   // would have: the ledger knows the workflow and branch of a job whose case was
@@ -344,14 +373,14 @@ export function deriveIssues({ settings, states, ci, aws, operations = [], maint
   for (const j of jobs) {
     if (j.result !== 'Failed') continue;
     const scope = j.host || 'github', target = `${j.repo}/${j.runId}/${j.runnerName}/${j.start}`;
-    const pass = passedLater(passed, { repo: j.repo, runId: j.runId, jobName: j.name, attempt: j.attempt, workflow: j.workflow, branch: branchOf(j), end: j.end });
+    const pass = passedLater(passed, { repo: j.repo, runId: j.runId, jobName: j.name, attempt: j.attempt, workflow: j.workflow, headRef: j.headRef, ref: j.ref, end: j.end });
     const ending = ignored({ repo: j.repo, workflow: j.workflow, job: j.name, event: j.event, branch: branchOf(j) }) ? { reason: 'ignored_job' } : pass;
     if (ending) { jobEndings.set(idFor('ci', scope, target, 'job_failed', [j.name, j.attempt]), ending); continue; }
     const jk = `ci:job:${issueId(j.host, j.repo, j.runId, j.name, j.attempt, j.start)}`;
     source(jk, j.end, true, JOB_FAILED_MAX_AGE_MS);
     add('ci', scope, target, 'job_failed', 'warning', jk,
       { repo: j.repo, runId: j.runId, attempt: j.attempt, jobName: j.name, runner: j.runnerName, end: j.end,
-        ...Object.fromEntries([['workflow', j.workflow], ['event', j.event], ['branch', branchOf(j)]].filter(([, v]) => text(v)).map(([k, v]) => [k, v.slice(0, 200)])) }, j.end, [j.name, j.attempt]);
+        ...Object.fromEntries([['workflow', j.workflow], ['event', j.event], ['branch', branchOf(j)], ['headRef', j.headRef], ['ref', j.ref]].filter(([, v]) => text(v)).map(([k, v]) => [k, v.slice(0, 200)])) }, j.end, [j.name, j.attempt]);
   }
   source('aws:monitor', iso(now), true, 180_000);
   const awsCurrent = source('aws:inventory', aws?.at, Array.isArray(aws?.errors) && !aws.errors.length && Array.isArray(aws.volumes) && Array.isArray(aws.addresses), 30 * 60_000);
@@ -478,7 +507,7 @@ export function reconcile(previous, derived, now = Date.now()) {
   // Why an open case is over although nothing recovered. Checked before holds
   // and exclusions: neither keeps alive a case whose subject no longer exists.
   const GONE = { host_health: (i) => `network:${i.scope}`, endpoint_failed: (i) => `network:${i.scope}`,
-    disk_pressure: (i) => `ci:host:${i.scope}`, runner_offline: (i) => `ci:host:${i.scope}`,
+    disk_pressure: (i) => `ci:host:${i.scope}:disks`, runner_offline: (i) => `ci:host:${i.scope}`,
     idle_volume: () => 'aws:inventory', idle_address: () => 'aws:inventory', aws_instance_impaired: () => 'aws:health',
     aws_scheduled_event: () => 'aws:health', aws_alarm: () => 'aws:health', aws_scaling_control: () => 'aws:health' };
   const REPORTER = ['reporter_missing', 'reporter_stale', 'disk_pressure', 'memory_pressure', 'runner_offline'];
@@ -488,6 +517,13 @@ export function reconcile(previous, derived, now = Date.now()) {
     } else if (issue.domain === 'ci' && REPORTER.includes(issue.code) && Array.isArray(derived.reporters) && !derived.reporters.includes(issue.scope)) return { reason: 'target_removed', sure: true };
     if (check || !Object.hasOwn(GONE, issue.code)) return null;
     return { reason: 'target_removed', sure: derived.inventories?.[GONE[issue.code](issue)] === true };
+  };
+  // The pass that ends a failed job's case: known for the job while the ledger
+  // has it, otherwise matched from what the case recorded.
+  const jobPass = (issue) => {
+    const e = issue.evidence || {}, known = derived.jobEndings?.get(issue.id);
+    if (known?.end) return known;
+    return text(e.repo) && text(e.jobName) && height(e.runId) ? passedLater(derived.passed, { ...e, end: e.end || issue.lastFaultAt }) : null;
   };
   const ended = (issue, check) => {
     const missing = gone(issue, check);
@@ -503,7 +539,9 @@ export function reconcile(previous, derived, now = Date.now()) {
       if (derived.jobEndings?.get(issue.id)?.reason === 'ignored_job'
         || derived.ignored?.({ repo: e.repo, workflow: e.workflow, job: e.jobName, event: e.event, branch: e.branch })) return { reason: 'ignored_job' };
       const failedAt = Date.parse(e.end || issue.lastFaultAt || issue.firstSeen);
-      if (Number.isFinite(failedAt) && now - failedAt >= JOB_FAILED_MAX_AGE_MS) return { reason: 'expired', after: 'a day without a later pass on record' };
+      // A pass still on record outlives the failure in the ledger: it is a
+      // recovery, and is taken as one below, not an expiry.
+      if (Number.isFinite(failedAt) && now - failedAt >= JOB_FAILED_MAX_AGE_MS && !jobPass(issue)) return { reason: 'expired', after: 'a day without a later pass on record' };
     }
     if (issue.code === 'queue_wait' && derived.queue?.current && now - Date.parse(issue.lastSeen || issue.firstSeen) >= QUEUE_WAIT_UNSEEN_MS)
       return { reason: 'expired', after: 'a day without being seen waiting' };
@@ -541,7 +579,8 @@ export function reconcile(previous, derived, now = Date.now()) {
       const waiting = Object.fromEntries(retained.map((f) => [f, quiet[f]]));
       if (retained.length) issue.quiet = waiting;
       const faults = [...new Set([...incoming, ...retained])].sort();
-      const faultLevels = { ...old.evidence?.faultLevels, ...current.evidence?.faultLevels };
+      // Levels of the faults that remain; a fault that left takes its level along.
+      const faultLevels = Object.fromEntries(Object.entries({ ...old.evidence?.faultLevels, ...current.evidence?.faultLevels }).filter(([f]) => faults.includes(f)));
       issue.evidence = { ...current.evidence, faults, faultLevels,
         reasons: [...(current.evidence?.reasons || []), ...(old.evidence?.reasons || []).filter((r) => retained.includes(classify(r)))].slice(0, 30) };
       if (retained.some((f) => (faultLevels[f] || old.severity) === 'critical')) issue.severity = 'critical';
@@ -573,20 +612,19 @@ export function reconcile(previous, derived, now = Date.now()) {
     // An omitted failed job proves nothing. A later attempt of the same job, or
     // a later run of it on the same branch, that passed after the failure does.
     if (!clear && issue.code === 'job_failed') {
-      const e = issue.evidence || {};
-      const known = derived.jobEndings?.get(issue.id);
-      const pass = known?.end ? known : text(e.repo) && text(e.jobName) && height(e.runId) ? passedLater(derived.passed, { ...e, end: e.end || issue.lastFaultAt }) : null;
+      const pass = jobPass(issue);
       if (pass) { clear = true; clearAt = pass.end; evidence = pass; }
     }
-    // Not listed as waiting by a whole, current listing of its repository, for
-    // a run the listing still follows: it started, finished or was cancelled.
+    // A waiting job has left the queue when GitHub recorded it starting on one
+    // of our runners, or when it is not among the queued jobs of a whole,
+    // current listing of its repository, for a run the listing still follows
+    // (then it started, finished or was cancelled). A case that does not know
+    // when its run began cannot use the listing: its run may be outside it.
     if (!clear && issue.code === 'queue_wait') {
-      const q = derived.queue, e = issue.evidence || {}, seen = Date.parse(q?.observedAt);
-      // Cases filed before the run's start was recorded only know when the job
-      // was created, which is later: half the window allows for that.
-      const runAt = Number.isFinite(Date.parse(e.runCreatedAt)) ? Date.parse(e.runCreatedAt) : Date.parse(e.createdAt) - (q?.windowMs || 0) / 2;
-      if (q?.current && q.covered.includes(e.repo) && Number.isFinite(runAt) && seen - runAt < q.windowMs - GONE_AFTER_MS
-        && seen > Date.parse(issue.lastFaultAt || issue.observedAt || issue.firstSeen)) { clear = true; clearAt = q.observedAt; evidence = { reason: 'left_queue' }; }
+      const q = derived.queue, e = issue.evidence || {}, seen = Date.parse(q?.observedAt), runAt = Date.parse(e.runCreatedAt);
+      if (q?.started?.has(e.jobId)) { clear = true; clearAt = q.current ? q.observedAt : null; evidence = { reason: 'left_queue', how: 'started on a runner' }; }
+      else if (q?.current && q.covered.includes(e.repo) && !q.queued.has(e.jobId) && Number.isFinite(runAt) && seen - runAt < q.windowMs - GONE_AFTER_MS
+        && seen > Date.parse(issue.lastFaultAt || issue.observedAt || issue.firstSeen)) { clear = true; clearAt = q.observedAt; evidence = { reason: 'left_queue', how: 'no longer queued' }; }
     }
     if (clear) close(issue, clearAt, evidence);
   }
@@ -614,26 +652,21 @@ export function reconcile(previous, derived, now = Date.now()) {
 }
 
 // More than one delivery batch waiting is a backlog: the receiver is away or
-// behind. It acts on the newest state of an issue, so older revisions that were
-// never delivered are dropped, and an issue that opened and ended without the
-// receiver ever hearing of it is not reported to it at all. Otherwise a
-// receiver that returns is handed days of faults that are long over, hours
-// before the events that say so.
+// behind. It acts on the newest state of an issue, so only the newest waiting
+// event of each issue is kept. Otherwise a receiver that returns is handed days
+// of faults that are long over, hours before the events that say so.
+//
+// The newest event is always kept, an ending included, even for an issue the
+// receiver may never have heard of: an earlier event can have been accepted
+// with its acknowledgement lost, and then only the ending closes it there. An
+// ending the receiver did not need is a record it files and ignores.
 export const BACKLOG_EVENTS = 50;
 export function compactBacklog(state) {
   const outbox = state.outbox || [];
   if (outbox.length <= BACKLOG_EVENTS) return state;
-  const issues = new Map((state.issues || []).map((i) => [i.id, i]));
-  const first = new Map(), last = new Map();
-  for (const e of outbox) { const id = e.issue?.id; if (!first.has(id)) first.set(id, e); last.set(id, e); }
-  // `delivered` is the highest revision the receiver acknowledged. Releases
-  // before this one did not record it: events of one issue are delivered in
-  // order, so it is everything below the oldest revision still waiting.
-  for (const [id, e] of first) {
-    const issue = issues.get(id);
-    if (issue && !Number.isSafeInteger(issue.delivered)) issue.delivered = Math.max(0, (Number.isSafeInteger(e.issue.revision) ? e.issue.revision : 1) - 1);
-  }
-  state.outbox = outbox.filter((e) => last.get(e.issue?.id) === e && !(e.issue.status === 'resolved' && issues.get(e.issue.id)?.delivered === 0));
+  const last = new Map();
+  for (const e of outbox) last.set(e.issue?.id, e);
+  state.outbox = outbox.filter((e) => last.get(e.issue?.id) === e);
   return state;
 }
 

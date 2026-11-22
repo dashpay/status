@@ -31,8 +31,8 @@ open for good, and the queue filled with them. A resolved case records why in
 | Reason | Rule |
 |---|---|
 | (none) | The rule's own check passed on a fresh, complete observation taken after the last fault. |
-| `left_queue` | `queue_wait`: the job is not in a current queue listing that is whole for its repository (no page cut short, no error, not cut for display), for a run the poller still follows. It started, finished or was cancelled. |
-| `later_attempt_passed`, `later_run_passed` | `job_failed`: a later attempt of the same run, or a later run of the same workflow job on the same branch, passed after the failure. Such a failure is not filed at all when the pass is already on record. |
+| `left_queue` | `queue_wait`: GitHub recorded the job starting on one of our runners; or the job is not among the queued jobs of a current listing that is whole for its repository (every page answered, none cut short, not cut for display, every queued job counted whatever its labels), for a run the poller still follows. Then it started, finished or was cancelled. A case that does not record when its run began cannot use the listing. |
+| `later_attempt_passed`, `later_run_passed` | `job_failed`: a later attempt of the same run, or a later run (a higher run id) of the same workflow job on the same refs, passed after the failure. An older run that was slow to pass does not count. The refs are the head branch and the run's own ref, so pull requests from two forks with the same branch name stay apart, except under `pull_request_target`, where the ref is the base branch. Such a failure is not filed at all when the pass is already on record, and a pass still on record wins over expiry. |
 | `quiet` | `host_health`: every fault is either proven healthy by its own rule or has gone unreported through `QUIET_SAMPLES` (10) consecutive valid probes of the host. A fault such as a task container that was removed has no state that could prove it healthy. On a host that stays faulty the same count drops such a fault from the evidence. |
 | `verified_control_signal` | A verified scale-in control alarm (below). |
 
@@ -41,7 +41,7 @@ open for good, and the queue filled with them. A resolved case records why in
 | Reason | Rule |
 |---|---|
 | `network_removed` | The network is no longer configured. |
-| `target_removed` | The host, endpoint, disk, runner, reporter, volume, address, instance or alarm has been absent for 10 minutes (`GONE_AFTER_MS`), judged only by complete, current inventories of its kind. An inventory with an error, a failed discovery or a stale report is not evidence of absence, and does not restart the clock. A replaced instance is a new identity: its predecessor's case closes this way, never because the successor is healthy. |
+| `target_removed` | The host, endpoint, disk, runner, reporter, volume, address, instance or alarm has been absent for 10 minutes (`GONE_AFTER_MS`), judged only by complete, current inventories of its kind. An inventory with an error, a failed discovery, a stale report, or a host report that lists only the first six of more disks is not evidence of absence, and does not restart the clock. A replaced instance is a new identity: its predecessor's case closes this way, never because the successor is healthy. |
 | `expired` | `job_failed`: 24 hours after the failure with no later pass on record (the producer sees finished jobs for a day). `queue_wait`: not seen waiting for 24 hours while the queue was being observed. |
 | `ignored_job` | `job_failed` for a job listed in `remediation.ignoredCiJobs` (see the README). |
 | `superseded` | A release compatibility task whose release has a newer one in the same `major.minor` line. A superseded release is never opened as a task. |
@@ -52,12 +52,12 @@ network does not preserve the cases of hosts it replaced.
 ### Backlog
 
 When more than one delivery batch (50 events) is waiting, the receiver is away
-or behind. The producer then keeps only the newest undelivered event of each
-issue, and drops every event of an issue that opened and ended without the
-receiver ever being told of it. The producer records the highest revision the
-receiver acknowledged per issue (`delivered`) to know which is which. A
-receiver that returns is told the current state of each issue it knows and of
-each fault still open, not the history it missed.
+or behind. The producer then keeps only the newest waiting event of each issue.
+A receiver that returns is told the current state of each issue, not the
+history it missed. The newest event is kept even when it is the ending of an
+issue the receiver may never have heard of: an earlier event can have been
+accepted with its acknowledgement lost, and only the ending closes it there.
+Events are never rewritten, so a redelivered one still matches by ID and bytes.
 
 ## Data and delivery
 

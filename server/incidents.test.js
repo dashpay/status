@@ -308,15 +308,19 @@ test('a job missing from a cut or partial queue listing is still waiting; an omi
     recent: [{ host: 'shared', repo: 'dashpay/status', runId: 9, attempt: 1, name: 'build', runnerName: 'runner', start: stamp(now - 60_000), end: at, result: 'Failed' }] };
   const initial = reconcile(null, deriveCi(now, ci), now);
   const later = now + 120_000;
-  // Not listed, but the listing cannot say so: no repository listed in full,
-  // another repository only, cut for display, failed, or from an older poller.
-  for (const queue of [{ covered: [], total: 0 }, { covered: ['dashpay/other'], total: 0 }, { covered: ['dashpay/status'], total: 60 },
-    { covered: ['dashpay/status'], total: 0, error: 'GitHub 502' }, { windowMs: undefined }]) {
+  // Not listed as waiting, but the listing cannot say it left: no repository
+  // listed in full, another repository only, cut for display, failed, still
+  // queued under labels we no longer serve, or from an older poller.
+  const whole = { covered: ['dashpay/status'], total: 0, queued: [] };
+  for (const queue of [{ ...whole, covered: [] }, { ...whole, covered: ['dashpay/other'] }, { ...whole, total: 60 }, { ...whole, error: 'GitHub 502' },
+    { ...whole, queued: [3] }, { ...whole, queued: undefined }, { ...whole, windowMs: undefined }, { ...whole, covered: undefined }]) {
     const omitted = { ...ciHost(later), queue: { at: stamp(later), error: null, windowMs: 86400_000, jobs: [], ...queue }, recent: [] };
     const s = reconcile(initial, deriveCi(later, omitted), later);
     assert.equal(byCode(s, 'queue_wait')[0].status, 'open', JSON.stringify(queue));
     assert.equal(byCode(s, 'job_failed')[0].status, 'open', JSON.stringify(queue));
   }
+  const left = { ...ciHost(later), queue: { at: stamp(later), error: null, windowMs: 86400_000, jobs: [], ...whole }, recent: [] };
+  assert.equal(byCode(reconcile(initial, deriveCi(later, left), later), 'queue_wait')[0].resolutionEvidence.reason, 'left_queue');
   const moved = { ...ci, queue: { ...ci.queue, at: stamp(now + 60_000), jobs: [{ ...ci.queue.jobs[0], status: 'in_progress' }] } };
   const recovered = reconcile(initial, deriveCi(now + 60_000, moved), now + 60_000);
   assert.equal(byCode(recovered, 'queue_wait')[0].status, 'resolved');

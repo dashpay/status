@@ -83,6 +83,10 @@ test('GitHub timing adds queue time; queued self-hosted jobs are listed', async 
   assert.equal(s.queue.jobs[0].name, 'Swift SDK build');
   // The listing says which repositories it covers in full, and when each run began.
   assert.deepEqual([s.queue.covered, s.queue.windowMs, s.queue.total, s.queue.jobs[0].runCreatedAt], [['dashpay/platform'], 86_400_000, 1, iso(T0 - 10 * 60_000)]);
+  // For the producer: every queued job, the one whose labels we do not serve
+  // included, and the jobs GitHub recorded as started on our runners.
+  const whole = ci.summary({ whole: true });
+  assert.deepEqual([whole.queue.queued, whole.startedJobs, s.queue.queued, s.startedJobs], [[2, 3], [1], undefined, undefined]);
   assert.equal(s.workflows[0].medianQueueSec, 303);
   // A completed run is not fetched again.
   const before = calls.filter((c) => c.url.includes('/attempts/')).length;
@@ -100,9 +104,10 @@ test('a queue listing that was cut short or failed does not claim to cover its r
     if (url.includes('/attempts/')) return new Response('{}', { status: 404, headers });
     const runs = mode === 'many-runs' ? 30 : 1;
     if (url.includes('status=queued')) return Response.json({ workflow_runs: Array.from({ length: runs }, (_, n) => ({ id: 500 + n, name: 'Tests', created_at: iso(T0 - 30 * 60_000), head_branch: 'x' })) }, { headers });
-    if (url.includes('status=in_progress')) return Response.json({ workflow_runs: [] }, { headers });
+    if (url.includes('status=in_progress')) return mode === 'not-found' ? new Response('{}', { status: 404, headers }) : Response.json({ workflow_runs: [] }, { headers });
     if (url.includes('/jobs')) {
       if (mode === 'error') return new Response('{}', { status: 502, headers });
+      if (mode === 'jobs-not-found') return new Response('{}', { status: 404, headers });
       return Response.json({ jobs: Array.from({ length: mode === 'many-jobs' ? 100 : 60 }, (_, n) => queuedJob(Number(url.match(/runs\/(\d+)/)[1]) * 1000 + n)) }, { headers });
     }
     return new Response('{}', { status: 404, headers });
@@ -117,7 +122,9 @@ test('a queue listing that was cut short or failed does not claim to cover its r
   const whole = ci.summary({ admin: true, whole: true });
   assert.deepEqual([whole.queue.jobs.length, whole.queue.total, whole.queue.covered, whole.recent.length], [60, 60, ['dashpay/platform'], 70]);
   assert.equal(ci.publicSummary().queue.covered, undefined);
-  for (const cut of ['many-runs', 'many-jobs', 'error']) {
+  assert.equal(whole.queue.queued.length, 60);
+  // A listing that was cut short, failed or answered "not found" covers nothing.
+  for (const cut of ['many-runs', 'many-jobs', 'not-found', 'jobs-not-found', 'error']) {
     mode = cut; now += 3 * 60_000; ci.ingest(id, report());
     await ci.tick();
     assert.deepEqual(ci.summary({ whole: true }).queue.covered, [], cut);

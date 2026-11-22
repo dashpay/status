@@ -66,6 +66,8 @@ function cleanReport(b) {
       hostname: str(h.hostname, 100), os: str(h.os, 100), arch: str(h.arch, 20), cpus: int(h.cpus),
       load: Array.isArray(h.load) ? h.load.slice(0, 3).map(num) : [], memTotal: num(h.memTotal), memUsed: num(h.memUsed), uptimeSec: num(h.uptimeSec),
       disks: Array.isArray(h.disks) ? h.disks.slice(0, 6).map((d) => ({ path: str(d?.path, 100), total: num(d?.total), free: num(d?.free) })) : [],
+      // More disks than are kept: a disk missing from this list may still be mounted.
+      disksCut: Array.isArray(h.disks) && h.disks.length > 6,
       docker,
     },
     runners: b.runners.filter((r) => typeof r?.key === 'string' && r.key).map((r) => ({
@@ -239,13 +241,19 @@ export function createCi({ dataDir, fetcher = fetch, clock = Date.now, github = 
     // Repositories whose waiting jobs were listed in full: for these, a job
     // that is not listed is not waiting. A cut-off page proves nothing.
     const covered = [];
+    // Every job GitHub lists as queued, whatever its labels. `waiting` is what
+    // we show and file cases for; this says which jobs have not left the queue,
+    // and that must not depend on which runners report to us today.
+    const queued = [];
     let error = null;
     for (const repo of repos) {
       try {
         const runs = new Map(); // a run can move from queued to in progress between the two calls
         let whole = true;
         for (const status of ['queued', 'in_progress']) {
-          const page = (await api(`/repos/${repo}/actions/runs?status=${status}&per_page=30`))?.workflow_runs || [];
+          // A 404 comes back as null: no listing, so no coverage.
+          const page = (await api(`/repos/${repo}/actions/runs?status=${status}&per_page=30`))?.workflow_runs;
+          if (!Array.isArray(page)) { whole = false; continue; }
           if (page.length >= 30) whole = false;
           for (const r of page) runs.set(r.id, r);
         }
@@ -253,10 +261,11 @@ export function createCi({ dataDir, fetcher = fetch, clock = Date.now, github = 
         if (recent.length > 25) whole = false;
         for (const run of recent.slice(0, 25)) {
           const v = await api(`/repos/${repo}/actions/runs/${run.id}/jobs?filter=latest&per_page=100`);
-          if (!v || (v.jobs || []).length >= 100) whole = false;
+          if (!Array.isArray(v?.jobs) || v.jobs.length >= 100) whole = false;
           for (const j of (v?.jobs || []).map(compactJob)) {
             // Waiting for a runner only (not for approval or a concurrency group).
             if (j.status !== 'queued') continue;
+            if (Number.isSafeInteger(j.id)) queued.push(j.id);
             const labels = j.labels.map((l) => l.toLowerCase());
             if (!labels.includes('self-hosted') && !served.has(JSON.stringify([...j.labels].sort()))) continue;
             waiting.push({ id: j.id, repo, workflow: String(run.name || '').slice(0, 200), name: j.name, labels: j.labels, createdAt: j.createdAt, runCreatedAt: run.created_at, url: j.url, branch: String(run.head_branch || '').slice(0, 200) });
@@ -265,7 +274,7 @@ export function createCi({ dataDir, fetcher = fetch, clock = Date.now, github = 
         if (whole) covered.push(repo);
       } catch (err) { error = err.message; if (/rate limit/.test(err.message)) break; }
     }
-    gh.queue = { at: new Date(now).toISOString(), repos, covered, windowMs: QUEUE_WINDOW_MS, jobs: waiting.sort((a, b) => a.createdAt.localeCompare(b.createdAt)), error };
+    gh.queue = { at: new Date(now).toISOString(), repos, covered, queued, windowMs: QUEUE_WINDOW_MS, jobs: waiting.sort((a, b) => a.createdAt.localeCompare(b.createdAt)), error };
   }
 
   let lastQueue = 0, ticking = false;
@@ -414,7 +423,9 @@ export function createCi({ dataDir, fetcher = fetch, clock = Date.now, github = 
       hosts: hosts.map((h) => ({ id: h.id, label: regs[h.id]?.label || h.id, receivedAt: h.receivedAt, measuredAt: h.at, stale: now - Date.parse(h.receivedAt) > STALE_MS, reporter: h.reporter, python: h.python, ...h.host })).sort((a, b) => a.label.localeCompare(b.label)),
       runners,
       pools,
-      queue: gh.queue ? { ...gh.queue, total: queued.length, jobs: whole ? queued : queued.slice(0, 50) } : null,
+      queue: gh.queue ? { ...gh.queue, queued: whole ? gh.queue.queued : undefined, total: queued.length, jobs: whole ? queued : queued.slice(0, 50) } : null,
+      // Jobs GitHub says started on one of our runners: a job among them has left the queue.
+      startedJobs: whole ? Object.values(gh.runs).flatMap((e) => (e.jobs || []).filter((j) => j.startedAt && Number.isSafeInteger(j.id)).map((j) => j.id)) : undefined,
       workflows: workflows.slice(0, 40),
       daily,
       recent: (whole ? jobs.filter((j) => j.end && Date.parse(j.end) > now - DAY) : jobs.filter((j) => j.end)).sort((a, b) => b.end.localeCompare(a.end)).slice(0, whole ? 20_000 : 60)

@@ -25,8 +25,10 @@ export default function Remediation() {
   useEffect(() => { const timer = setInterval(reload, 15_000); return () => clearInterval(timer); }, [reload]);
   const cases = (data?.cases || []).filter((c) => inView(c, filter)
     && [c.title, c.target, c.scope, c.network, c.domain, c.detail, c.summary, c.blocker].filter(Boolean).join(' ').toLowerCase().includes(search.toLowerCase()));
-  // With repair switched off and no worker, only monitoring can be out of date.
-  const stale = data?.stale || (!data?.idle && data?.workerAt && now - Date.parse(data.workerAt) > 180_000);
+  // A response kept on screen ages too: monitoring always, the worker only when
+  // one is expected (with repair switched off and no worker, none is).
+  const old = (at) => !!at && now - Date.parse(at) > 180_000;
+  const stale = data?.stale || old(data?.generatedAt) || (!data?.idle && old(data?.workerAt));
   const f = data?.faults;
   return <div className="pt-5">
     <div className="flex items-start justify-between gap-3 flex-wrap">
