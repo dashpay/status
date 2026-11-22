@@ -1,0 +1,14 @@
+[Unit]
+Description=Read-only Mainnet public service functional probes
+After=docker.service network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/dash-mainnet-services/mainnet-services.py
+TimeoutStartSec=120
+StateDirectory=dash-mainnet-services
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
