@@ -22,6 +22,8 @@ const SPAN_KEEP_MS = 49 * 3_600_000;
 const SPAN_MAX = 2000;
 // The queue poll follows runs created within this window.
 const QUEUE_WINDOW_MS = DAY;
+// Runs asked for per status (GitHub's maximum page).
+const RUN_PAGE = 100;
 const ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const REPO = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 const TS = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/;
@@ -252,9 +254,13 @@ export function createCi({ dataDir, fetcher = fetch, clock = Date.now, github = 
         let whole = true;
         for (const status of ['queued', 'in_progress']) {
           // A 404 comes back as null: no listing, so no coverage.
-          const page = (await api(`/repos/${repo}/actions/runs?status=${status}&per_page=30`))?.workflow_runs;
+          const listing = await api(`/repos/${repo}/actions/runs?status=${status}&per_page=${RUN_PAGE}`);
+          const page = listing?.workflow_runs;
           if (!Array.isArray(page)) { whole = false; continue; }
-          if (page.length >= 30) whole = false;
+          // Every run with this status, by GitHub's own count. A repository can
+          // carry dozens of runs that have sat "queued" for months; they must
+          // not make the listing look cut when all of them are in it.
+          if (Number.isSafeInteger(listing.total_count) ? listing.total_count > page.length : page.length >= RUN_PAGE) whole = false;
           for (const r of page) runs.set(r.id, r);
         }
         const recent = [...runs.values()].filter((r) => Date.parse(r.created_at) > now - QUEUE_WINDOW_MS);
