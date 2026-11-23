@@ -227,6 +227,16 @@ class Reset:
             'containers': {k:owned[s]['Id'] for k,s in components.items() if s in owned},
             'restarts': {k:owned[s]['RestartCount'] for k,s in components.items() if s in owned}}}
 
+    def installed(self, images):
+        """The images operations install on this host: all of them on a
+        validator, Core alone on any other host. A native Platform upgrade
+        renders those hosts with its helper into dashmate-stage and moves their
+        pin in the journal; the live render keeps the helper it was made with."""
+        # Preparation calls validators 'hpmn'; the commit uses deployment roles.
+        if self.q.get('role') in (None, 'hpmn', 'validator'):
+            return images
+        return {'core': images.get('core')}
+
     def journal_commit(self):
         change = copy.deepcopy(self.q['transition'])
         if (self.state / 'baseline-effective.json').exists():
@@ -235,7 +245,7 @@ class Reset:
         # Wallet is only observed; its containers and files are not modified.
         need(actual['preservation']['coreId'] == change['preserve']['coreId'] and
              all(actual['preservation'][k] == change['preserve'][k] for k in ['coreStarted', 'coreConfig', 'coreGenesis']), 'Core changed before journal commit')
-        need(actual['images'] == change['to'], 'installed images differ from journal target')
+        need(self.installed(actual['images']) == self.installed(change['to']), 'installed images differ from journal target')
         need(actual['previousId'] in [change.get('previousId', ''), change['id']], 'native host marker changed')
         write(self.root / 'upgrade.json', {**change, 'phase': 'applied', 'reset': True})
         return {'committed': True}

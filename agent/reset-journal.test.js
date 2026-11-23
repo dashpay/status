@@ -88,6 +88,29 @@ test('journal construction rejects installed drift and Core target changes',()=>
   desired['validator-1'].core=pin('dashd','b');
   assert.throws(()=>transitionRecord(original,plan,'f'.repeat(64),desired,observed,'2026-10-06T00:00:00Z'),/Core/);
 });
+test('a wallet whose helper pin moved in a native Platform upgrade is reset; its Core must still match',()=>{
+  // The upgrade moved every pin in the journal and left a marker on validators.
+  // On the wallet it rendered into the stage only: the live render and an older
+  // reset's marker still name the previous helper.
+  const upgradeId='9'.repeat(64), moved=pin('dashmate-helper','c');
+  const images=Object.fromEntries(plan.targets.map((t)=>[t.name,{...Object.fromEntries(t.images.map((i)=>[i.component,i.pinned])),helper:moved}]));
+  const upgraded={...original,runtime:{deploymentId:plan.id,upgradeId,images}};
+  const wallet=(extra)=>({images:{core:beforeImages.core,helper:beforeImages.helper},previousId:'',preservation,...extra});
+  const marker=(helper,core=beforeImages.core)=>({previousId:'a'.repeat(64),markerEvidence:{phase:'applied',images:{core,helper}}});
+  const seen=(w)=>({'validator-1':{images:images['validator-1'],previousId:upgradeId,preservation},'wallet-1':w});
+  const build=(w)=>transitionRecord(upgraded,plan,'f'.repeat(64),structuredClone(images),seen(w),'2026-11-23T00:00:00Z');
+  for (const w of [wallet(), wallet(marker(beforeImages.helper)), wallet(marker(pin('dashmate-helper','d'))), wallet({images:{core:beforeImages.core,helper:moved},previousId:upgradeId})]) {
+    const record=build(w);
+    assert.equal(record.upgrade.from['wallet-1'].helper,moved,'the journal pin is carried, not the live render');
+    assert.equal(record.upgrade.to['wallet-1'].helper,moved);
+    assert.equal(record.runtime.images['wallet-1'].helper,moved);
+  }
+  assert.throws(()=>build(wallet({images:{core:pin('dashd','b'),helper:moved}})),/installed images differ from dashnet journal on wallet-1/);
+  assert.throws(()=>build(wallet(marker(beforeImages.helper,pin('dashd','b')))),/native upgrade marker differs on wallet-1/);
+  // A validator's helper is installed by every operation and still has to match.
+  const stale={...seen(wallet()),'validator-1':{images:{...images['validator-1'],helper:beforeImages.helper},previousId:upgradeId,preservation}};
+  assert.throws(()=>transitionRecord(upgraded,plan,'f'.repeat(64),structuredClone(images),stale,'2026-11-23T00:00:00Z'),/installed images differ from dashnet journal on validator-1/);
+});
 test('unchanged sidecars keep pins; target helper cannot replace Tor',async()=>{
   const existing=[{service:'core_tor',requested:'tor:old',pinned:'old'},{service:'gateway_rate_limiter_redis',requested:'redis:alpine',pinned:'retained'}];
   const result=await resetSidecars(existing,{core_tor:'tor:old',gateway_rate_limiter_redis:'redis:alpine'},['amd64','arm64'],()=>{throw Error('must not resolve moving tags');});

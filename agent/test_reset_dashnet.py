@@ -209,6 +209,30 @@ class ResetTests(unittest.TestCase):
             self.assertFalse(self.r.mining_pause()['quiet'])
         self.assertEqual(calls,[],'active DKG window never pauses mining')
 
+    def test_commit_on_a_wallet_compares_core_and_carries_the_journal_helper_pin(self):
+        # A native Platform upgrade moved the wallet's helper pin in the journal
+        # and rendered into the stage only: the live render names the old helper.
+        preserve = {'coreId':'core', 'coreStarted':'t0', 'coreConfig':'c', 'coreGenesis':'g'}
+        journal = {'core':'core@sha256:1', 'helper':'helper@sha256:new'}
+        change = {'id':'f'*64, 'previousId':'a'*64, 'from':journal, 'to':journal, 'preserve':preserve}
+        def observed(core='core@sha256:1'):
+            return {'images': {'core':core, 'helper':'helper@sha256:old'}, 'previousId':'a'*64, 'preservation':preserve}
+        self.r.q.update(role='wallet', transition=change)
+        with patch.object(self.r, 'journal_baseline', return_value=observed()):
+            self.assertEqual(self.r.journal_commit(), {'committed': True})
+        self.assertEqual(mod.read(self.r.root / 'upgrade.json'), {**change, 'phase':'applied', 'reset':True})
+        with patch.object(self.r, 'journal_baseline', return_value=observed('core@sha256:2')):
+            with self.assertRaisesRegex(mod.Fail, 'installed images differ from journal target'):
+                self.r.journal_commit()
+        # A validator's helper is installed by every operation: no allowance.
+        (self.r.root / 'upgrade.json').unlink()
+        for role in ['validator', 'hpmn', None]:
+            self.r.q['role'] = role
+            with patch.object(self.r, 'journal_baseline', return_value=observed()):
+                with self.assertRaisesRegex(mod.Fail, 'installed images differ from journal target'):
+                    self.r.journal_commit()
+        self.assertFalse((self.r.root / 'upgrade.json').exists())
+
     def test_prepared_target_drift_refused_before_destructive_commands(self):
         mod.write(self.r.state / 'prepared.json', {'images': {'drive':'old'}, 'files':{}})
         with patch.object(self.r, 'baseline_record', return_value={}), patch.object(self.r, 'preserved'), \

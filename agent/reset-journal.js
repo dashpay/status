@@ -40,9 +40,13 @@ export function transitionRecord(original, plan, id, desired, observations, at) 
   const baseline = {}, completed = {};
   for (const t of plan.targets) {
     const actual = observations[t.name];
-    need(actual && hash(actual.images) === hash(from[t.name]), `installed images differ from dashnet journal on ${t.name}`);
-    // Native Platform upgrades stage the wallet helper without an upgrade marker.
-    const scopedMarker = /^[a-f0-9]{64}$/.test(actual.previousId || '') && actual.markerEvidence?.phase === 'applied' && hash(actual.markerEvidence.images) === hash(actual.images);
+    // What operations install on a host: every image on a validator, Core alone
+    // elsewhere. A native Platform upgrade renders the other hosts with its
+    // helper into dashmate-stage and moves their pin in the journal; it installs
+    // nothing there and leaves no marker. Their pin is carried from the journal.
+    const installed = (images) => t.role === 'validator' ? images : { core: images?.core };
+    need(actual && hash(installed(actual.images)) === hash(installed(from[t.name])), `installed images differ from dashnet journal on ${t.name}`);
+    const scopedMarker = /^[a-f0-9]{64}$/.test(actual.previousId || '') && actual.markerEvidence?.phase === 'applied' && hash(installed(actual.markerEvidence.images)) === hash(installed(actual.images));
     need(scopedMarker || actual.previousId === (original.runtime?.upgradeId || '') || (t.role !== 'validator' && !actual.previousId), `native upgrade marker differs on ${t.name}`);
     need(desired[t.name].core === from[t.name].core, 'reset attempted to change Core');
     baseline[t.name] = actual.preservation;
