@@ -841,6 +841,11 @@ test('the public Webhooks answer cannot be used to find hook names by guessing',
     for (const name of ['agent-directory', 'agent-directory', 'nothing-here']) assert.equal((await probe(name)).status, 401);
     now += 20_000; // past the few seconds the public answer is kept
     assert.deepEqual(await look(), before, 'refusals of a real name move nothing a stranger can read');
+    // A real delivery is seen at once, not when the kept answer runs out.
+    const body = '{"action":"opened"}';
+    assert.equal((await fetch(`${w.base}/api/hooks/agent-directory`, { method: 'POST', body, headers: { 'x-github-event': 'pull_request', 'x-github-delivery': 'x',
+      'x-hub-signature-256': `sha256=${createHmac('sha256', 'fixture-hook-secret-0123456789').update(body).digest('hex')}` } })).status, 202);
+    assert.equal((await look()).summary.woke, 1);
     // They did happen, and an account with access sees them.
     await w.login();
     const full = await (await w.req('/api/hooks')).json();

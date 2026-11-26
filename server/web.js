@@ -59,6 +59,10 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   // A wake refreshes the Webhooks page of whoever has it open. The event says
   // only that something changed: which hook is not for everyone.
   const hooks = createHooks({ dir: hooksDir, dataDir, clock, ...(hookWaitMs ? { waitMs: hookWaitMs } : {}), onChange: () => {
+    // The public answer is kept for a few seconds; a page that reloads for this
+    // wake must not be given the answer from before it. Only a wake gets here,
+    // and a wake needs the hook's secret, so this tells a stranger nothing.
+    cached.delete('hooks-public');
     clearTimeout(debounce.get('hooks'));
     debounce.set('hooks', setTimeout(() => push('hooks', { at: new Date(clock()).toISOString() }), 300));
   } });
