@@ -189,6 +189,7 @@ export default function Remediation() {
       {data.stale && <p className="mt-2 lv-warn">Monitoring is stale or unavailable: this is the last list it produced, and nothing is opened, closed or announced until it reports again.</p>}
       {data.public && <p className="mt-2 text-dim">Public view: counts by network and area. Hosts, reasons and reports are for signed-in administrators.</p>}
     </div>
+    {!!data.maintenance?.length && <div className="panel mt-3 p-3 text-[12px]" data-operation-maintenance><b>Operation maintenance</b> · {data.maintenance.map((m) => m.network).join(', ')}. Expected downtime stays visible; faults on these networks are held, not announced or repaired, until the operation ends and fresh monitoring arrives.</div>}
 
     {data.public ? <>
       <Section title="New" right={<span className="text-dim text-[12px]">{data.new.length}</span>}>{data.new.length ? <Groups groups={data.new} /> : <Empty>Nothing new.</Empty>}</Section>

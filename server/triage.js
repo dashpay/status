@@ -332,12 +332,15 @@ export function createTriage({ dataDir, clock = Date.now, hooks = null, hook = p
   // then the piles. `full` is an administrator or the worker, and looks afresh.
   // Everyone else gets the last look, and the same answer for a few seconds.
   // `dispatch` is asked only when an answer is made.
-  function view({ full = false, visibleNetworks = [], dispatch = () => 'off' } = {}) {
+  // `maintenance` gives the networks a console operation is running on (or has
+  // just finished on): their faults are held, and the page and the worker are
+  // told why.
+  function view({ full = false, visibleNetworks = [], dispatch = () => 'off', maintenance = () => ({}) } = {}) {
     const now = clock(), key = full ? null : [...visibleNetworks].sort().join('\n'), hit = full ? null : memo.get(key);
     if (hit && now - hit.at < PUBLIC_MS && now >= hit.at) return hit.value;
     const { generatedAt, entries, triage, sorted } = full || !snapshot ? refresh() : snapshot;
     const stale = !(generatedAt && now - Date.parse(generatedAt) <= FRESH_MS && Date.parse(generatedAt) <= now + 60_000);
-    const state = { generatedAt }, fixing = (typeof dispatch === 'function' ? dispatch() : dispatch) === 'on' ? 'on' : 'off';
+    const state = { generatedAt }, fixing = (typeof dispatch === 'function' ? dispatch() : dispatch) === 'on' ? 'on' : 'off', operations = maintenance();
     const visible = new Set(visibleNetworks);
     const seen = sorted.filter((s) => full || s.issue.domain !== 'network' || visible.has(s.issue.scope));
     const of = (pile) => seen.filter((s) => s.pile === pile);
@@ -358,6 +361,8 @@ export function createTriage({ dataDir, clock = Date.now, hooks = null, hook = p
       worker: full ? { hook, seenAt: workerSeenAt === null ? null : iso(workerSeenAt) } : undefined,
       // Incidents that could not be opened because too many are open already.
       unopened: full ? triage.unopened || 0 : undefined,
+      maintenance: Object.entries(object(operations) ? operations : {}).filter(([name, v]) => v?.active === true && (full || visible.has(name)))
+        .map(([network, v]) => ({ network, ...(full ? { operations: Array.isArray(v.operations) ? v.operations : [] } : {}) })),
       counts: { new: full ? count('new') + count('worse') : listing(of('new'), false).length, working: count('working'), fixed: count('fixed'), needsYou: count('needs_you'), noted: count('noted'),
         known: of('known').length, expected: of('expected').length, held: of('held').length, review: of('review').length, faults: seen.length },
       incidents, ...(full ? {} : { new: listing(of('new'), false) }),

@@ -605,7 +605,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     // Without an account the answer is the last look, kept for a few seconds:
     // such a request sorts nothing, writes nothing and wakes nobody.
     res.set('Cache-Control', 'private, no-store').vary('Cookie').json(triage.view({ full, visibleNetworks: visible(req).map((n) => n.name),
-      dispatch: () => againstReceiver(loadControl(dataDir), acknowledged()).dispatch }));
+      dispatch: () => againstReceiver(loadControl(dataDir), acknowledged()).dispatch, maintenance: () => operationMaintenance(dataDir, settings, clock()) }));
   });
   app.post('/api/remediation/known', triageActor, (req, res) => triaged(res, () => ({ entry: triage.file(req.body, req.actor, { worker: !!req.worker }) }), 201));
   app.patch('/api/remediation/known/:id', triageActor, (req, res) => triaged(res, () => ({ entry: triage.attach(req.params.id, req.body, req.actor, { worker: !!req.worker }) })));

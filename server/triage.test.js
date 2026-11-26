@@ -316,10 +316,18 @@ test('without an account: counts by network and area, and no host, repository, r
     assert.deepEqual(open.knownOpen.map((g) => [g.title, g.count]), [['CI', 1]]);
     assert.equal(/devnet-private|host-9|insight|grovedb|platform|flaky|latte|runner-a/.test(JSON.stringify(open)), false);
     assert.equal(open.worker, undefined);
+    // A running operation is named for whoever may see its network, with its details for administrators only.
+    const operations = () => ({ 'devnet-humid': { active: true, operations: [{ id: 'op-1', action: 'upgrade', status: 'running' }] }, 'devnet-private': { active: true, operations: [] }, testnet: { active: false } });
+    f.tick(6000);
+    assert.deepEqual(triage.view({ full: false, visibleNetworks: ['devnet-humid'], maintenance: operations }).maintenance, [{ network: 'devnet-humid' }]);
+    assert.deepEqual(triage.view({ full: true, maintenance: operations }).maintenance.map((m) => [m.network, m.operations.length]), [['devnet-humid', 1], ['devnet-private', 0]]);
+    f.tick(6000);
+    const open2 = triage.view({ full: false, visibleNetworks: ['devnet-humid'] });
+    assert.deepEqual(open2.maintenance, []);
     // The same answer for a few seconds, without another look; a change ends that at once.
     const looks = f.logged.length;
-    assert.equal(triage.view({ full: false, visibleNetworks: ['devnet-humid'] }), open);
-    assert.notEqual(triage.view({ full: false, visibleNetworks: [] }), open);
+    assert.equal(triage.view({ full: false, visibleNetworks: ['devnet-humid'] }), open2);
+    assert.notEqual(triage.view({ full: false, visibleNetworks: [] }), open2);
     assert.deepEqual(triage.view({ full: false, visibleNetworks: [] }).new.map((g) => g.title), ['CI']);
     assert.equal(f.logged.length, looks);
     f.tick(1000); f.state([a]);
