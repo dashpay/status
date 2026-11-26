@@ -389,11 +389,14 @@ api -X POST https://status.testnet.networks.dash.org/api/ops/$id/confirm -d "{\"
 ### Wake hooks
 
 The machines that run our automation cannot be reached from outside, so GitHub
-cannot deliver a webhook to them. The console takes the delivery instead
-(`POST /api/hooks/<name>`, signed) and wakes a listener that holds a request
-open from its own side (`GET /api/hooks/<name>/wait`). A wake carries no data:
-the delivery is checked for its signature and never parsed or passed on, and the
-listener then looks for itself. Hooks are files on the status host, not settings;
+and the forum cannot deliver a webhook to them. The console takes the delivery
+instead (`POST /api/hooks/<name>`; GitHub signs it, XenForo presents the hook's
+secret) and wakes a listener that holds a request open from its own side
+(`GET /api/hooks/<name>/wait`). A wake carries no data: nothing of a delivery is
+stored or passed on, and the listener then looks for itself. A hook may name a
+field of the payload that decides whether a delivery wakes anyone (`match`), so
+that a repository's `workflow_job` deliveries wake only for the jobs that are
+ours. Hooks are files on the status host, not settings;
 adding one, the protocol and its limits are in
 [deploy/WAKE-HOOKS.md](deploy/WAKE-HOOKS.md). Without `/etc/dash-status/hooks`
 both routes answer as if no hook existed.

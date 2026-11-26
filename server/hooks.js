@@ -3,10 +3,17 @@
 // not. A sender (GitHub) posts to /api/hooks/<name>; a listener holds a request
 // to /api/hooks/<name>/wait open from its side and is answered when one arrives.
 //
-// A wake carries no instruction and no data: the payload is read only to check
-// its signature and is never parsed, stored or forwarded. A listener learns that
-// something happened, and looks for itself. So the worst a forged, replayed or
-// spurious delivery can do is one extra look.
+// A wake carries no instruction and no data: nothing of a delivery is stored or
+// forwarded. A listener learns that something happened, and looks for itself.
+// So the worst a forged, replayed or spurious delivery can do is one extra look.
+// The payload is read to check its signature. It is parsed only for a hook that
+// has `match` rules, only after the sender is authenticated, and only to decide
+// whether this delivery wakes anyone.
+//
+// Two kinds of sender. GitHub signs the body (HMAC-SHA256, X-Hub-Signature-256).
+// XenForo cannot sign: it sends the configured secret itself in XF-Webhook-Secret
+// on every delivery, so that secret is only as private as the TLS connection and
+// XenForo's own database. Good enough for a wake; it would not be for a command.
 //
 // Not the incident pipeline: nothing here is queued, retried or acted on.
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -15,8 +22,15 @@ import { join } from 'node:path';
 import { readJSON, writeAtomic } from '../shared/settings.js';
 
 export const HOOK_NAME = /^[a-z][a-z0-9-]{0,39}$/;
-const EVENT = /^[a-z_]{1,40}$/;
+// GitHub: "pull_request". XenForo: content type and action, "user.insert".
+const EVENT = /^[a-z][a-z0-9_]{0,39}(?:\.[a-z][a-z0-9_]{0,39})?$/;
+// A field longer than this, or the elements of a list past this many, are not
+// tested: a rule matches short names and labels, and what it is tested against
+// was written by outsiders.
+const MATCH_VALUE = 256, MATCH_LIST = 200;
 const DELIVERY = /^[A-Za-z0-9-]{1,64}$/;
+const SOURCES = ['github', 'xenforo'];
+const MATCH_PATH = /^[A-Za-z0-9_]{1,60}(?:\.[A-Za-z0-9_]{1,60}){0,5}$/;
 const SIGNATURE = /^sha256=[a-f0-9]{64}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
 // nginx on the status host caps a request body at 1 MB already; this is the
@@ -36,23 +50,58 @@ const sha256 = (text) => createHash('sha256').update(text).digest();
 
 // hooks.json in `dir`:
 //   { "schemaVersion": 1, "hooks": { "<name>": {
-//       "source": "github",
+//       "source": "github",                             // or "xenforo"
 //       "events": ["pull_request", "push"],            // optional: every event wakes when absent
+//       "match": [ { "path": "workflow_job.labels",    // optional: wake only when a rule matches
+//                    "pattern": "^release-",
+//                    "event": "workflow_job" } ],       //   a rule's own event is optional
 //       "listeners": { "<listener id>": "<sha256 of its token, hex>" } } } }
-// and beside it <name>.secret, the secret the sender signs with. Listener tokens
-// are stored as digests: this host can check one and cannot use one.
+// and beside it <name>.secret, the sender's secret. Listener tokens are stored
+// as digests: this host can check one and cannot use one.
+//
+// A `match` rule names one field of the JSON payload by a dotted path and a
+// regular expression. It matches when the field is a string or number that the
+// expression matches, or a list with such an element. Any one rule is enough.
 export function parseHooks(doc) {
   if (doc?.schemaVersion !== 1 || !doc.hooks || typeof doc.hooks !== 'object' || Array.isArray(doc.hooks)) throw new Error('hooks.json: schemaVersion 1 and a hooks object are required');
   const out = new Map();
   for (const [name, h] of Object.entries(doc.hooks)) {
     if (!HOOK_NAME.test(name)) throw new Error(`hooks.json: invalid hook name ${JSON.stringify(name).slice(0, 60)}`);
-    if (h?.source !== 'github') throw new Error(`hooks.json: ${name}: source must be "github"`);
-    if (h.events !== undefined && (!Array.isArray(h.events) || !h.events.length || !h.events.every((e) => typeof e === 'string' && EVENT.test(e)))) throw new Error(`hooks.json: ${name}: events must be a list of event names`);
+    if (!SOURCES.includes(h?.source)) throw new Error(`hooks.json: ${name}: source must be one of ${SOURCES.join(', ')}`);
+    // A misspelt key would be a rule or a filter that silently does not apply.
+    const unknown = (object, known) => Object.keys(object).find((key) => !known.includes(key));
+    if (unknown(h, ['source', 'events', 'match', 'listeners'])) throw new Error(`hooks.json: ${name}: unknown key ${JSON.stringify(unknown(h, ['source', 'events', 'match', 'listeners'])).slice(0, 60)}`);
+    // GitHub names an event in one word; XenForo's are content type and action.
+    const event = (e) => typeof e === 'string' && EVENT.test(e) && e.includes('.') === (h.source === 'xenforo');
+    if (h.events !== undefined && (!Array.isArray(h.events) || !h.events.length || !h.events.every(event))) throw new Error(`hooks.json: ${name}: events must be a list of this sender's event names`);
+    if (h.match !== undefined && (!Array.isArray(h.match) || !h.match.length || h.match.length > 16)) throw new Error(`hooks.json: ${name}: match must be a list of one to sixteen rules`);
+    const match = h.match?.map((rule) => {
+      if (!rule || typeof rule !== 'object' || Array.isArray(rule) || unknown(rule, ['path', 'pattern', 'event'])
+          || typeof rule.path !== 'string' || !MATCH_PATH.test(rule.path) || typeof rule.pattern !== 'string' || !rule.pattern || rule.pattern.length > 200
+          || (rule.event !== undefined && (!event(rule.event) || (h.events && !h.events.includes(rule.event))))) throw new Error(`hooks.json: ${name}: a match rule is a dotted path, a pattern and optionally one of the hook's events`);
+      try { return { path: rule.path.split('.'), pattern: new RegExp(rule.pattern), event: rule.event ?? null }; }
+      catch { throw new Error(`hooks.json: ${name}: the pattern for ${rule.path} is not a regular expression`); }
+    }) ?? null;
     const listeners = h.listeners && typeof h.listeners === 'object' && !Array.isArray(h.listeners) ? Object.entries(h.listeners) : null;
     if (!listeners || !listeners.every(([id, digest]) => HOOK_NAME.test(id) && typeof digest === 'string' && DIGEST.test(digest))) throw new Error(`hooks.json: ${name}: listeners must map an id to the sha256 of its token`);
-    out.set(name, { events: h.events ? new Set(h.events) : null, listeners: listeners.map(([id, digest]) => ({ id, digest: Buffer.from(digest, 'hex') })) });
+    out.set(name, { source: h.source, events: h.events ? new Set(h.events) : null, match, listeners: listeners.map(([id, digest]) => ({ id, digest: Buffer.from(digest, 'hex') })) });
   }
   return out;
+}
+
+// Does any rule of the hook match this payload? Own properties only, so a path
+// cannot reach into prototypes.
+export function matches(rules, event, payload) {
+  return rules.some((rule) => {
+    if (rule.event && rule.event !== event) return false;
+    let value = payload;
+    for (const key of rule.path) {
+      if (!value || typeof value !== 'object' || Array.isArray(value) || !Object.hasOwn(value, key)) return false;
+      value = value[key];
+    }
+    // A value that is too long is no match; cutting it could make it one.
+    return (Array.isArray(value) ? value.slice(0, MATCH_LIST) : [value]).some((v) => (typeof v === 'string' || typeof v === 'number') && String(v).length <= MATCH_VALUE && rule.pattern.test(String(v)));
+  });
 }
 
 export function createHooks({ dir = process.env.WAKE_HOOKS_DIR, dataDir, clock = Date.now, waitMs = WAIT_MS, log = (entry) => console.info(JSON.stringify(entry)) } = {}) {
@@ -76,7 +125,8 @@ export function createHooks({ dir = process.env.WAKE_HOOKS_DIR, dataDir, clock =
     return hooks;
   };
   const secretOf = (name) => {
-    try { const s = readFileSync(join(dir, `${name}.secret`), 'utf8').trim(); return s.length >= 16 ? s : null; } catch { return null; }
+    // 16 to 200 printable ASCII characters: what a header can carry unchanged.
+    try { const s = readFileSync(join(dir, `${name}.secret`), 'utf8').trim(); return /^[\x21-\x7e]{16,200}$/.test(s) ? s : null; } catch { return null; }
   };
 
   // seq counts wakes. It is kept on disk so that a listener that was away over
@@ -99,7 +149,7 @@ export function createHooks({ dir = process.env.WAKE_HOOKS_DIR, dataDir, clock =
     catch (e) { log({ event: 'hook-state-not-saved', hook: name, error: String(e.message).slice(0, 200), at: state.at }); }
     const waiting = [...(waiters.get(name) || [])];
     for (const w of waiting) w.done();
-    log({ event: 'hook-wake', hook: name, source: event, delivery, seq: state.seq, listenersWaiting: waiting.length, at: state.at });
+    log({ event: 'hook-wake', hook: name, on: event, delivery, seq: state.seq, listenersWaiting: waiting.length, at: state.at });
     return state;
   };
 
@@ -113,32 +163,47 @@ export function createHooks({ dir = process.env.WAKE_HOOKS_DIR, dataDir, clock =
     log({ event, hook: name, at: iso() });
   };
 
-  // A delivery. `body` is the request stream: it is hashed as it arrives and
-  // never held. Everything is decided from the headers and the signature.
-  // A name that is not a hook is taken through the same steps as one that is
-  // and gets the answer of a wrong signature.
-  async function receive(name, { signature, event, delivery, length } = {}, body) {
-    if (!SIGNATURE.test(signature || '')) return reply(401, { error: 'Invalid signature' });
-    if (/^\d+$/.test(length || '') && Number(length) > MAX_BODY) return reply(413, { error: 'Delivery too large' });
+  // A delivery. `headers` are the request's, lower-cased as Node gives them;
+  // `body` is the request stream, hashed as it arrives and held only for a hook
+  // with `match` rules. A name that is not a hook is taken through the same
+  // steps as one that is and gets the answer of a wrong signature.
+  async function receive(name, headers, body) {
+    const header = (key) => (typeof headers?.[key] === 'string' ? headers[key] : '');
+    // What the caller presents: GitHub's signature of the body, or XenForo's secret itself.
+    const signature = SIGNATURE.test(header('x-hub-signature-256')) ? header('x-hub-signature-256') : null;
+    const shown = header('xf-webhook-secret').length >= 16 && header('xf-webhook-secret').length <= 200 ? header('xf-webhook-secret') : null;
+    if (!signature && !shown) return reply(401, { error: 'Invalid signature' });
+    if (/^\d+$/.test(header('content-length')) && Number(header('content-length')) > MAX_BODY) return reply(413, { error: 'Delivery too large' });
     const hook = HOOK_NAME.test(name || '') ? configured().get(name) : null;
     const secret = hook ? secretOf(name) : null;
     if (hook && !secret) note(name, 'hook-secret-missing');
-    const mac = createHmac('sha256', secret || NO_SECRET);
+    const mac = createHmac('sha256', secret || NO_SECRET), kept = hook?.match ? [] : null;
     let size = 0;
-    try { for await (const chunk of body) { size += chunk.length; if (size <= MAX_BODY) mac.update(chunk); } }
+    try { for await (const chunk of body) { size += chunk.length; if (size <= MAX_BODY) { mac.update(chunk); kept?.push(chunk); } } }
     catch { return reply(400, { error: 'Delivery was not read' }); }
     if (size > MAX_BODY) return reply(413, { error: 'Delivery too large' });
-    const signed = timingSafeEqual(Buffer.from(`sha256=${mac.digest('hex')}`), Buffer.from(signature));
-    if (!secret || !signed) {
+    // Both comparisons are made whatever kind the hook is, on values of fixed length.
+    const signed = timingSafeEqual(Buffer.from(`sha256=${mac.digest('hex')}`), Buffer.from(signature || `sha256=${'0'.repeat(64)}`));
+    const same = timingSafeEqual(sha256(shown || ''), sha256(secret || NO_SECRET));
+    if (!secret || !(hook.source === 'github' ? signature && signed : shown && same)) {
       if (secret) note(name, 'hook-signature-rejected');
       return reply(401, { error: 'Invalid signature' });
     }
-    // From here on the caller holds the hook's secret. The two headers below are
-    // not covered by the signature: they sort deliveries, they prove nothing.
-    if (!EVENT.test(event || '') || !DELIVERY.test(delivery || '')) return reply(400, { error: 'Invalid delivery headers' });
+    // From here on the caller holds the hook's secret. The headers below are
+    // not covered by it: they sort deliveries, they prove nothing.
+    const github = hook.source === 'github';
+    const event = github ? header('x-github-event') : `${header('xf-content-type')}.${header('xf-webhook-event')}`;
+    // XenForo numbers its webhooks, not its deliveries.
+    const delivery = github ? header('x-github-delivery') : /^\d{1,10}$/.test(header('xf-webhook-id')) ? `xf-${header('xf-webhook-id')}` : '';
+    if (!EVENT.test(event) || !DELIVERY.test(delivery)) return reply(400, { error: 'Invalid delivery headers' });
     // GitHub's own test delivery when a webhook is created.
-    if (event === 'ping') return reply(200, { accepted: true, ping: true });
+    if (github && event === 'ping') return reply(200, { accepted: true, ping: true });
     if (hook.events && !hook.events.has(event)) return reply(202, { accepted: true, ignored: true });
+    if (hook.match) {
+      let payload;
+      try { payload = JSON.parse(Buffer.concat(kept).toString('utf8')); } catch { return reply(400, { error: 'Delivery is not JSON' }); }
+      if (!matches(hook.match, event, payload)) return reply(202, { accepted: true, ignored: true });
+    }
     return reply(202, { accepted: true, seq: wake(name, event, delivery).seq });
   }
 
@@ -178,8 +243,8 @@ export function createHooks({ dir = process.env.WAKE_HOOKS_DIR, dataDir, clock =
   }
 
   // For the operators' own view: what exists and when it last woke anyone.
-  const list = () => [...configured()].map(([name, hook]) => ({ name, events: hook.events ? [...hook.events].sort() : null,
-    listeners: hook.listeners.map((l) => l.id), listenersWaiting: waiters.get(name)?.size || 0, signed: !!secretOf(name), ...stateOf(name) }));
+  const list = () => [...configured()].map(([name, hook]) => ({ name, source: hook.source, events: hook.events ? [...hook.events].sort() : null, matchRules: hook.match?.length || 0,
+    listeners: hook.listeners.map((l) => l.id), listenersWaiting: waiters.get(name)?.size || 0, hasSecret: !!secretOf(name), ...stateOf(name) }));
   const close = () => { for (const set of waiters.values()) for (const w of [...set]) w.done(); };
 
   return { receive, wait, list, close };
