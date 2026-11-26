@@ -4,5 +4,8 @@ services:
   web:
     environment:
       WAKE_HOOKS_DIR: /hooks
+      # The triage worker's token, as a digest (deploy/TRIAGE.md). Same directory:
+      # what web knows about the machines that call it.
+      TRIAGE_WORKERS_FILE: /hooks/triage-workers.json
     volumes:
       - /etc/dash-status/hooks:/hooks:ro

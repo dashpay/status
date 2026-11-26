@@ -16,6 +16,7 @@ import { loadIncidentState, publicIssues, apiAuthorized, readSecret, validIgnore
 import { remediationView } from './remediation.js';
 import { receiveRelease } from './release-webhook.js';
 import { createHooks } from './hooks.js';
+import { createTriage } from './triage.js';
 import { againstReceiver, loadControl, requestClear, setDispatch } from './remediation-control.js';
 import { clearActivity, loadActivity } from './remediation-activity.js';
 import { publicInventory } from './aws-public.js';
@@ -47,7 +48,8 @@ export function ttlCache(clock, ttl = 15_000) {
   return Object.assign(cached, { delete: (key) => entries.delete(key), size: () => entries.size });
 }
 
-export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, clock = Date.now, ciGithub = null, ciQueue = {}, mainnetReportToken = process.env.MAINNET_REPORT_TOKEN, keyReader = requestDevnetKeys, keySocket = process.env.DEVNET_KEYS_SOCKET, hooksDir = process.env.WAKE_HOOKS_DIR, hookWaitMs } = {}) {
+export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, clock = Date.now, ciGithub = null, ciQueue = {}, mainnetReportToken = process.env.MAINNET_REPORT_TOKEN, keyReader = requestDevnetKeys, keySocket = process.env.DEVNET_KEYS_SOCKET, hooksDir = process.env.WAKE_HOOKS_DIR, hookWaitMs,
+  triageWorkersFile = process.env.TRIAGE_WORKERS_FILE, triageHook = process.env.TRIAGE_HOOK || 'remediation' } = {}) {
   const settingsPath = join(dataDir, 'settings.json');
   const dirs = { state: join(dataDir, 'state'), requests: join(dataDir, 'requests'), ops: join(dataDir, 'ops') };
   for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
@@ -65,6 +67,12 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     cached.delete('hooks-public');
     clearTimeout(debounce.get('hooks'));
     debounce.set('hooks', setTimeout(() => push('hooks', { at: new Date(clock()).toISOString() }), 300));
+  } });
+  // Triage of what monitoring reports (server/triage.js). A new incident wakes
+  // the worker through a console hook; a change refreshes the page.
+  const triage = createTriage({ dataDir, clock, hooks, hook: triageHook, workersFile: triageWorkersFile, onChange: () => {
+    clearTimeout(debounce.get('triage'));
+    debounce.set('triage', setTimeout(() => push('remediation', { at: new Date(clock()).toISOString() }), 300));
   } });
   const clients = new Set();
   const cache = new Map();
@@ -315,8 +323,11 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   const onIncidentFile = (file) => {
     if (file !== 'state.json') return;
     clearTimeout(debounce.get('remediation'));
-    debounce.set('remediation', setTimeout(() => push('remediation', { at: new Date(clock()).toISOString() }), 300));
+    debounce.set('remediation', setTimeout(() => { triageTick(); push('remediation', { at: new Date(clock()).toISOString() }); }, 300));
   };
+  // Monitoring wrote a new state: sort it, and wake the worker for what is new.
+  // Also on a timer (startWeb), because a file watch can miss a write.
+  const triageTick = () => { try { triage.refresh(); } catch (e) { console.error(JSON.stringify({ event: 'triage-refresh-failed', error: String(e.message).slice(0, 200), at: new Date(clock()).toISOString() })); } };
   for (const [dir, fn] of [[dirs.state, onStateFile], [dirs.ops, onOpFile], [awsDir, onAwsFile], [incidentsDir, onIncidentFile]]) {
     try { watchers.push(watch(dir, (_, f) => f && !f.endsWith('.tmp') && fn(f))); } catch { /* directory created by the agent later */ }
   }
@@ -570,6 +581,34 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     res.json({ activityHistory });
   });
 
+  // Triage (server/triage.js): incidents, what is known, and what the worker
+  // did. Hosts, branches, reasons and reports are for administrators and the
+  // triage worker; everyone else gets counts by network and area. Writes come
+  // from a signed-in administrator or from the worker, which presents a token
+  // of its own (TRIAGE_WORKERS_FILE) and is no account: it reaches these
+  // routes and nothing else. Only an administrator removes a known entry, so
+  // the worker can file a thing away and cannot quietly bring it back.
+  const triageActor = (req, res, next) => {
+    const worker = triage.workerOf(req.get('authorization'));
+    if (worker) { req.actor = worker; return next(); }
+    signedIn(req, res, () => auth.csrf(req, res, () => {
+      if (!isAdmin(req)) return res.status(403).json({ error: 'Only admins and the triage worker change triage' });
+      req.actor = req.session.user.login;
+      next();
+    }));
+  };
+  const triaged = (res, fn, status = 200) => { try { res.status(status).json(fn()); } catch (e) { res.status(e.status || 400).json({ error: e.message }); } };
+  app.get('/api/remediation/triage', (req, res) => {
+    reloadSettings();
+    const full = isAdmin(req) || !!triage.workerOf(req.get('authorization'));
+    res.set('Cache-Control', 'private, no-store').vary('Cookie').json(triage.view({ full, visibleNetworks: visible(req).map((n) => n.name),
+      dispatch: againstReceiver(loadControl(dataDir), acknowledged()).dispatch }));
+  });
+  app.post('/api/remediation/known', triageActor, (req, res) => triaged(res, () => ({ entry: triage.file(req.body, req.actor) }), 201));
+  app.patch('/api/remediation/known/:id', triageActor, (req, res) => triaged(res, () => ({ entry: triage.attach(req.params.id, req.body, req.actor) })));
+  app.delete('/api/remediation/known/:id', ...adminWrite, (req, res) => triaged(res, () => { triage.remove(req.params.id, req.session.user.login); return { removed: req.params.id }; }));
+  app.put('/api/remediation/incidents/:id', triageActor, (req, res) => triaged(res, () => ({ ledger: triage.report(req.params.id, req.body, req.actor) })));
+
   // Infrastructure pages: full detail for any account with access; otherwise a
   // sanitized view (statistics, nothing identifying). Spend is never shown
   // before sign-in.
@@ -654,6 +693,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   app.use((error, req, res, next) => { if (res.headersSent) return next(error); res.status([400, 413].includes(error.status) ? error.status : 500).json({ error: error.status === 413 ? 'Request body too large' : 'Request could not be processed' }); });
   app.close = () => { for (const w of watchers) w.close(); for (const c of clients) c.res.end(); hooks.close(); orgQueue.flush(); };
   app.ci = ci;
+  app.triageTick = triageTick;
   app.tickQueue = () => orgQueue.tick().then(pushQueue);
   return app;
 }
@@ -677,7 +717,7 @@ export function startWeb() {
   // every repository) lets the sweep check private repositories as well.
   const ciQueue = { org: process.env.CI_QUEUE_ORG || 'dashpay', secret: process.env.CI_WEBHOOK_SECRET || null, token: process.env.CI_QUEUE_GITHUB_TOKEN || null };
   const app = createWeb({ dataDir, origin, ciGithub: id && secret ? { id, secret } : null, ciQueue, mainnetReportToken: process.env.MAINNET_REPORT_TOKEN });
-  const ciTimer = setInterval(() => { app.ci.tick(); app.tickQueue(); }, 60_000);
+  const ciTimer = setInterval(() => { app.ci.tick(); app.tickQueue(); app.triageTick(); }, 60_000);
   ciTimer.unref();
   const server = app.listen(Number(process.env.PORT) || 3001, process.env.BIND_ADDRESS || '127.0.0.1', () => console.log(`dash-status web on ${process.env.PORT || 3001}`));
   for (const s of ['SIGTERM', 'SIGINT']) process.on(s, () => { app.close(); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 3000).unref(); });

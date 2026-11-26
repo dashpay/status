@@ -43,7 +43,7 @@ const gib = (bytes) => (typeof bytes === 'number' && Number.isFinite(bytes) ? `$
 const percent = (v) => (typeof v === 'number' && Number.isFinite(v) ? `${v.toFixed(1)}%` : null);
 // What is wrong, in one line, from the recorded evidence. Administrators only:
 // evidence names hosts, branches and resources. Evidence is data, never markup.
-function describe(issue) {
+export function describe(issue) {
   const e = issue.evidence && typeof issue.evidence === 'object' ? issue.evidence : {};
   const join = (parts) => text(parts.filter((p) => typeof p === 'string' && p).join(' · '), 600) || null;
   const link = (url) => (typeof url === 'string' && GITHUB.test(url) ? url : null);

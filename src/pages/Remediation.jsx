@@ -1,223 +1,221 @@
 import { useEffect, useState } from 'react';
 import { ago, api, clock, useNow, useResource, useSession } from '../lib.js';
-import { Dot, Empty, Err, Section } from '../ui.jsx';
+import { Dot, Empty, Err, Section, Stat } from '../ui.jsx';
 
-const STAGES = { open: ['Open', 'lv-warn'], maintenance: ['Maintenance', 'text-dim'], working: ['Working', 'lv-deploying'], queued: ['Queued', 'text-dim'], blocked: ['Blocked', 'lv-warn'],
-  verifying: ['Verifying', 'lv-warn'], followup: ['Recovered · follow-up', 'text-dim'], fixed: ['Verified fixed', 'lv-ok'], recovered: ['Recovered', 'lv-ok'], closed: ['Closed', 'text-dim'],
-  classified: ['Monitoring corrected', 'text-dim'], review: ['Review only', 'text-dim'], unknown: ['Awaiting status', 'text-dim'] };
+// Triage (server/triage.js): what monitoring reports, sorted by whether anybody
+// needs to hear about it. New incidents wake the triage worker; what somebody
+// filed as known, and what follows from it, stays out of the way.
+const STATE = { new: ['New', 'lv-warn'], worse: ['Got worse', 'lv-down'], working: ['Being fixed', 'lv-deploying'], fixed: ['Fixed · checking', 'lv-ok'],
+  needs_you: ['Needs you', 'lv-down'], noted: ['Looked at', 'text-dim'], ended: ['Ended', 'text-dim'] };
 const SEVERITY = { critical: ['down', 'critical'], warning: ['warn', 'warning'], info: ['info', 'informational'] };
-// Views over the same list: what is wrong now comes first, history on request.
-const VIEWS = { faults: 'Open faults', critical: 'Critical', warning: 'Warning', info: 'Review only', held: 'Held for maintenance', history: 'Recovered or closed', all: 'Everything' };
-const inView = (c, view) => view === 'all' ? true
-  : view === 'history' ? c.monitoring === 'resolved'
-    : view === 'faults' ? c.monitoring !== 'resolved'
-      : view === 'held' ? c.stage === 'maintenance'
-        : Object.hasOwn(SEVERITY, view) ? c.monitoring !== 'resolved' && c.severity === view
-          : c.stage === view;
-
-export default function Remediation() {
-  const session = useSession();
-  const resource = useResource(`/api/remediation?view=${session.admin ? 'admin' : 'public'}`, (type) => type === 'remediation');
-  const { data, error, reload } = resource;
-  const now = useNow(1000);
-  const [filter, setFilter] = useState('faults');
-  const [search, setSearch] = useState('');
-  useEffect(() => { const timer = setInterval(reload, 15_000); return () => clearInterval(timer); }, [reload]);
-  const cases = (data?.cases || []).filter((c) => inView(c, filter)
-    && [c.title, c.target, c.scope, c.network, c.domain, c.detail, c.summary, c.blocker].filter(Boolean).join(' ').toLowerCase().includes(search.toLowerCase()));
-  // A response kept on screen ages too: monitoring always, the worker only when
-  // one is expected (with repair switched off and no worker, none is).
-  const old = (at) => !!at && now - Date.parse(at) > 180_000;
-  const stale = data?.stale || old(data?.generatedAt) || (!data?.idle && old(data?.workerAt));
-  const f = data?.faults;
-  return <div className="pt-5">
-    <div className="flex items-start justify-between gap-3 flex-wrap">
-      <div><h1 className="text-xl font-semibold">Faults and remediation</h1>
-        <p className="text-dim text-[12px] mt-1">Network, CI and AWS · what monitoring reports now, and what automatic repair is doing about it</p></div>
-      <button className="btn" onClick={reload}>Refresh</button>
-    </div>
-    <div className="mt-4"><Err error={error} /></div>
-    {!data ? <Empty>Loading remediation status…</Empty> : <>
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 mt-3" data-fault-summary>
-        {[['faults', 'Open faults', f.open, f.critical ? 'lv-down' : f.warning ? 'lv-warn' : f.open ? '' : 'lv-ok'], ['critical', 'Critical', f.critical, f.critical ? 'lv-down' : 'text-dim'],
-          ['warning', 'Warning', f.warning, f.warning ? 'lv-warn' : 'text-dim'], ['info', 'Review only', f.info, 'text-dim'],
-          ['held', 'Held', f.held, 'text-dim'], ['history', `Ended · ${data.history.hours} h`, f.recovered + f.closed, 'text-dim']].map(([view, label, value, color]) => <button key={view} onClick={() => setFilter(view)}
-          className={`panel text-left px-3 py-2 ${filter === view ? 'ring-1 ring-[#58a6ff]' : ''}`} aria-pressed={filter === view}>
-          <span className="label">{label}</span><span className={`block mono text-2xl mt-1 ${color}`}>{value}</span>
-        </button>)}
-      </div>
-      <p className="text-dim text-[11px] mt-2">
-        {['network', 'ci', 'aws', 'maintenance'].filter((d) => f.domains[d]).map((d) => `${d === 'ci' ? 'CI' : d === 'aws' ? 'AWS' : d === 'maintenance' ? 'Release tasks' : 'Networks'} ${f.domains[d]}`).join(' · ') || 'No open faults'}
-        {' · '}<span title={clock(data.generatedAt)}>monitoring updated {ago(data.generatedAt, now)} ago</span>
-      </p>
-      {data.idle ? <div className={`panel mt-3 px-3 py-3 text-[12px] ${stale ? 'border-warn/50' : ''}`} role="status">
-        <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
-          <span className="font-semibold">{stale ? 'Monitoring is stale or unavailable' : 'Automatic repair is switched off'}</span>
-          <span className="text-dim">Faults are listed as monitoring reports them. Nothing is queued or repaired automatically.</span>
-        </div>
-        {stale && <p className="mt-2 lv-warn">The fault list is the last one monitoring produced, not the current state.</p>}
-        {data.control?.lastKnown === 'on' && <p className="mt-2 text-dim">The repair worker has not confirmed the switch-off: it last reported {ago(data.workerAt, now)} ago, with dispatch on, and has been unreachable since.</p>}
-        {data.public && <p className="mt-2 text-dim">Public view · target names and details are available to signed-in administrators.</p>}
-      </div> : <div className={`panel mt-3 px-3 py-3 text-[12px] ${stale || data.execution === 'stalled' ? 'border-warn/50' : ''}`} role="status">
-        <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
-          <span className={`font-semibold ${stale || data.execution === 'stalled' ? 'lv-warn' : data.dispatch === 'enabled' ? 'lv-ok' : 'lv-warn'}`}>
-            {stale ? 'Remediation status is stale or unavailable' : data.execution === 'stalled' ? 'Repair progress needs attention' : data.dispatch === 'enabled' ? 'Autonomous dispatch enabled'
-              : data.control?.applied === 'off' ? 'Autonomous dispatch switched off' : 'New dispatch paused'}
-          </span>
-          {data.maxActive != null && <span className="text-dim">Up to {data.maxActive} independent repair sessions</span>}
-          <span className="text-dim" title={clock(data.workerAt)}>Updated {ago(data.workerAt, now)} ago</span>
-          <span className={data.delivery.failed ? 'lv-warn' : 'text-dim'}>{data.delivery.failed ? 'Alert delivery needs attention' : `Last alert delivery ${ago(data.delivery.lastAckAt, now)} ago`}</span>
-        </div>
-        {stale && <p className="mt-2 text-dim">These are last-known observations, not proof of current activity or recovery. The page will reconnect automatically.</p>}
-        {!stale && data.execution === 'stalled' && <p className="mt-2 lv-warn">{data.stalledRuns} repair {data.stalledRuns === 1 ? 'session is' : 'sessions are'} holding capacity while completion is verified. Monitoring and alert delivery can remain healthy during a repair stall.</p>}
-        {data.public && <p className="mt-2 text-dim">Public view · target names and repair notes are available to signed-in administrators.</p>}
-        {data.truncated && <p className="mt-2 lv-warn">The worker history is truncated; some response details are unavailable.</p>}
-      </div>}
-      {session.admin && data.control && <Controls data={data} now={now} reload={reload} />}
-      {/* Reasons come from the incident producer, so they stay visible when the
-          worker's own status is stale: that is when they matter most. */}
-      {data.stalled && data.producerFresh && <div className="panel mt-3 p-3 text-[12px] border-warn/50" role="alert"><b className="lv-warn">Remediation cannot make progress</b>
-        {data.attention?.length ? <ul className="mt-1 text-dim">{data.attention.map((a, i) => <li key={i}>{a.detail}</li>)}</ul>
-          : <span className="text-dim"> · details are available to signed-in administrators.</span>}</div>}
-      {!!data.maintenance?.length && <div className="panel mt-3 p-3 text-[12px]"><b>Operation maintenance</b> · {data.maintenance.map((m) => m.network).join(', ')}. Expected downtime stays visible; automatic remediation is held for these networks until operations end and fresh monitoring arrives.</div>}
-      {!data.idle && <>
-        <div className="grid grid-cols-2 lg:grid-cols-6 gap-2 mt-3" data-repair-summary>
-          {['queued', 'working', 'blocked', 'followup', 'verifying', 'fixed'].map((stage) => <button key={stage} onClick={() => setFilter(stage)}
-            className={`panel text-left px-3 py-2 ${filter === stage ? 'ring-1 ring-[#58a6ff]' : ''}`} aria-pressed={filter === stage}>
-            <span className="label">{STAGES[stage][0]}</span><span className={`block mono text-2xl mt-1 ${STAGES[stage][1]}`}>{data.counts[stage]}</span>
-          </button>)}
-        </div>
-        <p className="text-dim text-[11px] mt-2">Counts are unique issues. {data.queuedEvents} queued events may include repeat updates. A completed investigation is not a verified fix.</p>
-      </>}
-      <Section title={VIEWS[filter] || STAGES[filter]?.[0] || 'Issues'} right={<span className="text-dim text-[12px]">{cases.length} shown</span>}>
-        {data.activityHistory?.clearedAt && <p className="text-dim text-[12px] mb-3">Activity cleared {ago(data.activityHistory.clearedAt, now)} ago · {data.activityHistory.hidden} older entries hidden. New events and queued or active repairs remain visible. Monitoring findings are unchanged.</p>}
-        <div className="flex flex-wrap gap-2 items-center mb-3">
-          <label className="sr-only" htmlFor="remediation-search">Filter remediation issues</label>
-          <input id="remediation-search" className="input flex-1 min-w-40" placeholder="Filter issues…" value={search} onChange={(e) => setSearch(e.target.value)} />
-          <label className="sr-only" htmlFor="remediation-state">Remediation state</label>
-          <select id="remediation-state" className="input" value={filter} onChange={(e) => setFilter(e.target.value)}>
-            {Object.entries(VIEWS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-            {Object.entries(STAGES).map(([key, [label]]) => <option key={key} value={key}>{label} ({data.counts[key]})</option>)}
-          </select>
-        </div>
-        {!cases.length ? <Empty>{data.cases.length ? (filter === 'faults' && !search ? 'No open faults.' : 'No issues match this filter.') : stale ? 'No remediation data has arrived yet.' : 'No issues in the current monitoring history.'}</Empty>
-          : <div className="space-y-2">{grouped(cases).map((entry) => entry.items
-            ? <Group key={`${entry.items[0].id}+`} entry={entry} now={now} />
-            : <Issue key={entry.id} item={entry} now={now} />)}</div>}
-      </Section>
-      <p className="text-dim text-[11px] mt-4">
-        Recovered means monitoring saw the fault end; Verified fixed also needs a completed repair. Closed means the case ended without a recovery: its target no longer exists, it aged out, or it was superseded.
-        {' '}Recovered and closed cases are listed for {data.history.hours} hours, newest first{data.history.unlisted ? ` · ${data.history.unlisted} more from that period are counted but not listed` : ''}{data.history.older ? ` · ${data.history.older} older ${data.history.older === 1 ? 'one is' : 'ones are'} not listed` : ''}.
-      </p>
-    </>}
-  </div>;
-}
-
-// The same job failing or waiting many times is one line that opens into its
-// cases. The list arrives sorted by stage, so a group never mixes stages.
-function grouped(cases) {
-  const out = [], groups = new Map();
-  for (const c of cases) {
-    const key = c.group ? `${c.stage}|${c.code}|${c.group}` : null;
-    if (!key) { out.push(c); continue; }
-    if (!groups.has(key)) { const entry = { items: [] }; groups.set(key, entry); out.push(entry); }
-    groups.get(key).items.push(c);
-  }
-  return out.map((entry) => (entry.items?.length === 1 ? entry.items[0] : entry));
-}
-
-// Administrator controls. A request is recorded at once and reaches the repair
-// worker on the next signed heartbeat, so it is shown as pending until then.
-function Controls({ data, now, reload }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
-  const c = data.control, on = c.requested === 'on';
-  const run = async (path, body, question) => {
-    if (!window.confirm(question)) return;
-    setBusy(true); setError(null);
-    try { await api(path, { method: 'POST', body }); reload(); } catch (e) { setError(e); } finally { setBusy(false); }
-  };
-  return <div className="panel mt-3 p-3 text-[12px]" data-remediation-controls>
-    <div className="flex flex-wrap items-center gap-3">
-      <span className="font-semibold">Repair dispatch: <span className={on ? 'lv-ok' : 'text-dim'}>{on ? 'switched on' : 'switched off'}</span></span>
-      <button className={`btn ${on ? 'btn-danger' : 'btn-primary'}`} disabled={busy || !c.supported}
-        onClick={() => run('/api/remediation/dispatch', { enabled: !on }, on
-          ? 'Switch autonomous repair off? Repairs already in progress continue; nothing new is started.'
-          : `Switch autonomous repair on? ${data.queuedEvents} queued event(s) become eligible for the repair agent.`)}>{on ? 'Switch off' : 'Switch on'}</button>
-      <button className="btn btn-danger" disabled={busy || !c.supported}
-        onClick={() => run('/api/remediation/clear', undefined, `Clear the repair queue? ${data.queuedEvents} queued event(s) are removed without being repaired. Repairs in progress and release compatibility tasks are not affected. Issues that are still open return on their next monitoring update.`)}>Clear queue</button>
-      <button className="btn" disabled={busy}
-        onClick={() => run('/api/remediation/activity/clear', undefined, 'Clear the displayed issue activity? Recovered and closed entries, and open ones monitoring no longer sees, are hidden without marking anything fixed. Faults monitoring still sees, queued work and active or held repairs remain visible; new events appear normally.')}>Clear activity</button>
-      <span className="text-dim">{!c.supported ? 'The repair worker has not announced these controls yet; they become available once it runs this release.'
-        : c.applied == null ? 'Worker acknowledgement is unavailable; the requested setting is not yet confirmed.'
-          : c.pending || c.applied !== c.requested ? 'Waiting for the repair worker to acknowledge (about a minute).' : 'Acknowledged by the repair worker.'}</span>
-    </div>
-    <Err error={error} />
-    {c.reset && <p className="mt-2 lv-warn">The saved switch setting was lost or was older than what the repair worker had applied, so dispatch was switched off. Switch it on again to resume.</p>}
-    {c.localEnabled === false && <p className="mt-2 lv-warn">Dispatch is also disabled on the worker host itself (its ENABLED file is absent). This switch cannot override that.</p>}
-    {(c.changedBy || c.lastClear || data.delivery.pending > 0) && <p className="mt-2 text-dim">
-      {c.changedBy && <span title={clock(c.changedAt)}>Switch last changed by {c.changedBy} {ago(c.changedAt, now)} ago. </span>}
-      {c.lastClear && <span title={clock(c.lastClear.at)}>Last clear removed {c.lastClear.count ?? 'an unknown number of'} event(s) {ago(c.lastClear.at, now)} ago{c.clearedBy ? ` (requested by ${c.clearedBy})` : ''}. </span>}
-      {data.delivery.pending > 0 && <span>{data.delivery.pending} event(s) wait for the repair worker{data.delivery.lastAckAt ? `; it last acknowledged ${ago(data.delivery.lastAckAt, now)} ago` : ''}.</span>}
-    </p>}
-  </div>;
-}
-
-function Group({ entry, now }) {
-  const first = entry.items[0], [label, color] = STAGES[first.stage];
-  const latest = entry.items.reduce((a, c) => ((c.observedAt || '') > a ? c.observedAt : a), '');
-  return <details className="panel group/set" data-issue-group={first.group}>
-    <summary className="cursor-pointer list-none p-3 flex flex-wrap items-start gap-3">
-      <span className={`tag shrink-0 ${color}`}>{label}</span>
-      <div className="min-w-0 flex-1 basis-52">
-        <div className="font-semibold break-words"><Severity level={first.severity} />{first.title} <span className="mono text-dim">× {entry.items.length}</span></div>
-        <div className="text-[12px] mt-1 break-words">{first.group}</div>
-      </div>
-      <div className="text-[11px] text-dim shrink-0 text-right">
-        <div title={clock(latest)}>Latest {ago(latest, now)} ago</div>
-        <div className="mt-2 group-open/set:hidden">Show {entry.items.length} ↓</div><div className="mt-2 hidden group-open/set:block">Hide ↑</div>
-      </div>
-    </summary>
-    <div className="border-t border-line p-2 space-y-2">{entry.items.map((item) => <Issue key={item.id} item={item} now={now} />)}</div>
-  </details>;
-}
+// Top to bottom: what needs a person, what is waiting for the worker, what it is doing.
+const ORDER = ['needs_you', 'worse', 'new', 'working', 'fixed', 'noted'];
 
 function Severity({ level }) {
   const [dot, title] = SEVERITY[level] || SEVERITY.info;
   return <Dot level={dot} title={title} className="mr-2 align-middle" />;
 }
 
-function Issue({ item, now }) {
-  const [label, color] = STAGES[item.stage];
-  return <details className="panel group" data-issue-id={item.id}>
+function Fault({ issue }) {
+  return <li className="break-words">
+    <Severity level={issue.severity} />{issue.title}
+    <span className="text-dim"> · {[issue.target, issue.scope !== issue.target ? issue.scope : null].filter(Boolean).join(' · ')}</span>
+    {issue.detail && <span> · {issue.detail}</span>}
+    {issue.link && <> · <a className="link" href={issue.link} target="_blank" rel="noreferrer noopener">run ↗</a></>}
+    {issue.outgrown && <span className="lv-warn"> · worse than when it was filed as known</span>}
+  </li>;
+}
+
+// "This is known" for one incident: a reason, and how much it takes with it.
+function FileKnown({ incident, known, reload }) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState('');
+  const [wide, setWide] = useState(false);
+  const [standing, setStanding] = useState(false);
+  const [under, setUnder] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const run = async (path, method, body) => {
+    setBusy(true); setError(null);
+    try { await api(path, { method, body }); setOpen(false); setReason(''); reload(); } catch (e) { setError(e); } finally { setBusy(false); }
+  };
+  if (!open) return <button className="btn" onClick={() => setOpen(true)} data-known-open>Known…</button>;
+  return <div className="bg-panel-2 border border-line rounded p-3 space-y-2" data-known-form>
+    <label className="label block" htmlFor={`reason-${incident.id}`}>Why is this known?</label>
+    <input id={`reason-${incident.id}`} className="input w-full" maxLength={500} placeholder="What it is and why nothing needs doing" value={reason} onChange={(e) => setReason(e.target.value)} />
+    <div className="flex flex-wrap gap-x-5 gap-y-1 text-[12px]">
+      {incident.canWiden && <label className="inline-flex items-center gap-1.5"><input type="checkbox" checked={wide} onChange={(e) => setWide(e.target.checked)} />and whatever else it causes on {incident.title}</label>}
+      <label className="inline-flex items-center gap-1.5" title="Otherwise the entry is dropped once nothing has matched it for a day, and the same fault is new again"><input type="checkbox" checked={standing} onChange={(e) => setStanding(e.target.checked)} />keep after it recovers</label>
+    </div>
+    <div className="flex flex-wrap gap-2 items-center">
+      <button className="btn btn-primary" disabled={busy || reason.trim().length < 3} onClick={() => run('/api/remediation/known', 'POST', { incident: incident.id, reason, wide, standing })}>File as known</button>
+      {!!known.length && <>
+        <span className="text-dim text-[12px]">or it follows from</span>
+        <select className="input" aria-label="Known entry this follows from" value={under} onChange={(e) => setUnder(e.target.value)}>
+          <option value="">choose…</option>
+          {known.map((k) => <option key={k.id} value={k.id}>{k.title}</option>)}
+        </select>
+        <button className="btn" disabled={busy || !under} onClick={() => run(`/api/remediation/known/${under}`, 'PATCH', { incident: incident.id, wide })}>Put under it</button>
+      </>}
+      <button className="btn" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
+    </div>
+    <Err error={error} />
+  </div>;
+}
+
+function Incident({ item, known, now, admin, reload }) {
+  const [label, color] = STATE[item.state] || STATE.new, l = item.ledger;
+  const faults = item.issues.length;
+  return <details className="panel group" data-incident={item.id}>
     <summary className="cursor-pointer list-none p-3 flex flex-wrap items-start gap-3">
       <span className={`tag shrink-0 ${color}`}>{label}</span>
       <div className="min-w-0 flex-1 basis-52">
-        <div className="font-semibold break-words"><Severity level={item.severity} />{item.title}</div>
-        <div className="text-[11px] text-dim mt-1 break-all">{[item.domain.toUpperCase(), item.target || item.network, item.scope !== item.network ? item.scope : null].filter(Boolean).join(' · ')}</div>
-        {item.detail && <p className="text-[12px] mt-1 break-words" data-issue-detail>{item.detail}</p>}
-        {item.reason && <p className="text-[12px] text-dim mt-1">{item.reason}</p>}
-        {item.summary && <p className="text-[12px] mt-2 break-words">{item.summary}</p>}
+        <div className="font-semibold break-words"><Severity level={item.severity} />{item.title} <span className="text-dim font-normal">· {item.kind}{faults !== 1 ? ` · ${faults} faults` : ''}</span></div>
+        {l?.summary ? <p className="text-[12px] mt-1 break-words">{l.summary}</p>
+          : <p className="text-[12px] text-dim mt-1 break-words">{item.issues.slice(0, 3).map((i) => [i.target, i.detail || i.title].filter(Boolean).join(': ')).join(' · ')}{faults > 3 ? ` · and ${faults - 3} more` : ''}</p>}
+        {item.clearSince && <p className="text-[12px] lv-ok mt-1" title={clock(item.clearSince)}>Monitoring sees no fault since {ago(item.clearSince, now)} ago; it closes after an hour clear.</p>}
       </div>
       <div className="text-[11px] text-dim shrink-0 text-right">
-        <div title={clock(item.observedAt)}>Observed {ago(item.observedAt, now)} ago</div>
-        <div className="mt-1" title={clock(item.firstSeen)}>{item.monitoring === 'resolved' ? `Ended ${ago(item.resolvedAt, now)} ago` : `Open for ${ago(item.firstSeen, now)}`}</div>
+        <div title={clock(item.openedAt)}>Open for {ago(item.openedAt, now)}</div>
+        {l && <div className="mt-1" title={clock(l.at)}>{l.by} · {ago(l.at, now)} ago</div>}
         <div className="mt-2 group-open:hidden">Details ↓</div><div className="mt-2 hidden group-open:block">Details ↑</div>
       </div>
     </summary>
     <div className="border-t border-line px-3 py-3 text-[12px] space-y-3">
-      {item.link && <div><a className="link" href={item.link} target="_blank" rel="noreferrer noopener">Open the run on GitHub ↗</a></div>}
-      {item.blocker && <div className="break-words"><span className="font-semibold lv-warn">Blocker: </span>{item.blocker}</div>}
-      {item.nextAction && <div className="break-words"><span className="font-semibold">Next step: </span>{item.nextAction}</div>}
-      {!!item.changes?.length && <div><div className="font-semibold mb-1">Changes recorded by the repairer</div><ul className="list-disc pl-5 space-y-1">{item.changes.map((change, i) => <li key={i} className="break-words">{change}</li>)}</ul></div>}
-      {item.lifecycle && <p className="text-dim break-words">Completion check: {item.lifecycle}</p>}
-      {!!item.heldBy?.length && <p className="text-dim break-all">Resource ownership: {item.heldBy.join(', ')}</p>}
-      <dl className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 text-dim">
-        {[['Detected', item.firstSeen], ['Repair started', item.startedAt], ['Response finished', item.finishedAt], [item.stage === 'closed' ? 'Closed' : 'Recovery observed', item.resolvedAt]].map(([title, value]) => <div key={title}><dt>{title}</dt><dd className="mono text-[11px]">{clock(value)}</dd></div>)}
-      </dl>
-      {item.retryAt && <p className="text-dim">Next eligible check: {clock(item.retryAt)}</p>}
-      {item.lastOutcome && <p className="text-dim">Last response: {item.lastOutcome === 'resolved' ? 'repair reported complete' : item.lastOutcome === 'blocked' ? 'blocked' : 'no change required'}. Service recovery is verified separately.</p>}
-      <div className="mono text-[10px] text-dim break-all">Issue {item.id}{item.runId && ` · Run ${item.runId}`}</div>
+      {faults ? <ul className="space-y-1">{item.issues.map((i) => <Fault key={i.id} issue={i} />)}</ul> : <p className="text-dim">No fault of this incident is open right now.</p>}
+      {l && <p className="text-dim">{STATE[l.state]?.[0] || l.state} since {clock(l.since || l.at)}{l.slack ? ' · reported in Slack' : ''}{l.thread ? ` · worker thread ${l.thread}` : ''}{l.revision < item.revision ? ' · the incident got worse after this report' : ''}</p>}
+      {admin && faults > 0 && <FileKnown incident={item} known={known} reload={reload} />}
+      <div className="mono text-[10px] text-dim break-all">Incident {item.id} · revision {item.revision} · {item.seen} fault{item.seen === 1 ? '' : 's'} seen in all</div>
     </div>
   </details>;
+}
+
+function Known({ entry, now, admin, reload }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const remove = async () => {
+    if (!window.confirm(`Remove "${entry.title}" from the known list? Whatever it still matches becomes new, and the triage worker is woken for it.`)) return;
+    setBusy(true); setError(null);
+    try { await api(`/api/remediation/known/${entry.id}`, { method: 'DELETE' }); reload(); } catch (e) { setError(e); } finally { setBusy(false); }
+  };
+  const open = entry.issues.length, follows = entry.expected.length;
+  const pattern = (p) => [p.domain, p.scope, p.target, p.code, p.name].filter((v) => v !== undefined).join(' / ');
+  return <details className="panel group" data-known={entry.id}>
+    <summary className="cursor-pointer list-none p-3 flex flex-wrap items-start gap-3">
+      <span className="tag shrink-0 text-dim">Known</span>
+      <div className="min-w-0 flex-1 basis-52">
+        <div className="font-semibold break-words">{entry.title}</div>
+        <p className="text-[12px] mt-1 break-words">{entry.reason}</p>
+      </div>
+      <div className="text-[11px] text-dim shrink-0 text-right">
+        <div>{open ? `${open} open now` : 'nothing open now'}{follows ? ` · ${follows} expected` : ''}</div>
+        <div className="mt-1" title={clock(entry.at)}>{entry.by} · {ago(entry.at, now)} ago</div>
+        <div className="mt-1">{entry.standing ? 'kept' : entry.idleSince ? `lapses ${ago(entry.idleSince, now)} into a day idle` : 'until it has been gone a day'}{entry.until ? ` · until ${clock(entry.until)}` : ''}</div>
+      </div>
+    </summary>
+    <div className="border-t border-line px-3 py-3 text-[12px] space-y-3">
+      {open > 0 && <ul className="space-y-1">{entry.issues.map((i) => <Fault key={i.id} issue={i} />)}</ul>}
+      {follows > 0 && <div><div className="label mb-1">Expected because of it</div><ul className="space-y-1">{entry.expected.map((i) => <Fault key={i.id} issue={i} />)}</ul></div>}
+      <div className="text-dim"><div className="label mb-1">Matches</div>
+        <ul className="mono text-[11px] space-y-0.5 break-all">{entry.match.map((p, i) => <li key={`m${i}`}>{pattern(p)} <span className="text-dim">· up to {p.severity}</span></li>)}
+          {entry.covers.map((p, i) => <li key={`c${i}`}>{pattern(p)} <span className="text-dim">· expected · up to {p.severity}</span></li>)}</ul></div>
+      {admin && <div className="flex flex-wrap gap-2 items-center"><button className="btn btn-danger" disabled={busy} onClick={remove}>Remove</button><Err error={error} /></div>}
+    </div>
+  </details>;
+}
+
+// A pile nobody acts on: held for an operation, informational, or (without an
+// account) anything at all, as counts.
+function Groups({ groups }) {
+  return <div className="panel divide-y divide-line">{groups.map((g) => <details key={g.key} className="group">
+    <summary className={`list-none px-3 py-2 flex flex-wrap items-center gap-3 text-[12px] ${g.issues ? 'cursor-pointer' : ''}`}>
+      <span className="min-w-0 flex-1 break-words"><Severity level={g.severity} />{g.title} <span className="text-dim">· {g.kind}</span></span>
+      <span className="mono text-dim">{g.issues ? g.issues.length : g.count}</span>
+    </summary>
+    {g.issues && <ul className="px-3 pb-3 text-[12px] space-y-1">{g.issues.map((i) => <Fault key={i.id} issue={i} />)}</ul>}
+  </details>)}</div>;
+}
+
+// Whether the worker repairs, or only announces. An administrator's switch.
+function Switch({ data, reload }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const on = data.fixing === 'on';
+  const flip = async () => {
+    if (!window.confirm(on ? 'Switch agent repair off? New incidents are still announced; nothing is repaired without a person. A repair already running finishes.'
+      : 'Switch agent repair on? The triage worker then repairs what it is allowed to (testnet and devnet nodes, our own CI runners, pull requests for a person to approve) and reports the rest.')) return;
+    setBusy(true); setError(null);
+    try { await api('/api/remediation/dispatch', { method: 'POST', body: { enabled: !on } }); reload(); } catch (e) { setError(e); } finally { setBusy(false); }
+  };
+  return <><button className={`btn ${on ? 'btn-danger' : 'btn-primary'}`} disabled={busy} onClick={flip} data-repair-switch>{on ? 'Switch off' : 'Switch on'}</button><Err error={error} /></>;
+}
+
+export default function Remediation() {
+  const session = useSession();
+  const { data, error, reload } = useResource(`/api/remediation/triage?view=${session.admin ? 'admin' : 'public'}`, (type) => type === 'remediation');
+  const now = useNow(1000);
+  useEffect(() => { const timer = setInterval(reload, 15_000); return () => clearInterval(timer); }, [reload]);
+  if (!data?.counts) return <div className="pt-5"><h1 className="text-xl font-semibold">Faults and triage</h1><div className="mt-4">{error ? <Err error={error} /> : <Empty>Loading triage…</Empty>}</div></div>;
+  const c = data.counts, on = data.fixing === 'on', admin = !!session.admin && !data.public;
+  const incidents = [...data.incidents].sort((a, b) => ORDER.indexOf(a.state) - ORDER.indexOf(b.state));
+  const waiting = incidents.filter((i) => ['new', 'worse'].includes(i.state)), yours = incidents.filter((i) => i.state === 'needs_you');
+  const active = incidents.filter((i) => ['working', 'fixed', 'noted'].includes(i.state));
+  const worker = data.worker?.seenAt;
+  return <div className="pt-5">
+    <div className="flex items-start justify-between gap-3 flex-wrap">
+      <div><h1 className="text-xl font-semibold">Faults and triage</h1>
+        <p className="text-dim text-[12px] mt-1">Network, CI and AWS · what is new, what is being done about it, and what is already known</p></div>
+      <button className="btn" onClick={reload}>Refresh</button>
+    </div>
+    <div className="mt-4"><Err error={error} /></div>
+    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 mt-3" data-triage-summary>
+      <Stat label="New" value={c.new} level={c.new ? 'warn' : 'ok'} sub={c.new ? 'not looked at yet' : 'nothing new'} />
+      <Stat label="Needs you" value={data.public ? '—' : c.needsYou} level={c.needsYou ? 'down' : undefined} sub="the agent could not" />
+      <Stat label="Being fixed" value={data.public ? '—' : c.working + c.fixed} level={c.working ? 'deploying' : undefined} sub={c.fixed ? `${c.fixed} fixed, being checked` : 'by the agent'} />
+      <Stat label="Known" value={c.known} sub="filed with a reason" />
+      <Stat label="Expected" value={c.expected} sub="follows from a known one" />
+      <Stat label="Held · review" value={`${c.held} · ${c.review}`} sub="operations · informational" />
+    </div>
+    <div className={`panel mt-3 px-3 py-3 text-[12px] ${data.stale ? 'border-warn/50' : ''}`} role="status">
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+        <span className="font-semibold">Agent repair: <span className={on ? 'lv-ok' : 'text-dim'}>{on ? 'switched on' : 'switched off'}</span></span>
+        {admin && <Switch data={data} reload={reload} />}
+        <span className="text-dim">{on ? 'New incidents are looked at, repaired where the agent may, and reported when it may not.' : 'New incidents are still looked at and announced. Nothing is repaired without a person.'}</span>
+      </div>
+      <p className="mt-2 text-dim">
+        <span title={clock(data.generatedAt)}>{c.faults} open fault{c.faults === 1 ? '' : 's'} · monitoring updated {ago(data.generatedAt, now)} ago</span>
+        {!data.public && <span title={worker ? clock(worker) : undefined}> · triage worker {worker ? `last asked ${ago(worker, now)} ago` : 'has not asked since the console started'}</span>}
+      </p>
+      {data.stale && <p className="mt-2 lv-warn">Monitoring is stale or unavailable: this is the last list it produced, and nothing is opened, closed or announced until it reports again.</p>}
+      {data.public && <p className="mt-2 text-dim">Public view: counts by network and area. Hosts, reasons and reports are for signed-in administrators.</p>}
+    </div>
+
+    {data.public ? <>
+      <Section title="New" right={<span className="text-dim text-[12px]">{data.new.length}</span>}>{data.new.length ? <Groups groups={data.new} /> : <Empty>Nothing new.</Empty>}</Section>
+      {!!data.knownOpen?.length && <Section title="Known or expected"><Groups groups={data.knownOpen} /></Section>}
+    </> : <>
+      {!!yours.length && <Section title="Needs you" right={<span className="text-dim text-[12px]">{yours.length}</span>}>
+        <div className="space-y-2">{yours.map((i) => <Incident key={i.id} item={i} known={data.known} now={now} admin={admin} reload={reload} />)}</div></Section>}
+      <Section title="New" right={<span className="text-dim text-[12px]">{waiting.length}</span>}>
+        {waiting.length ? <div className="space-y-2">{waiting.map((i) => <Incident key={i.id} item={i} known={data.known} now={now} admin={admin} reload={reload} />)}</div>
+          : <Empty>{data.stale ? 'No triage data has arrived yet.' : 'Nothing new.'}</Empty>}</Section>
+      {!!active.length && <Section title="Looked at by the agent" right={<span className="text-dim text-[12px]">{active.length}</span>}>
+        <div className="space-y-2">{active.map((i) => <Incident key={i.id} item={i} known={data.known} now={now} admin={admin} reload={reload} />)}</div></Section>}
+      <Section title="Known" right={<span className="text-dim text-[12px]">{data.known.length} entr{data.known.length === 1 ? 'y' : 'ies'} · {c.known} open · {c.expected} expected</span>}>
+        {data.known.length ? <div className="space-y-2">{data.known.map((k) => <Known key={k.id} entry={k} now={now} admin={admin} reload={reload} />)}</div>
+          : <Empty>Nothing is filed as known. Open an incident and choose Known… to file it with a reason.</Empty>}</Section>
+    </>}
+    {!!data.held.length && <Section title="Held for an operation" right={<span className="text-dim text-[12px]">{c.held}</span>}><Groups groups={data.held} /></Section>}
+    {!!data.review.length && <Section title="Review only" right={<span className="text-dim text-[12px]">{c.review}</span>}><Groups groups={data.review} /></Section>}
+    {!!data.ended.length && <Section title="Ended this week" right={<span className="text-dim text-[12px]">{data.ended.length} newest</span>}>
+      <div className="panel divide-y divide-line">{data.ended.map((e) => <div key={e.id} className="px-3 py-2 text-[12px] flex flex-wrap items-start gap-3">
+        <span className={`tag shrink-0 ${e.outcome === 'filed' ? 'text-dim' : 'lv-ok'}`}>{e.outcome === 'filed' ? 'Filed as known' : e.ledger?.state === 'fixed' ? 'Fixed' : 'Recovered'}</span>
+        <span className="min-w-0 flex-1 break-words"><Severity level={e.severity} />{e.title} <span className="text-dim">· {e.kind}</span>{e.ledger?.summary && <span className="text-dim"> · {e.ledger.summary}</span>}</span>
+        <span className="text-dim text-[11px]" title={clock(e.endedAt)}>{ago(e.endedAt, now)} ago</span>
+      </div>)}</div></Section>}
+    <p className="text-dim text-[11px] mt-4">
+      An incident is everything new on one network, CI host, repository queue, failing job or AWS resource. It opens once, however many faults join it, and closes when monitoring has seen none of them for an hour.
+      Fixed means the agent changed something; only monitoring says it worked. A known entry lapses when nothing has matched it for a day, unless it is kept.
+    </p>
+  </div>;
 }

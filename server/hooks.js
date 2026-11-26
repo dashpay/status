@@ -29,7 +29,7 @@ const EVENT = /^[a-z][a-z0-9_]{0,39}(?:\.[a-z][a-z0-9_]{0,39})?$/;
 // was written by outsiders.
 const MATCH_VALUE = 256, MATCH_LIST = 200;
 const DELIVERY = /^[A-Za-z0-9-]{1,64}$/;
-const SOURCES = ['github', 'xenforo'];
+const SOURCES = ['github', 'xenforo', 'console'];
 const MATCH_PATH = /^[A-Za-z0-9_]{1,60}(?:\.[A-Za-z0-9_]{1,60}){0,5}$/;
 const SIGNATURE = /^sha256=[a-f0-9]{64}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
@@ -59,6 +59,11 @@ const sha256 = (text) => createHash('sha256').update(text).digest();
 // and beside it <name>.secret, the sender's secret. Listener tokens are stored
 // as digests: this host can check one and cannot use one.
 //
+// A hook with source "console" has no sender outside: the console itself wakes
+// it (`fire`), for work that follows what the console sees. It has listeners
+// and nothing else: no secret file, no events, no rules, and a delivery posted
+// to its name is refused like one to a name that is not a hook.
+//
 // A `match` rule names one field of the JSON payload by a dotted path and a
 // regular expression. It matches when the field is a string or number that the
 // expression matches, or a list with such an element. Any one rule is enough.
@@ -73,6 +78,7 @@ export function parseHooks(doc) {
     if (unknown(h, ['source', 'events', 'match', 'listeners'])) throw new Error(`hooks.json: ${name}: unknown key ${JSON.stringify(unknown(h, ['source', 'events', 'match', 'listeners'])).slice(0, 60)}`);
     // GitHub names an event in one word; XenForo's are content type and action.
     const event = (e) => typeof e === 'string' && EVENT.test(e) && e.includes('.') === (h.source === 'xenforo');
+    if (h.source === 'console' && (h.events !== undefined || h.match !== undefined)) throw new Error(`hooks.json: ${name}: a console hook has listeners only`);
     if (h.events !== undefined && (!Array.isArray(h.events) || !h.events.length || !h.events.every(event))) throw new Error(`hooks.json: ${name}: events must be a list of this sender's event names`);
     if (h.match !== undefined && (!Array.isArray(h.match) || !h.match.length || h.match.length > 16)) throw new Error(`hooks.json: ${name}: match must be a list of one to sixteen rules`);
     const match = h.match?.map((rule) => {
@@ -193,8 +199,11 @@ export function createHooks({ dir = process.env.WAKE_HOOKS_DIR, dataDir, clock =
     if (!signature && !shown) return reply(401, { error: 'Invalid signature' });
     if (/^\d+$/.test(header('content-length')) && Number(header('content-length')) > MAX_BODY) return reply(413, { error: 'Delivery too large' });
     const hook = HOOK_NAME.test(name || '') ? configured().get(name) : null;
-    const secret = hook ? secretOf(name) : null;
-    if (hook && !secret) note(name, 'hook-secret-missing');
+    // Nothing from outside is a delivery to a console hook: it goes the way of
+    // a name that is not a hook, and counts nothing.
+    const external = hook && hook.source !== 'console' ? hook : null;
+    const secret = external ? secretOf(name) : null;
+    if (external && !secret) note(name, 'hook-secret-missing');
     const mac = createHmac('sha256', secret || NO_SECRET), kept = hook?.match ? [] : null;
     let size = 0;
     try { for await (const chunk of body) { size += chunk.length; if (size <= MAX_BODY) { mac.update(chunk); kept?.push(chunk); } } }
@@ -205,7 +214,7 @@ export function createHooks({ dir = process.env.WAKE_HOOKS_DIR, dataDir, clock =
     const same = timingSafeEqual(sha256(shown || ''), sha256(secret || NO_SECRET));
     if (!secret || !(hook.source === 'github' ? signature && signed : shown && same)) {
       if (secret) note(name, 'hook-signature-rejected');
-      if (hook) delivered(name, 'refused');
+      if (external) delivered(name, 'refused');
       return reply(401, { error: 'Invalid signature' });
     }
     // From here on the caller holds the hook's secret. The headers below are
@@ -225,6 +234,15 @@ export function createHooks({ dir = process.env.WAKE_HOOKS_DIR, dataDir, clock =
     }
     delivered(name, 'woke');
     return reply(202, { accepted: true, seq: wake(name, event, delivery).seq });
+  }
+
+  // The console's own wake, for a hook with source "console". Null when the
+  // name is not such a hook: the caller's work then waits for its own timer.
+  function fire(name, event) {
+    const hook = HOOK_NAME.test(name || '') ? configured().get(name) : null;
+    if (hook?.source !== 'console' || !EVENT.test(event || '')) return null;
+    delivered(name, 'woke');
+    return wake(name, event, 'console');
   }
 
   const listenerOf = (hook, authorization) => {
@@ -270,7 +288,7 @@ export function createHooks({ dir = process.env.WAKE_HOOKS_DIR, dataDir, clock =
   const list = () => {
     const now = clock();
     return [...configured()].map(([name, hook]) => {
-      const t = tally(name), hasSecret = !!secretOf(name), held = [...(waiters.get(name) || [])];
+      const t = tally(name), hasSecret = hook.source === 'console' || !!secretOf(name), held = [...(waiters.get(name) || [])];
       const listeners = hook.listeners.map((l) => {
         const last = seen.get(`${name}|${l.id}`) ?? null, waiting = held.filter((w) => w.listener === l.id).length;
         return { id: l.id, waiting, lastSeenAt: last === null ? null : iso(last), connected: waiting > 0 || (last !== null && now - last < LISTENER_AWAY_MS) };
@@ -311,5 +329,5 @@ export function createHooks({ dir = process.env.WAKE_HOOKS_DIR, dataDir, clock =
   };
   const close = () => { for (const set of waiters.values()) for (const w of [...set]) w.done(); };
 
-  return { receive, wait, list, status, close };
+  return { receive, fire, wait, list, status, close };
 }

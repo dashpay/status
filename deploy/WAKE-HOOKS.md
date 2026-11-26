@@ -34,6 +34,11 @@ hook's `source`:
 | `github` | `X-Hub-Signature-256`, the HMAC-SHA256 of the body with the hook's secret | `X-GitHub-Event` (`pull_request`) | `X-GitHub-Delivery` |
 | `xenforo` | `XF-Webhook-Secret`, the hook's secret itself | `XF-Content-Type` and `XF-Webhook-Event`, joined by a dot (`user.insert`) | `xf-` and `XF-Webhook-Id`, which numbers the webhook, not the delivery |
 
+A third source, `console`, has no sender outside: the console itself wakes the hook,
+for work that follows what the console sees (triage of new faults, `deploy/TRIAGE.md`).
+Such a hook has listeners and nothing else: no secret file, no `events`, no `match`.
+A delivery posted to its name is answered like one to a name that is not a hook.
+
 XenForo (2.3 and later, Admin CP → Setup → Webhooks) cannot sign: it sends the secret
 in a header with every delivery. That secret is as private as the TLS connection and
 the forum's database, and a delivery cannot be told from a replay. It is enough for a
