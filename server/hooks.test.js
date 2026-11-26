@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { createHooks, matches, parseHooks, MAX_BODY, MAX_WAITS_PER_LISTENER } from './hooks.js';
+import { createHooks, matches, parseHooks, LISTENER_AWAY_MS, MAX_BODY, MAX_WAITS_PER_LISTENER } from './hooks.js';
 import { createWeb } from './web.js';
 import { DEFAULT_SETTINGS } from '../shared/settings.js';
 
@@ -191,6 +191,89 @@ test('a wake that cannot be recorded still wakes', async () => {
   } finally { f.done(); }
 });
 
+test('the status of a hook: is anyone listening, and what arrived', async () => {
+  let now = Date.parse('2026-11-26T12:00:00Z');
+  const changed = [];
+  const f = fixture({ events: ['pull_request'] }, { clock: () => now, waitMs: 60_000, onChange: (name) => changed.push(name) });
+  try {
+    const one = () => f.hooks.list()[0];
+    // Just started, nobody has asked yet: not a fault for the first two minutes.
+    assert.deepEqual([one().level, one().listeners[0].connected, one().listeners[0].lastSeenAt], ['info', false, null]);
+    now += LISTENER_AWAY_MS;
+    assert.equal(one().level, 'down');
+    assert.match(one().reason, /Listener worker is not connected/);
+    // A listener that holds a request is connected; one that asked a moment ago is too.
+    const held = f.wait('0');
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual([one().level, one().listeners[0].waiting, one().listenersWaiting], ['ok', 1, 1]);
+    await f.deliver();
+    await held;
+    assert.deepEqual(changed, ['directory']);
+    assert.deepEqual([one().level, one().listeners[0].waiting, one().listeners[0].connected], ['ok', 0, true]);
+    assert.equal(one().listeners[0].lastSeenAt, '2026-11-26T12:02:00.000Z');
+    now += LISTENER_AWAY_MS - 1;
+    assert.equal(one().level, 'ok');
+    now += 1;
+    assert.equal(one().level, 'down', 'two minutes without a request: away');
+    await f.wait();
+    // What arrived since the start, by outcome.
+    now += 1000;
+    await f.deliver('{}', { event: 'issues' });
+    await f.deliver('{}', { event: 'ping' });
+    assert.deepEqual(one().deliveries, { woke: 1, ignored: 2, refused: 0, lastAt: '2026-11-26T12:04:01.000Z', lastRefusedAt: null });
+    // The newest delivery refused: worth a look, until a good one arrives or a day passes.
+    now += 1000;
+    await f.deliver('{}', { signature: sign('other') });
+    assert.deepEqual([one().level, one().deliveries.refused], ['warn', 1]);
+    await f.wait();
+    now += 1000;
+    await f.deliver();
+    assert.equal(one().level, 'ok');
+    assert.deepEqual(f.hooks.status().summary, { hooks: 1, listening: 1, down: 0, starting: 0, woke: 2, ignored: 2, warn: 0, refused: 1, lastWakeAt: '2026-11-26T12:04:03.000Z', lastDeliveryAt: '2026-11-26T12:04:03.000Z' });
+    // For a visitor without access: no refusals, no warn, and times to the minute.
+    assert.deepEqual(f.hooks.status().open, { hooks: 1, listening: 1, down: 0, starting: 0, woke: 2, ignored: 2, lastWakeAt: '2026-11-26T12:04:00.000Z', lastDeliveryAt: '2026-11-26T12:04:00.000Z', startedAt: '2026-11-26T12:00:00.000Z' });
+    // The clock stepping back does not hide a refusal: the newest delivery is the one that arrived last.
+    now -= 5000;
+    await f.deliver('{}', { signature: sign('other') });
+    assert.equal(one().level, 'warn');
+    // And what a refusal moves is exactly what the public answer leaves out.
+    assert.deepEqual([f.hooks.status().summary.warn, f.hooks.status().summary.refused, f.hooks.status().open.listening], [1, 2, 1]);
+    assert.equal('refused' in f.hooks.status().open || 'warn' in f.hooks.status().open, false);
+    // A name that is not a hook counts nothing, however often it is tried.
+    await f.hooks.receive('other', gh({ signature: sign('{}'), event: 'push', delivery: DELIVERY }), Readable.from([Buffer.from('{}')]));
+    assert.equal(f.hooks.list().length, 1);
+    assert.equal(f.hooks.status().summary.refused, 2);
+  } finally { f.done(); }
+  // Two listeners: one that is away does not make the hook useless, and the words say which.
+  const OTHER = 'second-listener-token-0123456789abcdef';
+  let later = Date.parse('2026-11-26T12:00:00Z');
+  const two = fixture({ listeners: { worker: digest(TOKEN), other: digest(OTHER) } }, { clock: () => later, waitMs: 20 });
+  try {
+    await two.wait();
+    assert.deepEqual([two.hooks.list()[0].level, two.hooks.list()[0].reason], ['info', 'The console restarted; waiting for listener other to ask again.']);
+    later += LISTENER_AWAY_MS - 1000;
+    await two.wait();
+    later += 1000;
+    assert.equal(two.hooks.list()[0].level, 'down');
+    assert.match(two.hooks.list()[0].reason, /^Listener other is not connected: a delivery does not wake it/);
+    assert.deepEqual(two.hooks.list()[0].listeners.map((l) => [l.id, l.connected]), [['worker', true], ['other', false]]);
+    await two.wait(undefined, OTHER);
+    assert.equal(two.hooks.list()[0].level, 'ok');
+  } finally { two.done(); }
+  // No secret file: down, whatever the listener does.
+  const g = fixture({}, { waitMs: 20 });
+  try {
+    rmSync(join(g.dir, 'directory.secret'));
+    await g.wait('0');
+    assert.deepEqual([g.hooks.list()[0].level, g.hooks.list()[0].hasSecret], ['down', false]);
+    assert.deepEqual([g.hooks.status().summary.down, g.hooks.status().open.down, g.hooks.status().invalid], [1, 1, false]);
+    // A hooks.json that does not parse: no hook exists, and that is said.
+    await new Promise((r) => setTimeout(r, 20));
+    g.write('{ not json');
+    assert.deepEqual([g.hooks.status().invalid, g.hooks.status().hooks.length, g.hooks.status().open.hooks], [true, 0, 0]);
+  } finally { g.done(); }
+});
+
 test('hooks.json is checked strictly', () => {
   const ok = { schemaVersion: 1, hooks: { a: { source: 'github', listeners: { l: digest('x') } } } };
   assert.equal(parseHooks(ok).get('a').listeners[0].id, 'l');
@@ -325,7 +408,14 @@ test('over HTTP: a delivery reaches a listener holding a request, before any bod
     assert.equal((await (await held).json()).seq, 1);
     assert.equal((await fetch(`${base}/api/hooks/directory/wait?after=1&after=2`, { headers: { authorization: `Bearer ${TOKEN}` } })).status, 400);
     assert.equal((await fetch(`${base}/api/hooks/directory/wait`)).status, 401);
-    assert.equal((await fetch(`${base}/api/hooks`)).status, 403, 'the list is for admins');
+    // Without an account: counts, and nothing that names a hook, a listener or an event.
+    const open = await (await fetch(`${base}/api/hooks`)).json();
+    assert.equal(open.public, true);
+    assert.deepEqual(open.hooks, []);
+    assert.equal(open.summary.hooks, 1);
+    assert.equal(open.summary.woke, 1);
+    assert.equal('refused' in open.summary || 'warn' in open.summary, false, 'nothing a caller without the secret can move');
+    assert.equal(/directory|worker|lookalike|pull_request/.test(JSON.stringify(open)), false);
     assert.equal((await (await fetch(`${base}/api/hooks/directory/wait`, { headers: { authorization: `Bearer ${LOOKALIKE}` } })).json()).listener, 'lookalike');
     // A hook that exists and one that does not cannot be told apart from outside.
     const probe = async (name, headers = {}) => { const r = await fetch(`${base}/api/hooks/${name}`, { method: 'POST', body: '{}', headers }); return [r.status, await r.text()]; };

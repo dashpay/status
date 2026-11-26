@@ -56,7 +56,16 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   const app = express();
   const auth = createAuth({ origin }, { store: join(dataDir, 'sessions.json'), ...authDeps });
   const tokens = createApiTokens({ dataDir, clock });
-  const hooks = createHooks({ dir: hooksDir, dataDir, clock, ...(hookWaitMs ? { waitMs: hookWaitMs } : {}) });
+  // A wake refreshes the Webhooks page of whoever has it open. The event says
+  // only that something changed: which hook is not for everyone.
+  const hooks = createHooks({ dir: hooksDir, dataDir, clock, ...(hookWaitMs ? { waitMs: hookWaitMs } : {}), onChange: () => {
+    // The public answer is kept for a few seconds; a page that reloads for this
+    // wake must not be given the answer from before it. Only a wake gets here,
+    // and a wake needs the hook's secret, so this tells a stranger nothing.
+    cached.delete('hooks-public');
+    clearTimeout(debounce.get('hooks'));
+    debounce.set('hooks', setTimeout(() => push('hooks', { at: new Date(clock()).toISOString() }), 300));
+  } });
   const clients = new Set();
   const cache = new Map();
   // Each module reads the other only when a request is served, so ci gets a late-bound runningJobs.
@@ -580,9 +589,20 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   app.delete('/api/ci/reporters/:id', ...adminWrite, (req, res) => {
     try { ci.removeReporter(req.params.id); res.json({ ok: true }); } catch (e) { res.status(404).json({ error: e.message }); }
   });
-  // Which wake hooks exist and when each last woke a listener. Admins only:
-  // hook names are not public.
-  app.get('/api/hooks', (req, res) => (isAdmin(req) ? res.json({ hooks: hooks.list() }) : res.status(403).json({ error: 'Only admins see wake hooks' })));
+  // The Webhooks page. Like the other infrastructure pages: an account with
+  // access sees every hook, by name, with its listeners and what arrived;
+  // anyone else gets counts. Hook names are not public, so the public answer
+  // names no hook, no listener and no event, and holds no count that a caller
+  // without a secret can move (server/hooks.js, status): otherwise guessing a
+  // name and reading the counts again would tell whether it exists.
+  app.get('/api/hooks', (req, res) => {
+    res.vary('Cookie');
+    if (!seesInfrastructure(user(req))) {
+      return res.json(cached('hooks-public', () => { const s = hooks.status(); return { public: true, at: new Date(clock()).toISOString(), startedAt: s.open.startedAt, invalid: s.invalid, summary: s.open, hooks: [] }; }));
+    }
+    const s = hooks.status();
+    res.json({ public: false, at: new Date(clock()).toISOString(), startedAt: s.startedAt, invalid: s.invalid, summary: s.summary, hooks: s.hooks });
+  });
   app.get('/api/aws', (req, res) => {
     const inv = readJSON(join(awsDir, 'inventory.json'));
     if (!inv) return res.status(404).json({ error: 'No AWS inventory yet; the agent collects it every 10 minutes' });

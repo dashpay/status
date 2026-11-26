@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash, createHmac } from 'node:crypto';
 import { createWeb } from '../server/web.js';
 import { legacyNetwork } from '../agent/fixtures/legacy-network.js';
 import { DEFAULT_SETTINGS } from '../shared/settings.js';
@@ -45,7 +46,17 @@ const fetcher = async (url) => {
   return Response.json({ id: 42, login: 'fixture-operator' });
 };
 const origin = 'http://127.0.0.1:4799';
-const app = createWeb({ dataDir, origin, auth: { clientId: 'fixture', clientSecret: 'fixture', fetcher }, fetcher });
+// Wake hooks: four, as on the live console. One listener asks and stays connected, one never does.
+const hooksDir = join(temp, 'hooks'), hookSecret = 'fixture-hook-secret-0123456789', hookToken = 'fixture-listener-token-0123456789abcdef';
+const tokenDigest = createHash('sha256').update(hookToken).digest('hex');
+mkdirSync(hooksDir);
+writeFileSync(join(hooksDir, 'hooks.json'), JSON.stringify({ schemaVersion: 1, hooks: {
+  'agent-directory': { source: 'github', events: ['pull_request', 'push'], listeners: { 'worker-vm': tokenDigest } },
+  'platform-release': { source: 'github', events: ['release'], listeners: { 'ubuntu-server-2': tokenDigest } },
+  'platform-release-jobs': { source: 'github', events: ['workflow_job'], match: [{ path: 'workflow_job.labels', pattern: '^platform-release-' }], listeners: { 'ubuntu-server-2': tokenDigest } },
+  'forum-queue': { source: 'xenforo', events: ['user.insert', 'post.insert', 'thread.insert'], listeners: { 'fixture-absent-listener': 'c'.repeat(64) } } } }));
+for (const name of ['agent-directory', 'platform-release', 'platform-release-jobs', 'forum-queue']) writeFileSync(join(hooksDir, `${name}.secret`), hookSecret);
+const app = createWeb({ dataDir, origin, hooksDir, auth: { clientId: 'fixture', clientSecret: 'fixture', fetcher }, fetcher });
 const server = app.listen(4799, '127.0.0.1');
 const browser = await chromium.launch();
 mkdirSync('artifacts', { recursive: true });
@@ -190,6 +201,31 @@ try {
     const text = await page.locator('body').innerText();
     assert.ok(text.includes('dn-testnet-masternode-1') && text.includes('Unattached volume') && text.includes('$3,271'));
     await page.screenshot({ path: `artifacts/aws-${label}.png`, fullPage: true });
+    // Webhooks: deliveries arrive; three listeners have asked (two still hold their request, the one whose hook woke
+    // was answered), the fourth was never seen.
+    const deliver = (hook, event, body) => fetch(`${origin}/api/hooks/${hook}`, { method: 'POST', body, headers: { 'content-type': 'application/json', 'x-github-event': event,
+      'x-github-delivery': '5d2b6b10-cb1c-11f0-9d5f-0123456789ab', 'x-hub-signature-256': `sha256=${createHmac('sha256', hookSecret).update(body).digest('hex')}` } });
+    const listening = new AbortController();
+    for (const hook of ['agent-directory', 'platform-release', 'platform-release-jobs']) {
+      const { seq } = await (await fetch(`${origin}/api/hooks/${hook}/wait`, { headers: { authorization: `Bearer ${hookToken}` } })).json();
+      fetch(`${origin}/api/hooks/${hook}/wait?after=${hook === 'agent-directory' ? seq + 1 : seq}`, { headers: { authorization: `Bearer ${hookToken}` }, signal: listening.signal }).catch(() => {});
+    }
+    assert.equal((await deliver('agent-directory', 'pull_request', '{"action":"opened"}')).status, 202);
+    assert.equal((await deliver('platform-release-jobs', 'workflow_job', '{"workflow_job":{"labels":["ubuntu-24.04"]}}')).status, 202);
+    assert.equal((await fetch(`${origin}/api/hooks/platform-release`, { method: 'POST', body: '{}', headers: { 'x-github-event': 'release', 'x-github-delivery': 'x', 'x-hub-signature-256': `sha256=${'0'.repeat(64)}` } })).status, 401);
+    await page.goto(origin + '/webhooks');
+    await page.getByText('Hooks listening').waitFor();
+    await page.getByText('agent-directory').first().waitFor();
+    const hooksPage = await page.locator('body').innerText();
+    assert.ok(['agent-directory', 'platform-release-jobs', 'forum-queue', 'worker-vm', 'XenForo', '1 rule', 'never seen'].every((t) => hooksPage.includes(t)), 'hooks, senders, rules and listeners');
+    // In the console's first two minutes a listener that has not asked yet is "starting", after that it is away.
+    assert.ok(hooksPage.includes('3/4') && /fixture-absent-listener is not connected|waiting for listener fixture-absent-listener to ask again/.test(hooksPage) && hooksPage.includes('The newest delivery was refused'), 'what is wrong is said in words');
+    assert.ok(!hooksPage.includes(hookSecret) && !hooksPage.includes(tokenDigest), 'no secret and no token digest on the page');
+    await page.screenshot({ path: `artifacts/webhooks-${label}.png`, fullPage: true });
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), `${label}: the Webhooks page does not scroll sideways`);
+    listening.abort();
+    await page.goto(origin + '/aws');
+    await page.getByText('Worth a look').waitFor();
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), `${label}: no horizontal page scroll`);
   }
   // Signed out: the sanitized views, nothing that names or locates a host.
@@ -204,6 +240,12 @@ try {
   const awsText = await anon.locator('body').innerText();
   assert.ok(!awsText.includes('192.0.2.9') && !awsText.includes('dn-testnet-masternode-1') && !awsText.includes('Worth a look'), 'public AWS has totals only');
   await anon.screenshot({ path: 'artifacts/aws-public.png', fullPage: true });
+  await anon.goto(origin + '/webhooks');
+  await anon.getByText('Public view: counts only').waitFor();
+  const hooksPublic = await anon.locator('body').innerText();
+  assert.ok(!/refused|to check/i.test(hooksPublic), 'public Webhooks page shows nothing a refused delivery moves');
+  assert.ok(/hooks listening/i.test(hooksPublic) && hooksPublic.includes('3/4') && !/agent-directory|platform-release|forum-queue|worker-vm|ubuntu-server-2|pull_request|workflow_job/.test(hooksPublic), 'public Webhooks page names nothing');
+  await anon.screenshot({ path: 'artifacts/webhooks-public.png', fullPage: true });
 
   // Remediation joins monitoring recovery with durable response outcomes.
   // A completed blocked response is never displayed as a successful fix.

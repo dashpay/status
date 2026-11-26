@@ -13,6 +13,7 @@ import Websites from './pages/Websites.jsx';
 import Queue from './pages/Queue.jsx';
 import Aws from './pages/Aws.jsx';
 import Remediation from './pages/Remediation.jsx';
+import Webhooks from './pages/Webhooks.jsx';
 
 export default function App() {
   const route = useRoute();
@@ -32,6 +33,7 @@ export default function App() {
   else if (parts[0] === 'websites') page = <Websites />;
   else if (parts[0] === 'aws') page = <Aws />;
   else if (parts[0] === 'remediation') page = <Remediation />;
+  else if (parts[0] === 'webhooks') page = <Webhooks />;
   else if (parts[0] === 'devnets' && parts[1] === 'new') page = <NewDevnet />;
   else page = <Overview overview={overview} />;
   return (
@@ -65,6 +67,7 @@ function Header({ networks, active, session }) {
             <Link to="/websites" className={`px-2.5 py-1 rounded whitespace-nowrap ${active === 'websites' ? 'bg-panel-2 text-fg' : 'text-dim hover:text-fg'}`}>Websites</Link>
             <Link to="/aws" className={`px-2.5 py-1 rounded whitespace-nowrap ${active === 'aws' ? 'bg-panel-2 text-fg' : 'text-dim hover:text-fg'}`}>AWS</Link>
             <Link to="/remediation" className={`px-2.5 py-1 rounded whitespace-nowrap ${active === 'remediation' ? 'bg-panel-2 text-fg' : 'text-dim hover:text-fg'}`}>Remediation</Link>
+            <Link to="/webhooks" className={`px-2.5 py-1 rounded whitespace-nowrap ${active === 'webhooks' ? 'bg-panel-2 text-fg' : 'text-dim hover:text-fg'}`}>Webhooks</Link>
           </>}
         </nav>
         <div className="ml-auto flex items-center gap-3 text-[12px] shrink-0">

@@ -827,3 +827,74 @@ test('API tokens: an open operation log and event stream end when the token is r
     assert.ok(!eventText.includes('"status":"succeeded"'), 'no event after revocation');
   } finally { w.close(); }
 });
+
+test('the public Webhooks answer cannot be used to find hook names by guessing', async () => {
+  const hooksDir = mkdtempSync(join(tmpdir(), 'web-hooks-'));
+  writeFileSync(join(hooksDir, 'hooks.json'), JSON.stringify({ schemaVersion: 1, hooks: { 'agent-directory': { source: 'github', events: ['pull_request'], listeners: { 'worker-vm': 'a'.repeat(64) } } } }));
+  writeFileSync(join(hooksDir, 'agent-directory.secret'), 'fixture-hook-secret-0123456789\n');
+  let now = Date.now();
+  const w = await start(9920871, [], { hooksDir, clock: () => now });
+  try {
+    const look = async () => { const answer = await (await fetch(`${w.base}/api/hooks`)).json(); delete answer.at; return answer; };
+    const probe = (name) => fetch(`${w.base}/api/hooks/${name}`, { method: 'POST', body: '{}', headers: { 'x-github-event': 'push', 'x-github-delivery': 'x', 'x-hub-signature-256': `sha256=${'0'.repeat(64)}` } });
+    const before = await look();
+    for (const name of ['agent-directory', 'agent-directory', 'nothing-here']) assert.equal((await probe(name)).status, 401);
+    now += 20_000; // past the few seconds the public answer is kept
+    assert.deepEqual(await look(), before, 'refusals of a real name move nothing a stranger can read');
+    // A real delivery is seen at once, not when the kept answer runs out.
+    const body = '{"action":"opened"}';
+    assert.equal((await fetch(`${w.base}/api/hooks/agent-directory`, { method: 'POST', body, headers: { 'x-github-event': 'pull_request', 'x-github-delivery': 'x',
+      'x-hub-signature-256': `sha256=${createHmac('sha256', 'fixture-hook-secret-0123456789').update(body).digest('hex')}` } })).status, 202);
+    assert.equal((await look()).summary.woke, 1);
+    // They did happen, and an account with access sees them.
+    await w.login();
+    const full = await (await w.req('/api/hooks')).json();
+    assert.deepEqual([full.hooks[0].deliveries.refused, full.summary.refused, full.hooks[0].level], [2, 2, 'info']);
+  } finally { w.close(); rmSync(hooksDir, { recursive: true, force: true }); }
+});
+
+test('the Webhooks page: an account with access sees the hooks by name, everyone else counts', async () => {
+  const hooksDir = mkdtempSync(join(tmpdir(), 'web-hooks-'));
+  writeFileSync(join(hooksDir, 'hooks.json'), JSON.stringify({ schemaVersion: 1, hooks: {
+    'agent-directory': { source: 'github', events: ['pull_request'], listeners: { 'worker-vm': 'a'.repeat(64) } },
+    'forum-queue': { source: 'xenforo', events: ['user.insert'], listeners: { 'ubuntu-server-2': 'b'.repeat(64) } } } }));
+  writeFileSync(join(hooksDir, 'agent-directory.secret'), 'fixture-hook-secret-0123456789\n');
+  const named = (body) => /agent-directory|forum-queue|worker-vm|ubuntu-server-2|pull_request|user\.insert/.test(JSON.stringify(body));
+  // An admin, an operator of one network, and an account that was never granted anything.
+  const admin = await start(9920871, [], { hooksDir });
+  const operator = await start(88, [{ id: 88, login: 'op', role: 'operator', networks: ['testnet'] }], { hooksDir });
+  const stranger = await start(4242, [], { hooksDir });
+  try {
+    const anonymous = await (await fetch(`${admin.base}/api/hooks`)).json();
+    assert.equal(anonymous.public, true);
+    assert.deepEqual(anonymous.hooks, []);
+    assert.deepEqual([anonymous.summary.hooks, anonymous.summary.down, anonymous.summary.starting], [2, 1, 1], 'one has no secret file, one waits for its listener');
+    assert.equal(named(anonymous), false, 'nothing that names a hook, a listener or an event');
+    assert.deepEqual(Object.keys(anonymous.summary).sort(), ['down', 'hooks', 'ignored', 'lastDeliveryAt', 'lastWakeAt', 'listening', 'startedAt', 'starting', 'woke'], 'no refusals and no warn: a stranger could move those');
+    const answer = await fetch(`${admin.base}/api/hooks`);
+    assert.equal(answer.headers.get('cache-control'), 'no-store');
+    assert.match(answer.headers.get('vary') || '', /Cookie/);
+
+    const csrf = await admin.login();
+    const full = await (await admin.req('/api/hooks')).json();
+    assert.equal(full.public, false);
+    assert.deepEqual(full.hooks.map((h) => [h.name, h.source, h.level, h.listeners[0].id]), [['agent-directory', 'github', 'info', 'worker-vm'], ['forum-queue', 'xenforo', 'down', 'ubuntu-server-2']]);
+    assert.equal(/secret-0123456789|aaaaaaaa|bbbbbbbb/.test(JSON.stringify(full)), false, 'no secret and no token digest, for anyone');
+
+    await operator.login();
+    const member = await (await operator.req('/api/hooks')).json();
+    assert.equal(member.public, false, 'any account with access, as on the CI and AWS pages');
+    assert.equal(member.hooks.length, 2);
+
+    await stranger.login();
+    const none = await (await stranger.req('/api/hooks')).json();
+    assert.equal(none.public, true);
+    assert.equal(named(none), false);
+
+    // An admin token for every network reads it as its account does; one narrowed to a network does not.
+    const all = await issueToken(admin, csrf, { label: 'all', role: 'admin', networks: ['*'] });
+    const narrow = await issueToken(admin, csrf, { label: 'narrow', role: 'operator', networks: ['testnet'] });
+    assert.equal((await (await bot(admin, all.token)('/api/hooks')).json()).hooks.length, 2);
+    assert.equal((await (await bot(admin, narrow.token)('/api/hooks')).json()).public, true);
+  } finally { admin.close(); operator.close(); stranger.close(); rmSync(hooksDir, { recursive: true, force: true }); }
+});
