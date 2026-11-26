@@ -56,7 +56,12 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   const app = express();
   const auth = createAuth({ origin }, { store: join(dataDir, 'sessions.json'), ...authDeps });
   const tokens = createApiTokens({ dataDir, clock });
-  const hooks = createHooks({ dir: hooksDir, dataDir, clock, ...(hookWaitMs ? { waitMs: hookWaitMs } : {}) });
+  // A wake refreshes the Webhooks page of whoever has it open. The event says
+  // only that something changed: which hook is not for everyone.
+  const hooks = createHooks({ dir: hooksDir, dataDir, clock, ...(hookWaitMs ? { waitMs: hookWaitMs } : {}), onChange: () => {
+    clearTimeout(debounce.get('hooks'));
+    debounce.set('hooks', setTimeout(() => push('hooks', { at: new Date(clock()).toISOString() }), 300));
+  } });
   const clients = new Set();
   const cache = new Map();
   // Each module reads the other only when a request is served, so ci gets a late-bound runningJobs.
@@ -580,9 +585,14 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   app.delete('/api/ci/reporters/:id', ...adminWrite, (req, res) => {
     try { ci.removeReporter(req.params.id); res.json({ ok: true }); } catch (e) { res.status(404).json({ error: e.message }); }
   });
-  // Which wake hooks exist and when each last woke a listener. Admins only:
-  // hook names are not public.
-  app.get('/api/hooks', (req, res) => (isAdmin(req) ? res.json({ hooks: hooks.list() }) : res.status(403).json({ error: 'Only admins see wake hooks' })));
+  // The Webhooks page. Like the other infrastructure pages: an account with
+  // access sees every hook, by name, with its listeners and what arrived;
+  // anyone else gets counts. Hook names are not public, so the public answer
+  // names no hook, no listener and no event.
+  app.get('/api/hooks', (req, res) => {
+    const full = seesInfrastructure(user(req)), at = new Date(clock()).toISOString();
+    res.vary('Cookie').json({ public: !full, at, startedAt: hooks.startedAt(), summary: hooks.summary(), hooks: full ? hooks.list() : [] });
+  });
   app.get('/api/aws', (req, res) => {
     const inv = readJSON(join(awsDir, 'inventory.json'));
     if (!inv) return res.status(404).json({ error: 'No AWS inventory yet; the agent collects it every 10 minutes' });
