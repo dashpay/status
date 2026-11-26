@@ -5,7 +5,7 @@ import { Dot, Empty, Err, Section, Stat } from '../ui.jsx';
 // Triage (server/triage.js): what monitoring reports, sorted by whether anybody
 // needs to hear about it. New incidents wake the triage worker; what somebody
 // filed as known, and what follows from it, stays out of the way.
-const STATE = { new: ['New', 'lv-warn'], worse: ['Got worse', 'lv-down'], working: ['Being fixed', 'lv-deploying'], fixed: ['Fixed · checking', 'lv-ok'],
+const STATE = { new: ['New', 'lv-warn'], worse: ['Changed since', 'lv-warn'], working: ['Being fixed', 'lv-deploying'], fixed: ['Fixed · checking', 'lv-ok'],
   needs_you: ['Needs you', 'lv-down'], noted: ['Looked at', 'text-dim'], ended: ['Ended', 'text-dim'] };
 const SEVERITY = { critical: ['down', 'critical'], warning: ['warn', 'warning'], info: ['info', 'informational'] };
 // Top to bottom: what needs a person, what is waiting for the worker, what it is doing.
@@ -83,7 +83,7 @@ function Incident({ item, known, now, admin, reload }) {
     </summary>
     <div className="border-t border-line px-3 py-3 text-[12px] space-y-3">
       {faults ? <ul className="space-y-1">{item.issues.map((i) => <Fault key={i.id} issue={i} />)}</ul> : <p className="text-dim">No fault of this incident is open right now.</p>}
-      {l && <p className="text-dim">{STATE[l.state]?.[0] || l.state} since {clock(l.since || l.at)}{l.slack ? ' · reported in Slack' : ''}{l.thread ? ` · worker thread ${l.thread}` : ''}{l.revision < item.revision ? ' · the incident got worse after this report' : ''}</p>}
+      {l && <p className="text-dim">{STATE[l.state]?.[0] || l.state} since {clock(l.since || l.at)}{l.slack ? ' · reported in Slack' : ''}{l.thread ? ` · worker thread ${l.thread}` : ''}{l.revision < item.revision ? ' · the incident got worse, or something else failed, after this report' : ''}</p>}
       {admin && faults > 0 && <FileKnown incident={item} known={known} reload={reload} />}
       <div className="mono text-[10px] text-dim break-all">Incident {item.id} · revision {item.revision} · {item.seen} fault{item.seen === 1 ? '' : 's'} seen in all</div>
     </div>
@@ -189,6 +189,7 @@ export default function Remediation() {
       {data.stale && <p className="mt-2 lv-warn">Monitoring is stale or unavailable: this is the last list it produced, and nothing is opened, closed or announced until it reports again.</p>}
       {data.public && <p className="mt-2 text-dim">Public view: counts by network and area. Hosts, reasons and reports are for signed-in administrators.</p>}
     </div>
+    {!!data.maintenance?.length && <div className="panel mt-3 p-3 text-[12px]" data-operation-maintenance><b>Operation maintenance</b> · {data.maintenance.map((m) => m.network).join(', ')}. Expected downtime stays visible; faults on these networks are held, not announced or repaired, until the operation ends and fresh monitoring arrives.</div>}
 
     {data.public ? <>
       <Section title="New" right={<span className="text-dim text-[12px]">{data.new.length}</span>}>{data.new.length ? <Groups groups={data.new} /> : <Empty>Nothing new.</Empty>}</Section>

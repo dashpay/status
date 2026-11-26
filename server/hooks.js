@@ -164,7 +164,9 @@ export function createHooks({ dir = process.env.WAKE_HOOKS_DIR, dataDir, clock =
     }
     return states.get(name);
   };
-  const wake = (name, event, delivery) => {
+  // `quiet`: the console's own wake. It tells no open page that a count moved,
+  // since the public answer does not hold it.
+  const wake = (name, event, delivery, quiet = false) => {
     const state = { seq: stateOf(name).seq + 1, at: iso(), event };
     states.set(name, state);
     // A wake that cannot be recorded still wakes: the listener is what matters.
@@ -173,7 +175,7 @@ export function createHooks({ dir = process.env.WAKE_HOOKS_DIR, dataDir, clock =
     const waiting = [...(waiters.get(name) || [])];
     for (const w of waiting) w.done();
     log({ event: 'hook-wake', hook: name, on: event, delivery, seq: state.seq, listenersWaiting: waiting.length, at: state.at });
-    onChange(name);
+    if (!quiet) onChange(name);
     return state;
   };
 
@@ -242,7 +244,7 @@ export function createHooks({ dir = process.env.WAKE_HOOKS_DIR, dataDir, clock =
     const hook = HOOK_NAME.test(name || '') ? configured().get(name) : null;
     if (hook?.source !== 'console' || !EVENT.test(event || '')) return null;
     delivered(name, 'woke');
-    return wake(name, event, 'console');
+    return wake(name, event, 'console', true);
   }
 
   const listenerOf = (hook, authorization) => {
@@ -317,15 +319,22 @@ export function createHooks({ dir = process.env.WAKE_HOOKS_DIR, dataDir, clock =
   // `open` counts a hook that is listening whether or not it is on `warn`,
   // leaves refusals out, and gives times to the minute. `invalid`: hooks.json is
   // there and does not parse, so no hook exists; that names nothing.
+  // A console hook is left out of `open` altogether: the console wakes it for
+  // what it sees, on private networks too, and its count moving would tell
+  // everyone the minute something broke there.
   const status = () => {
-    const hooks = list(), count = (level) => hooks.filter((h) => h.level === level).length;
-    const newest = (values) => values.filter(Boolean).sort().pop() || null, total = (key) => hooks.reduce((n, h) => n + h.deliveries[key], 0);
+    const hooks = list();
+    const newest = (values) => values.filter(Boolean).sort().pop() || null;
     const minute = (at) => (at ? `${at.slice(0, 16)}:00.000Z` : null);
-    const listening = count('ok') + count('warn'), lastWakeAt = newest(hooks.map((h) => h.at)), lastDeliveryAt = newest(hooks.map((h) => h.deliveries.lastAt));
-    const shared = { hooks: hooks.length, listening, down: count('down'), starting: count('info'), woke: total('woke'), ignored: total('ignored') };
+    const sum = (rows) => {
+      const count = (level) => rows.filter((h) => h.level === level).length, total = (key) => rows.reduce((n, h) => n + h.deliveries[key], 0);
+      return { shared: { hooks: rows.length, listening: count('ok') + count('warn'), down: count('down'), starting: count('info'), woke: total('woke'), ignored: total('ignored') },
+        warn: count('warn'), refused: total('refused'), lastWakeAt: newest(rows.map((h) => h.at)), lastDeliveryAt: newest(rows.map((h) => h.deliveries.lastAt)) };
+    };
+    const all = sum(hooks), outside = sum(hooks.filter((h) => h.source !== 'console'));
     return { invalid: cache.invalid, hooks, startedAt: iso(startedAt),
-      summary: { ...shared, warn: count('warn'), refused: total('refused'), lastWakeAt, lastDeliveryAt },
-      open: { ...shared, lastWakeAt: minute(lastWakeAt), lastDeliveryAt: minute(lastDeliveryAt), startedAt: minute(iso(startedAt)) } };
+      summary: { ...all.shared, warn: all.warn, refused: all.refused, lastWakeAt: all.lastWakeAt, lastDeliveryAt: all.lastDeliveryAt },
+      open: { ...outside.shared, lastWakeAt: minute(outside.lastWakeAt), lastDeliveryAt: minute(outside.lastDeliveryAt), startedAt: minute(iso(startedAt)) } };
   };
   const close = () => { for (const set of waiters.values()) for (const w of [...set]) w.done(); };
 

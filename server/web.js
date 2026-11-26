@@ -62,8 +62,9 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   // only that something changed: which hook is not for everyone.
   const hooks = createHooks({ dir: hooksDir, dataDir, clock, ...(hookWaitMs ? { waitMs: hookWaitMs } : {}), onChange: () => {
     // The public answer is kept for a few seconds; a page that reloads for this
-    // wake must not be given the answer from before it. Only a wake gets here,
-    // and a wake needs the hook's secret, so this tells a stranger nothing.
+    // wake must not be given the answer from before it. Only a wake from
+    // outside gets here, and that needs the hook's secret, so this tells a
+    // stranger nothing. The console's own wakes do not come this way.
     cached.delete('hooks-public');
     clearTimeout(debounce.get('hooks'));
     debounce.set('hooks', setTimeout(() => push('hooks', { at: new Date(clock()).toISOString() }), 300));
@@ -590,7 +591,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   // the worker can file a thing away and cannot quietly bring it back.
   const triageActor = (req, res, next) => {
     const worker = triage.workerOf(req.get('authorization'));
-    if (worker) { req.actor = worker; return next(); }
+    if (worker) { req.actor = worker; req.worker = true; return next(); }
     signedIn(req, res, () => auth.csrf(req, res, () => {
       if (!isAdmin(req)) return res.status(403).json({ error: 'Only admins and the triage worker change triage' });
       req.actor = req.session.user.login;
@@ -601,13 +602,15 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   app.get('/api/remediation/triage', (req, res) => {
     reloadSettings();
     const full = isAdmin(req) || !!triage.workerOf(req.get('authorization'));
+    // Without an account the answer is the last look, kept for a few seconds:
+    // such a request sorts nothing, writes nothing and wakes nobody.
     res.set('Cache-Control', 'private, no-store').vary('Cookie').json(triage.view({ full, visibleNetworks: visible(req).map((n) => n.name),
-      dispatch: againstReceiver(loadControl(dataDir), acknowledged()).dispatch }));
+      dispatch: () => againstReceiver(loadControl(dataDir), acknowledged()).dispatch, maintenance: () => operationMaintenance(dataDir, settings, clock()) }));
   });
-  app.post('/api/remediation/known', triageActor, (req, res) => triaged(res, () => ({ entry: triage.file(req.body, req.actor) }), 201));
-  app.patch('/api/remediation/known/:id', triageActor, (req, res) => triaged(res, () => ({ entry: triage.attach(req.params.id, req.body, req.actor) })));
+  app.post('/api/remediation/known', triageActor, (req, res) => triaged(res, () => ({ entry: triage.file(req.body, req.actor, { worker: !!req.worker }) }), 201));
+  app.patch('/api/remediation/known/:id', triageActor, (req, res) => triaged(res, () => ({ entry: triage.attach(req.params.id, req.body, req.actor, { worker: !!req.worker }) })));
   app.delete('/api/remediation/known/:id', ...adminWrite, (req, res) => triaged(res, () => { triage.remove(req.params.id, req.session.user.login); return { removed: req.params.id }; }));
-  app.put('/api/remediation/incidents/:id', triageActor, (req, res) => triaged(res, () => ({ ledger: triage.report(req.params.id, req.body, req.actor) })));
+  app.put('/api/remediation/incidents/:id', triageActor, (req, res) => triaged(res, () => triage.report(req.params.id, req.body, req.actor)));
 
   // Infrastructure pages: full detail for any account with access; otherwise a
   // sanitized view (statistics, nothing identifying). Spend is never shown

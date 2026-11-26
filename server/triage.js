@@ -39,7 +39,13 @@ export const ENDED_KEEP_MS = 7 * 24 * 3600_000;
 export const ENDED_MAX = 200;
 export const MAX_ENTRIES = 300;
 export const MAX_PATTERNS = 200;
+// Across the whole known list. Every open issue is tried against every pattern.
+export const MAX_TOTAL_PATTERNS = 3000;
+// Incidents open at once. A fault that would open one more waits, and is counted.
+export const MAX_OPEN = 500;
 const FRESH_MS = 180_000;
+// The answer for a visitor without an account is kept this long.
+const PUBLIC_MS = 5000;
 // What the worker may say about an incident.
 //   working    a repair run has started
 //   fixed      the worker changed something and believes the fault is repaired
@@ -52,7 +58,7 @@ const time = (v) => (typeof v === 'string' && Number.isFinite(Date.parse(v)) ? n
 const object = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const str = (v) => (typeof v === 'string' ? v : '');
 const hash = (...parts) => createHash('sha256').update(JSON.stringify(parts)).digest('hex');
-const field = (v) => typeof v === 'string' && v.trim().length > 0 && v.length <= 512 && ![...v].some((ch) => ch.charCodeAt(0) < 32);
+const field = (v) => typeof v === 'string' && v.trim().length > 0 && v.length <= 256 && ![...v].some((ch) => ch.charCodeAt(0) < 32);
 const stars = (v) => /^\**$/.test(v.trim());
 
 // A pattern names issues by the four fields monitoring identifies them with,
@@ -67,9 +73,12 @@ export function validPattern(p) {
   for (const k of ['scope', 'target', 'code']) if (!field(p[k])) throw new Error(`a pattern needs ${k}: text, or * for any`);
   if (p.name !== undefined && !field(p.name)) throw new Error('a pattern\'s name is text when given');
   if (!Object.hasOwn(RANK, p.severity)) throw new Error('a pattern\'s severity is info, warning or critical');
-  // A whole domain cannot be filed away in one line.
-  if (stars(p.scope) && stars(p.target) && stars(p.code) && p.name === undefined) throw new Error('a pattern must name a scope, a target or a code');
-  return { domain: p.domain, scope: p.scope.trim(), target: p.target.trim(), code: p.code.trim(), ...(p.name === undefined ? {} : { name: p.name.trim() }), severity: p.severity };
+  // A whole domain cannot be filed away in one line: a pattern names a scope
+  // or a target, at least in part, or one code written out. A name of `*` is
+  // no name.
+  if (stars(p.scope) && stars(p.target) && p.code.includes('*')) throw new Error('a pattern must name a scope or a target, or one code without *');
+  const name = p.name === undefined || stars(p.name) ? undefined : p.name.trim();
+  return { domain: p.domain, scope: p.scope.trim(), target: p.target.trim(), code: p.code.trim(), ...(name === undefined ? {} : { name }), severity: p.severity };
 }
 
 export function matches(pattern, issue) {
@@ -100,7 +109,7 @@ export function groupOf(issue) {
   }
   if (issue.domain === 'ci' && code === 'queue_stale') return { key: ['ci', 'queue-monitor'], title: 'CI queue observation', kind: 'CI', exact, wide: null };
   if (issue.domain === 'ci') return { key: ['ci', 'host', scope], title: scope, kind: 'CI host', exact, wide: { domain: 'ci', scope, target: '*', code: '*', severity } };
-  if (issue.domain === 'aws' && ['idle_volume', 'idle_address'].includes(code)) return { key: ['aws', 'idle'], title: 'Unused AWS resources', kind: 'AWS', exact, wide: { domain: 'aws', scope: '*', target: '*', code: 'idle_*', severity } };
+  if (issue.domain === 'aws' && ['idle_volume', 'idle_address'].includes(code)) return { key: ['aws', 'idle'], title: 'Unused AWS resources', kind: 'AWS', exact, wide: { domain: 'aws', scope: '*', target: '*', code, severity } };
   if (issue.domain === 'aws' && ['aws_stale', 'aws_collection_failed', 'aws_health_missing'].includes(code)) return { key: ['aws', 'monitor'], title: 'AWS collection', kind: 'AWS', exact, wide: null };
   if (issue.domain === 'aws') return { key: ['aws', scope, target], title: `${target} (${scope})`, kind: 'AWS', exact, wide: null };
   if (issue.domain === 'maintenance') return { key: ['maintenance', code, target], title: `${TITLES[code] || 'Release task'}${str(e.tag) ? ` · ${str(e.tag).slice(0, 100)}` : ''}`, kind: 'Release task', exact, wide: null };
@@ -147,22 +156,35 @@ export function advance(previous, sorted, now) {
     if (!groups.has(key)) groups.set(key, { group, items: [] });
     groups.get(key).items.push(s.issue);
   }
+  let unopened = 0;
   for (const [key, { group, items }] of groups) {
-    const severity = worst(items.map((i) => i.severity));
+    const severity = worst(items.map((i) => i.severity)), things = [...new Set(items.map(thingOf))], ids = items.map((i) => i.id);
     let e = open.get(key);
     if (!e) {
-      e = { id: hash(key, at).slice(0, 16), key, title: group.title, kind: group.kind, openedAt: at, severity, revision: 1, issues: [], clearSince: null, ledger: null };
+      if (open.size >= MAX_OPEN) { unopened += 1; continue; }
+      e = { id: hash(key, at).slice(0, 16), key, title: group.title, kind: group.kind, openedAt: at, severity, revision: 1, issues: [], things: [], current: [], clearSince: null, ledger: null };
       open.set(key, e);
     } else {
+      const had = new Set(e.things);
       if (rank(severity) > rank(e.severity)) { e.severity = severity; e.revision += 1; }
+      // A different thing failing in the same place is news too. The same thing
+      // again is not: a job that waits or fails is one thing however often.
+      else if (things.some((t) => !had.has(t))) e.revision += 1;
       e.clearSince = null;
     }
-    e.issues = [...new Set([...e.issues, ...items.map((i) => i.id)])].slice(-500);
+    // What is open now goes last, so that the cut never drops it.
+    const now_ = new Set(ids);
+    e.issues = [...e.issues.filter((id) => !now_.has(id)), ...ids].slice(-500);
+    e.things = [...new Set([...e.things, ...things])].slice(-500);
+    e.current = ids.slice(-500);
   }
   const pile = new Map(sorted.map((s) => [s.issue.id, s.pile]));
   for (const [key, e] of open) {
     if (groups.has(key)) continue;
-    const filed = e.issues.some((id) => pile.get(id) === 'known' || pile.get(id) === 'expected');
+    // Filed: what was new on the last look is known now. A fault that recovered
+    // beside a filed one is a recovery, and gets its quiet hour.
+    const filed = (e.current || []).some((id) => pile.get(id) === 'known' || pile.get(id) === 'expected');
+    e.current = [];
     if (!filed) {
       // Held for an operation is neither over nor new: it waits as it is.
       if (e.issues.some((id) => pile.get(id) === 'held')) continue;
@@ -173,11 +195,16 @@ export function advance(previous, sorted, now) {
     ended.push({ ...e, endedAt: filed ? at : e.clearSince, outcome: filed ? 'filed' : 'recovered' });
   }
   ended = ended.filter((e) => now - Date.parse(e.endedAt) <= ENDED_KEEP_MS).slice(-ENDED_MAX);
-  return { episodes: [...open.values()], ended };
+  return { episodes: [...open.values()], ended, unopened };
 }
 
+// What an incident consists of, for telling "more of the same" from "something
+// else": the pattern an issue would be filed under, without its severity.
+const thingOf = (issue) => JSON.stringify({ ...groupOf(issue).exact, severity: undefined });
+
 // What the worker has not been shown: an incident it has not reported on, or
-// one that got worse since it did.
+// one that has got worse or gained a different fault since the revision it
+// reported at.
 export const unattended = (episodes) => episodes.filter((e) => !e.ledger || e.ledger.revision < e.revision).map((e) => `${e.id}:${e.revision}`);
 
 // Known entries past their date, or idle for a day, are dropped. `idleSince` is
@@ -207,15 +234,17 @@ function validEntry(e) {
   try {
     if (!object(e) || !/^[a-f0-9]{12}$/.test(e.id)) return null;
     return { id: e.id, title: str(e.title).slice(0, 300), reason: reasonOf(e.reason), match: patterns(e.match, 1), covers: patterns(e.covers || [], 0),
-      standing: e.standing === true, until: time(e.until), by: str(e.by).slice(0, 39), at: time(e.at), idleSince: time(e.idleSince) };
+      standing: e.standing === true, until: time(e.until), by: str(e.by).slice(0, 39), worker: e.worker === true, at: time(e.at), idleSince: time(e.idleSince),
+      ...(time(e.changedAt) ? { changedBy: str(e.changedBy).slice(0, 39), changedAt: time(e.changedAt) } : {}) };
   } catch { return null; }
 }
 const validLedger = (l) => (object(l) && STATES.includes(l.state) && Number.isSafeInteger(l.revision)
   ? { state: l.state, revision: l.revision, summary: str(l.summary).slice(0, 2000), slack: object(l.slack) ? { channel: str(l.slack.channel), ts: str(l.slack.ts) } : null,
     thread: str(l.thread).slice(0, 100) || null, by: str(l.by).slice(0, 39), at: time(l.at), since: time(l.since) } : null);
+const strings = (list) => (Array.isArray(list) ? list : []).filter((x) => typeof x === 'string').slice(-500);
 const validEpisode = (e) => (object(e) && /^[a-f0-9]{16}$/.test(e.id) && typeof e.key === 'string' && time(e.openedAt) && Number.isSafeInteger(e.revision)
   ? { id: e.id, key: e.key, title: str(e.title).slice(0, 300), kind: str(e.kind).slice(0, 40), openedAt: time(e.openedAt), severity: Object.hasOwn(RANK, e.severity) ? e.severity : 'warning', revision: e.revision,
-    issues: (Array.isArray(e.issues) ? e.issues : []).filter((x) => typeof x === 'string').slice(-500), clearSince: time(e.clearSince), ledger: validLedger(e.ledger),
+    issues: strings(e.issues), things: strings(e.things), current: strings(e.current), clearSince: time(e.clearSince), ledger: validLedger(e.ledger),
     ...(time(e.endedAt) ? { endedAt: time(e.endedAt), outcome: e.outcome === 'filed' ? 'filed' : 'recovered' } : {}) } : null);
 
 // Listed for the page and the worker. Evidence names hosts, branches and
@@ -253,7 +282,8 @@ export function createTriage({ dataDir, clock = Date.now, hooks = null, hook = p
   const loadTriage = () => {
     const t = readJSON(triagePath);
     return { episodes: (t?.episodes || []).map(validEpisode).filter(Boolean), ended: (t?.ended || []).map(validEpisode).filter((e) => e?.endedAt),
-      woken: (Array.isArray(t?.woken) ? t.woken : []).filter((x) => typeof x === 'string').slice(0, 1000) };
+      // As long as the list of open incidents can be (MAX_OPEN), so that none is forgotten and woken for twice.
+      unopened: Number.isSafeInteger(t?.unopened) && t.unopened > 0 ? t.unopened : 0, woken: (Array.isArray(t?.woken) ? t.woken : []).filter((x) => typeof x === 'string').slice(0, MAX_OPEN) };
   };
   const saveTriage = (t) => writeAtomic(triagePath, JSON.stringify({ schemaVersion: 1, ...t }));
   const incidentState = () => readJSON(join(dataDir, 'incidents', 'state.json'));
@@ -263,35 +293,54 @@ export function createTriage({ dataDir, clock = Date.now, hooks = null, hook = p
   // Bring both files up to what monitoring says now, and wake the worker for
   // whatever it has not been shown. Nothing moves on stale monitoring: an
   // incident must not be called recovered because the monitor stopped.
+  // The last look is kept, for the answer to a visitor without an account: such
+  // a request sorts nothing and writes nothing. The file watch and the timer in
+  // the web process keep it current.
+  let snapshot = null;
+  const memo = new Map();
+  const changed = () => { memo.clear(); onChange(); };
+  const keep = (state, entries, triage) => (snapshot = { generatedAt: time(state?.generatedAt), entries, triage, sorted: sort(state?.issues, entries) });
   function refresh() {
     const now = clock(), state = incidentState();
     let entries = loadKnown();
     const before = loadTriage();
-    if (!fresh(state, now)) return { state, entries, triage: before, sorted: sort(state?.issues, entries), stale: true };
+    if (!fresh(state, now)) return keep(state, entries, before);
+    // A file that cannot be written must not wake the worker on every look: what
+    // was woken for is in that file.
+    let saved = true;
+    const save = (what, fn) => { try { fn(); } catch (e) { saved = false; log({ event: 'triage-not-saved', what, error: String(e.message).slice(0, 200), at: iso(now) }); } };
     const lapsed = lapse(entries, state.issues, now);
     if (JSON.stringify(lapsed.kept) !== JSON.stringify(entries)) {
       entries = lapsed.kept;
-      saveKnown(entries);
+      save('known', () => saveKnown(entries));
       for (const d of lapsed.dropped) log({ event: 'triage-known-lapsed', entry: d.id, why: d.why, at: iso(now) });
     }
-    const sorted = sort(state.issues, entries);
-    const next = advance(before, sorted, now);
+    const next = advance(before, sort(state.issues, entries), now);
     const want = unattended(next.episodes), had = new Set(before.woken);
     const news = want.filter((w) => !had.has(w));
     // Kept: what is still unattended, so a restart does not wake for it twice.
     const triage = { ...next, woken: want };
-    if (JSON.stringify(triage) !== JSON.stringify(before)) { saveTriage(triage); onChange(); }
-    if (news.length) {
+    if (JSON.stringify(triage) !== JSON.stringify(before)) { save('triage', () => saveTriage(triage)); changed(); }
+    if (news.length && saved) {
       const fired = hooks?.fire?.(hook, 'triage') || null;
       log({ event: 'triage-wake', hook, incidents: news.length, seq: fired?.seq ?? null, at: iso(now) });
     }
-    return { state, entries, triage, sorted, stale: false };
+    return keep(state, entries, triage);
   }
 
   // The answer to "what is going on": incidents by what is happening to them,
-  // then the piles. `full` is an administrator or the worker.
-  function view({ full = false, visibleNetworks = [], dispatch = 'off' } = {}) {
-    const now = clock(), { state, entries, triage, sorted, stale } = refresh();
+  // then the piles. `full` is an administrator or the worker, and looks afresh.
+  // Everyone else gets the last look, and the same answer for a few seconds.
+  // `dispatch` is asked only when an answer is made.
+  // `maintenance` gives the networks a console operation is running on (or has
+  // just finished on): their faults are held, and the page and the worker are
+  // told why.
+  function view({ full = false, visibleNetworks = [], dispatch = () => 'off', maintenance = () => ({}) } = {}) {
+    const now = clock(), key = full ? null : [...visibleNetworks].sort().join('\n'), hit = full ? null : memo.get(key);
+    if (hit && now - hit.at < PUBLIC_MS && now >= hit.at) return hit.value;
+    const { generatedAt, entries, triage, sorted } = full || !snapshot ? refresh() : snapshot;
+    const stale = !(generatedAt && now - Date.parse(generatedAt) <= FRESH_MS && Date.parse(generatedAt) <= now + 60_000);
+    const state = { generatedAt }, fixing = (typeof dispatch === 'function' ? dispatch() : dispatch) === 'on' ? 'on' : 'off', operations = maintenance();
     const visible = new Set(visibleNetworks);
     const seen = sorted.filter((s) => full || s.issue.domain !== 'network' || visible.has(s.issue.scope));
     const of = (pile) => seen.filter((s) => s.pile === pile);
@@ -308,14 +357,20 @@ export function createTriage({ dataDir, clock = Date.now, hooks = null, hook = p
     const known = full ? entries.map((entry) => ({ ...entry, issues: seen.filter((s) => s.entry === entry.id && s.pile === 'known').map((s) => project(s.issue, true)),
       expected: seen.filter((s) => s.entry === entry.id && s.pile === 'expected').map((s) => project(s.issue, true)) })) : [];
     const count = (name) => incidents.filter((i) => i.state === name).length;
-    return { schemaVersion: 1, public: !full, at: iso(now), generatedAt: time(state?.generatedAt), stale, fixing: dispatch === 'on' ? 'on' : 'off',
+    const answer = { schemaVersion: 1, public: !full, at: iso(now), generatedAt: state.generatedAt, stale, fixing,
       worker: full ? { hook, seenAt: workerSeenAt === null ? null : iso(workerSeenAt) } : undefined,
+      // Incidents that could not be opened because too many are open already.
+      unopened: full ? triage.unopened || 0 : undefined,
+      maintenance: Object.entries(object(operations) ? operations : {}).filter(([name, v]) => v?.active === true && (full || visible.has(name)))
+        .map(([network, v]) => ({ network, ...(full ? { operations: Array.isArray(v.operations) ? v.operations : [] } : {}) })),
       counts: { new: full ? count('new') + count('worse') : listing(of('new'), false).length, working: count('working'), fixed: count('fixed'), needsYou: count('needs_you'), noted: count('noted'),
         known: of('known').length, expected: of('expected').length, held: of('held').length, review: of('review').length, faults: seen.length },
       incidents, ...(full ? {} : { new: listing(of('new'), false) }),
       known, knownOpen: full ? undefined : listing([...of('known'), ...of('expected')], false),
       held: listing(of('held'), full), review: listing(of('review'), full),
       ended: full ? triage.ended.slice(-50).reverse().map((e) => ({ id: e.id, title: e.title, kind: e.kind, severity: e.severity, openedAt: e.openedAt, endedAt: e.endedAt, outcome: e.outcome, ledger: e.ledger })) : [] };
+    if (!full) { if (memo.size > 50) memo.clear(); memo.set(key, { at: now, value: answer }); }
+    return answer;
   }
 
   const openEpisode = (id) => {
@@ -327,19 +382,32 @@ export function createTriage({ dataDir, clock = Date.now, hooks = null, hook = p
   // `wide` everything else of its kind.
   const patternsOf = (id, wide) => {
     const episode = openEpisode(id), { sorted } = refresh();
-    const current = sorted.filter((s) => s.pile === 'new' && episode.issues.includes(s.issue.id)).map((s) => groupOf(s.issue));
-    if (!current.length) throw Object.assign(new Error('This incident has no open fault to file'), { status: 409 });
+    const faults = sorted.filter((s) => s.pile === 'new' && episode.issues.includes(s.issue.id)).map((s) => s.issue);
+    if (!faults.length) throw Object.assign(new Error('This incident has no open fault to file'), { status: 409 });
+    // A name is taken as written, and `*` in a pattern means "anything": a
+    // fault with one in its name would be filed wider than it is.
+    if (faults.some((i) => [i.scope, i.target, i.code, i.evidence?.repo, i.evidence?.jobName].some((v) => typeof v === 'string' && v.includes('*'))))
+      throw Object.assign(new Error('A fault of this incident has * in its name; file it with patterns written out'), { status: 409 });
+    const current = faults.map(groupOf);
     // One pattern per thing named, at the highest ceiling any of its faults has.
     const unique = (list) => {
       const out = new Map();
       for (const p of list) { const key = JSON.stringify({ ...p, severity: undefined }), had = out.get(key); if (!had || rank(p.severity) > rank(had.severity)) out.set(key, p); }
       return [...out.values()];
     };
-    return { title: episode.title, match: unique(current.map((g) => g.exact)), covers: wide ? unique(current.map((g) => g.wide).filter(Boolean)) : [] };
+    // Checked like patterns that were written out: what is saved must load again.
+    const checked = (list) => {
+      if (list.length > MAX_PATTERNS) throw Object.assign(new Error(`This incident has more than ${MAX_PATTERNS} different faults; file it with patterns written out`), { status: 409 });
+      try { return list.map(validPattern); } catch (e) { throw Object.assign(new Error(`A fault of this incident cannot be filed by name (${e.message}); file it with patterns written out`), { status: 409 }); }
+    };
+    return { title: episode.title, match: checked(unique(current.map((g) => g.exact))), covers: wide ? checked(unique(current.map((g) => g.wide).filter(Boolean))) : [] };
   };
+  const total = (entries) => entries.reduce((n, e) => n + e.match.length + e.covers.length, 0);
+  const roomFor = (entries) => { if (total(entries) > MAX_TOTAL_PATTERNS) throw new Error('The known list holds too many patterns; remove entries that no longer apply'); };
 
   // "This is known": by an incident on the page, or by patterns written out.
-  function file(body, by) {
+  // `worker`: filed by the triage worker, not by a person.
+  function file(body, by, { worker = false } = {}) {
     if (!object(body)) throw new Error('a JSON object is needed');
     const now = clock(), reason = reasonOf(body.reason);
     const from = body.incident !== undefined ? patternsOf(str(body.incident), body.wide === true) : { title: str(body.title).slice(0, 300), match: patterns(body.match, 1), covers: patterns(body.covers || [], 0) };
@@ -350,19 +418,23 @@ export function createTriage({ dataDir, clock = Date.now, hooks = null, hook = p
     }
     const entries = loadKnown();
     if (entries.length >= MAX_ENTRIES) throw new Error('The known list is full; remove entries that no longer apply');
-    const entry = { id: hash(now, reason, from.match, Math.random()).slice(0, 12), title: from.title || reason.slice(0, 80), reason, match: from.match.slice(0, MAX_PATTERNS), covers: from.covers,
-      standing: body.standing === true, until, by: str(by).slice(0, 39), at: iso(now), idleSince: null };
+    const entry = { id: hash(now, reason, from.match, Math.random()).slice(0, 12), title: from.title || reason.slice(0, 80), reason, match: from.match, covers: from.covers,
+      standing: body.standing === true, until, by: str(by).slice(0, 39), worker: worker === true, at: iso(now), idleSince: null };
+    roomFor([...entries, entry]);
     saveKnown([...entries, entry]);
     log({ event: 'triage-known-filed', entry: entry.id, by: entry.by, patterns: entry.match.length + entry.covers.length, at: entry.at });
-    refresh(); onChange();
+    refresh(); changed();
     return entry;
   }
   // "This follows from that": put an incident, or patterns, under an entry as
-  // expected. The reason of the entry can be amended in the same call.
-  function attach(id, body, by) {
+  // expected. Whoever filed the entry, or an administrator, can amend its reason
+  // in the same call; the worker cannot reword an entry that is not its own.
+  function attach(id, body, by, { worker = false } = {}) {
     if (!object(body)) throw new Error('a JSON object is needed');
     const entries = loadKnown(), entry = entries.find((e) => e.id === id);
     if (!entry) throw Object.assign(new Error('No known entry has this id'), { status: 404 });
+    if (worker && (body.reason !== undefined || body.standing !== undefined) && !(entry.worker && entry.by === by))
+      throw Object.assign(new Error('The worker changes the reason and keeping only of entries it filed'), { status: 403 });
     let add = [];
     if (body.incident !== undefined) { const from = patternsOf(str(body.incident), body.wide === true); add = [...from.match, ...from.covers]; }
     else if (body.covers !== undefined) add = patterns(body.covers, 1);
@@ -371,9 +443,11 @@ export function createTriage({ dataDir, clock = Date.now, hooks = null, hook = p
     if (entry.covers.length > MAX_PATTERNS) throw new Error('This entry covers too much; file a new one');
     if (body.reason !== undefined) entry.reason = reasonOf(body.reason);
     if (body.standing !== undefined) entry.standing = body.standing === true;
+    Object.assign(entry, { changedBy: str(by).slice(0, 39), changedAt: iso(clock()) });
+    roomFor(entries);
     saveKnown(entries);
-    log({ event: 'triage-known-changed', entry: id, by: str(by).slice(0, 39), covers: entry.covers.length, at: iso(clock()) });
-    refresh(); onChange();
+    log({ event: 'triage-known-changed', entry: id, by: entry.changedBy, covers: entry.covers.length, at: entry.changedAt });
+    refresh(); changed();
     return entry;
   }
   function remove(id, by) {
@@ -381,7 +455,7 @@ export function createTriage({ dataDir, clock = Date.now, hooks = null, hook = p
     if (!entries.some((e) => e.id === id)) throw Object.assign(new Error('No known entry has this id'), { status: 404 });
     saveKnown(entries.filter((e) => e.id !== id));
     log({ event: 'triage-known-removed', entry: id, by: str(by).slice(0, 39), at: iso(clock()) });
-    refresh(); onChange();
+    refresh(); changed();
   }
 
   // What the worker did about an incident. The Slack thread and the worker's
@@ -397,16 +471,21 @@ export function createTriage({ dataDir, clock = Date.now, hooks = null, hook = p
     }
     if (body.thread !== undefined && (typeof body.thread !== 'string' || !/^[A-Za-z0-9_.:-]{1,100}$/.test(body.thread))) throw new Error('thread is an id');
     const episode = openEpisode(id), now = clock();
-    const revision = body.revision === undefined ? episode.revision : body.revision;
-    if (!Number.isSafeInteger(revision) || revision < 1 || revision > episode.revision) throw new Error('revision is the one the incident was read at');
+    const read = body.revision === undefined ? episode.revision : body.revision;
+    if (!Number.isSafeInteger(read) || read < 1 || read > episode.revision) throw new Error('revision is the one the incident was read at');
     const triage = loadTriage(), e = triage.episodes.find((x) => x.id === id), old = e.ledger;
+    // A report that arrives late does not take back what a later one covered.
+    const revision = Math.max(read, old?.revision ?? 0);
     e.ledger = { state: body.state, revision, summary: body.summary ?? old?.summary ?? '', slack: slack ?? old?.slack ?? null, thread: body.thread ?? old?.thread ?? null,
       by: str(by).slice(0, 39), at: iso(now), since: old?.state === body.state ? old.since || old.at : iso(now) };
-    triage.woken = unattended(triage.episodes);
+    // Still unattended when the incident moved on after it was read; the wake
+    // for that has been sent, so the list of those woken for stays as it is.
+    triage.woken = [...new Set([...triage.woken, ...unattended(triage.episodes)])].slice(-MAX_OPEN);
     saveTriage(triage);
     log({ event: 'triage-report', incident: id, state: body.state, revision, by: e.ledger.by, at: e.ledger.at });
-    onChange();
-    return e.ledger;
+    refresh(); changed();
+    // `revision`: where the incident is now. Higher than the ledger's: look again.
+    return { ledger: e.ledger, revision: e.revision };
   }
 
   // Worker tokens, as digests: this host can check one and cannot use one.

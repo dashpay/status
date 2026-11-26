@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { advance, createTriage, groupOf, lapse, matches, pileOf, sort, unattended, validPattern, LAPSE_MS, QUIET_MS } from './triage.js';
+import { advance, createTriage, groupOf, lapse, matches, pileOf, sort, unattended, validPattern, LAPSE_MS, MAX_OPEN, QUIET_MS } from './triage.js';
 import { createHooks } from './hooks.js';
 import { createWeb } from './web.js';
 import { DEFAULT_SETTINGS } from '../shared/settings.js';
@@ -26,7 +26,13 @@ test('a pattern matches whole fields with * and is refused when it names nothing
   assert.equal(matches(p, failed(1, 'lint')), false);
   assert.equal(matches(p, waiting(1)), false);
   assert.equal(matches(validPattern({ domain: 'network', scope: 'devnet-humid', target: '*', code: '*', severity: 'critical' }), wallet()), true);
+  // One code written out, anywhere: allowed. A name of `*` is no name.
+  assert.equal(matches(validPattern({ domain: 'aws', scope: '*', target: '*', code: 'idle_volume', severity: 'info' }), issue('aws', 'us-west-2', 'vol-1', 'idle_volume', 'info')), true);
+  assert.equal('name' in validPattern({ domain: 'ci', scope: 'runner-a', target: '*', code: '*', name: ' * ', severity: 'warning' }), false);
   for (const bad of [null, { domain: 'ci', scope: '*', target: '*', code: '*', severity: 'warning' }, { domain: 'any', scope: 'a', target: 'b', code: 'c', severity: 'warning' },
+    // Everything of a domain, said another way.
+    { domain: 'ci', scope: '*', target: '*', code: '*', name: '*', severity: 'critical' }, { domain: 'ci', scope: '*', target: '*', code: '*_*', severity: 'critical' },
+    { domain: 'ci', scope: '**', target: ' * ', code: '*', name: 'build', severity: 'critical' }, { domain: 'ci', scope: 'x'.repeat(257), target: 'b', code: 'c', severity: 'warning' },
     { domain: 'ci', scope: 'a', target: 'b', code: 'c' }, { domain: 'ci', scope: 'a', target: 'b', code: 'c', severity: 'warning', regex: 'x' }, { domain: 'ci', scope: '', target: 'b', code: 'c', severity: 'warning' }])
     assert.throws(() => validPattern(bad), `refused: ${JSON.stringify(bad)}`);
 });
@@ -82,6 +88,46 @@ test('an incident opens once, gathers its faults, and is revised only when it ge
   t = advance(t, sort([a], []), T0 + 180_000);
   t = advance(t, sort([{ ...a, severity: 'critical' }], []), T0 + 240_000);
   assert.equal(t.episodes[0].revision, 2);
+});
+
+test('something else failing in the same place revises the incident; the same thing again does not', () => {
+  const a = insight(), faucet = issue('network', 'devnet-humid', 'faucet', 'endpoint_failed');
+  let t = advance(null, sort([a], []), T0);
+  const id = t.episodes[0].id;
+  t.episodes[0].ledger = { state: 'needs_you', revision: 1 };
+  t = advance(t, sort([a, faucet], []), T0 + 60_000);
+  assert.deepEqual([t.episodes[0].revision, t.episodes[0].severity], [2, 'warning']);
+  assert.deepEqual(unattended(t.episodes), [`${id}:2`]);
+  t.episodes[0].ledger.revision = 2;
+  // The faucet recovers and fails again: seen before, not news.
+  t = advance(t, sort([a], []), T0 + 120_000);
+  t = advance(t, sort([a, faucet], []), T0 + 180_000);
+  assert.equal(t.episodes[0].revision, 2);
+  // Open faults are kept at the end of the list, so a cut cannot drop them.
+  assert.deepEqual(t.episodes[0].issues.slice(-2), [a.id, faucet.id]);
+  assert.deepEqual(t.episodes[0].current, [a.id, faucet.id]);
+});
+
+test('a fault that recovers beside a filed one is a recovery, with its quiet hour', () => {
+  const a = insight(), b = wallet(), entries = [entry([groupOf(a).exact])];
+  let t = advance(null, sort([a, b], []), T0);
+  t = advance(t, sort([a, b], entries), T0 + 1000);
+  assert.deepEqual(t.episodes[0].current, [b.id]);
+  t = advance(t, sort([a], entries), T0 + 2000);
+  assert.equal(t.episodes.length, 1, 'not ended as filed: the wallet host was never filed');
+  assert.equal(t.episodes[0].clearSince, at(T0 + 2000));
+  t = advance(t, sort([a], entries), T0 + 2000 + QUIET_MS);
+  assert.equal(t.ended.at(-1).outcome, 'recovered');
+});
+
+test('no more than a fixed number of incidents is open at once, and the rest is counted', () => {
+  const many = Array.from({ length: MAX_OPEN + 3 }, (_, i) => issue('network', `devnet-${i}`, 'host', 'host_health'));
+  let t = advance(null, sort(many, []), T0);
+  assert.deepEqual([t.episodes.length, t.unopened], [MAX_OPEN, 3]);
+  // The same on the next look: nothing is opened and forgotten in turn.
+  const ids = t.episodes.map((e) => e.id).join();
+  t = advance(t, sort(many, []), T0 + 60_000);
+  assert.deepEqual([t.episodes.map((e) => e.id).join() === ids, t.unopened], [true, 3]);
 });
 
 test('an incident ends an hour after its last fault cleared, or at once when it is filed', () => {
@@ -176,7 +222,11 @@ test('the worker is woken once for a new incident, again only when it gets worse
     assert.equal(later.counts.needsYou, 1);
     assert.equal(later.incidents.find((i) => i.id === net.id).ledger.slack.ts, '1764237600.000100');
     // A second report keeps the thread it was given the first time.
-    assert.equal(triage.report(net.id, { state: 'fixed', summary: 'restarted' }, 'infraclaw').slack.channel, 'C0C5QSM5FFG');
+    const second = triage.report(net.id, { state: 'fixed', summary: 'restarted' }, 'infraclaw');
+    assert.deepEqual([second.ledger.slack.channel, second.ledger.revision, second.revision], ['C0C5QSM5FFG', 2, 2]);
+    // A report that arrives late, read at an older revision, takes nothing back.
+    assert.equal(triage.report(net.id, { state: 'fixed', revision: 1 }, 'infraclaw').ledger.revision, 2);
+    assert.equal(f.fired.length, 2);
     assert.throws(() => triage.report(net.id, { state: 'done' }, 'infraclaw'), /state is one of/);
     assert.throws(() => triage.report(net.id, { state: 'fixed', revision: 9 }, 'infraclaw'), /revision/);
     assert.throws(() => triage.report('0000000000000000', { state: 'fixed' }, 'infraclaw'), /No open incident/);
@@ -220,6 +270,16 @@ test('filing an incident as known takes it off the list, and what it causes can 
     view = triage.view({ full: true });
     assert.deepEqual([view.counts.known, view.counts.expected, view.counts.new], [1, 2, 0]);
     assert.equal(JSON.parse(readFileSync(join(f.dataDir, 'remediation-known.json'), 'utf8')).entries.length, 1);
+    // A name with * in it would be filed wider than it is: by hand, then.
+    f.tick(60_000); f.state([a, faucet, wallet(), failed(9, 'test *')]);
+    const starred = triage.view({ full: true }).incidents.find((i) => i.kind === 'CI job');
+    assert.throws(() => triage.file({ incident: starred.id, reason: 'flaky' }, 'latte'), /has \* in its name/);
+    // The worker adds to any entry, and rewords only its own.
+    assert.throws(() => triage.attach(wide.id, { reason: 'reworded by the worker' }, 'infraclaw', { worker: true }), /only of entries it filed/);
+    const added = triage.attach(wide.id, { covers: [{ domain: 'ci', scope: '*', target: 'dashpay/platform/*', code: 'job_failed', name: 'test ?', severity: 'warning' }] }, 'infraclaw', { worker: true });
+    assert.deepEqual([added.by, added.changedBy, added.reason], ['latte', 'infraclaw', 'wallet host is being rebuilt']);
+    const own = triage.file({ match: [{ domain: 'ci', scope: 'runner-a', target: '*', code: 'disk_pressure', severity: 'warning' }], reason: 'cache fills up nightly' }, 'infraclaw', { worker: true });
+    assert.equal(triage.attach(own.id, { reason: 'cache fills up nightly; cleaned at 03:00' }, 'infraclaw', { worker: true }).reason, 'cache fills up nightly; cleaned at 03:00');
   } finally { f.done(); }
 });
 
@@ -256,6 +316,23 @@ test('without an account: counts by network and area, and no host, repository, r
     assert.deepEqual(open.knownOpen.map((g) => [g.title, g.count]), [['CI', 1]]);
     assert.equal(/devnet-private|host-9|insight|grovedb|platform|flaky|latte|runner-a/.test(JSON.stringify(open)), false);
     assert.equal(open.worker, undefined);
+    // A running operation is named for whoever may see its network, with its details for administrators only.
+    const operations = () => ({ 'devnet-humid': { active: true, operations: [{ id: 'op-1', action: 'upgrade', status: 'running' }] }, 'devnet-private': { active: true, operations: [] }, testnet: { active: false } });
+    f.tick(6000);
+    assert.deepEqual(triage.view({ full: false, visibleNetworks: ['devnet-humid'], maintenance: operations }).maintenance, [{ network: 'devnet-humid' }]);
+    assert.deepEqual(triage.view({ full: true, maintenance: operations }).maintenance.map((m) => [m.network, m.operations.length]), [['devnet-humid', 1], ['devnet-private', 0]]);
+    f.tick(6000);
+    const open2 = triage.view({ full: false, visibleNetworks: ['devnet-humid'] });
+    assert.deepEqual(open2.maintenance, []);
+    // The same answer for a few seconds, without another look; a change ends that at once.
+    const looks = f.logged.length;
+    assert.equal(triage.view({ full: false, visibleNetworks: ['devnet-humid'] }), open2);
+    assert.notEqual(triage.view({ full: false, visibleNetworks: [] }), open2);
+    assert.deepEqual(triage.view({ full: false, visibleNetworks: [] }).new.map((g) => g.title), ['CI']);
+    assert.equal(f.logged.length, looks);
+    f.tick(1000); f.state([a]);
+    triage.refresh();
+    assert.deepEqual(triage.view({ full: false, visibleNetworks: ['devnet-humid'] }).new.map((g) => [g.title, g.count]), [['devnet-humid', 1]]);
   } finally { f.done(); }
 });
 
@@ -264,7 +341,8 @@ test('a console hook is woken by the console and by nothing from outside', async
   try {
     const TOKEN = 'fixture-listener-token-0123456789abcdef';
     writeFileSync(join(f.dir, 'hooks.json'), JSON.stringify({ schemaVersion: 1, hooks: { remediation: { source: 'console', listeners: { triage: digest(TOKEN) } }, other: { source: 'github', listeners: { w: digest(TOKEN) } } } }));
-    const hooks = createHooks({ dir: f.dir, dataDir: f.dataDir, waitMs: 60, log: () => {} });
+    let told = 0;
+    const hooks = createHooks({ dir: f.dir, dataDir: f.dataDir, waitMs: 60, log: () => {}, onChange: () => { told += 1; } });
     assert.equal((await hooks.wait('remediation', `Bearer ${TOKEN}`)).body.seq, 0);
     const held = hooks.wait('remediation', `Bearer ${TOKEN}`, '0');
     assert.equal(hooks.fire('remediation', 'triage').seq, 1);
@@ -278,6 +356,9 @@ test('a console hook is woken by the console and by nothing from outside', async
     assert.deepEqual(posted, { status: 401, body: { error: 'Invalid signature' } });
     const row = hooks.list().find((h) => h.name === 'remediation');
     assert.deepEqual([row.level, row.hasSecret, row.deliveries.woke, row.deliveries.refused], ['ok', true, 1, 0]);
+    // Its wakes follow what breaks, on private networks too: the counts everyone can read leave it out, and no open page is told.
+    const s = hooks.status();
+    assert.deepEqual([s.summary.hooks, s.summary.woke, s.open.hooks, s.open.woke, s.open.lastWakeAt, told], [2, 1, 1, 0, null, 0]);
     // A console hook has listeners only.
     writeFileSync(join(f.dir, 'hooks.json'), JSON.stringify({ schemaVersion: 1, hooks: { remediation: { source: 'console', events: ['push'], listeners: {} } } }));
     assert.equal(createHooks({ dir: f.dir, dataDir: f.dataDir, log: () => {} }).status().invalid, true);
@@ -351,6 +432,13 @@ test('over HTTP: an administrator files, the worker reports, and nobody else rea
     assert.equal((await req(`/api/remediation/known/${entry.id}`, { method: 'DELETE', headers: { 'x-csrf-token': csrf } })).status, 200);
     const filedByAdmin = await req('/api/remediation/known', json('POST', { incident: net.id, reason: 'testnet insight is being moved', wide: true }, { 'x-csrf-token': csrf }));
     assert.equal(filedByAdmin.status, 201);
-    assert.equal((await filedByAdmin.json()).entry.by, 'someone');
+    const mine = (await filedByAdmin.json()).entry;
+    assert.deepEqual([mine.by, mine.worker], ['someone', false]);
+    // The worker puts more under an administrator's entry, and cannot reword it.
+    assert.equal((await fetch(`${base}/api/remediation/known/${mine.id}`, json('PATCH', { reason: 'reworded' }, worker))).status, 403);
+    const more = await fetch(`${base}/api/remediation/known/${mine.id}`, json('PATCH', { covers: [{ domain: 'ci', scope: 'github', target: 'dashpay/grovedb/*', code: 'queue_wait', severity: 'warning' }] }, worker));
+    assert.deepEqual([more.status, (await more.json()).entry.changedBy], [200, 'infraclaw']);
+    // Hiding a whole domain is refused, whoever asks.
+    assert.equal((await fetch(`${base}/api/remediation/known`, json('POST', { reason: 'everything', match: [{ domain: 'ci', scope: '*', target: '*', code: '*', name: '*', severity: 'critical' }] }, worker))).status, 400);
   } finally { app.close(); server.close(); f.done(); }
 });
