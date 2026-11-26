@@ -115,7 +115,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   // parsed, so both routes sit before the JSON parser; the listener's token is
   // its own kind, so they sit before the API tokens too.
   app.post('/api/hooks/:name', async (req, res) => {
-    const r = await hooks.receive(req.params.name, { signature: req.get('x-hub-signature-256'), event: req.get('x-github-event'), delivery: req.get('x-github-delivery'), length: req.get('content-length') }, req);
+    const r = await hooks.receive(req.params.name, req.headers, req);
     res.status(r.status).json(r.body);
   });
   app.get('/api/hooks/:name/wait', async (req, res) => {
