@@ -83,6 +83,15 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
       res.status(scope ? 200 : 202).json({ ok: true });
     } catch (e) { res.status(400).json({ error: e.message }); }
   });
+  // Wake hooks (server/hooks.js): a delivery from outside wakes a listener on a
+  // machine this host cannot reach. The delivery is read as a stream by the
+  // hook itself, so this sits before the body parsers. Like the route above it
+  // has its own limit, ahead of the general one: a hook may take a repository's
+  // whole workflow_job stream, and a delivery refused with 429 is not sent again.
+  app.post('/api/hooks/:name', rateLimit({ windowMs: 60_000, limit: 6000, standardHeaders: true, legacyHeaders: false }), async (req, res) => {
+    const r = await hooks.receive(req.params.name, req.headers, req);
+    res.status(r.status).json(r.body);
+  });
   app.use('/api', rateLimit({ windowMs: 60_000, limit: 600, standardHeaders: true, legacyHeaders: false }));
   app.use('/api/auth/github', rateLimit({ windowMs: 10 * 60_000, limit: 20, standardHeaders: true, legacyHeaders: false }));
   app.use(['/api/ops/:id', '/api/ops/:id/*rest'], (req, res, next) => (UUID.test(req.params.id) ? next() : res.status(404).json({ error: 'Operation not found' })));
@@ -109,15 +118,9 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
       res.status(202).json(result);
     } catch (e) { res.status(e.status || 503).json({ error: e.status ? e.message : 'Release persistence unavailable; redeliver this event' }); }
   });
-  // Wake hooks (server/hooks.js): a signed delivery from outside wakes a
-  // listener on a machine this host cannot reach, which holds the second
-  // request open from its side. The delivery is hashed as a stream and never
-  // parsed, so both routes sit before the JSON parser; the listener's token is
-  // its own kind, so they sit before the API tokens too.
-  app.post('/api/hooks/:name', async (req, res) => {
-    const r = await hooks.receive(req.params.name, req.headers, req);
-    res.status(r.status).json(r.body);
-  });
+  // The listener's side of a wake hook: a request held open from a machine this
+  // host cannot reach. Its token is its own kind, so this sits before the API
+  // tokens; it stays under the general /api limit above.
   app.get('/api/hooks/:name/wait', async (req, res) => {
     const closed = new Promise((resolve) => { res.on('close', resolve); });
     const after = req.query.after === undefined || typeof req.query.after === 'string' ? req.query.after : '';

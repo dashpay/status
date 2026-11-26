@@ -23,7 +23,11 @@ import { readJSON, writeAtomic } from '../shared/settings.js';
 
 export const HOOK_NAME = /^[a-z][a-z0-9-]{0,39}$/;
 // GitHub: "pull_request". XenForo: content type and action, "user.insert".
-const EVENT = /^[a-z_]{1,40}(?:\.[a-z_]{1,40})?$/;
+const EVENT = /^[a-z][a-z0-9_]{0,39}(?:\.[a-z][a-z0-9_]{0,39})?$/;
+// A field longer than this, or the elements of a list past this many, are not
+// tested: a rule matches short names and labels, and what it is tested against
+// was written by outsiders.
+const MATCH_VALUE = 256, MATCH_LIST = 200;
 const DELIVERY = /^[A-Za-z0-9-]{1,64}$/;
 const SOURCES = ['github', 'xenforo'];
 const MATCH_PATH = /^[A-Za-z0-9_]{1,60}(?:\.[A-Za-z0-9_]{1,60}){0,5}$/;
@@ -64,11 +68,17 @@ export function parseHooks(doc) {
   for (const [name, h] of Object.entries(doc.hooks)) {
     if (!HOOK_NAME.test(name)) throw new Error(`hooks.json: invalid hook name ${JSON.stringify(name).slice(0, 60)}`);
     if (!SOURCES.includes(h?.source)) throw new Error(`hooks.json: ${name}: source must be one of ${SOURCES.join(', ')}`);
-    if (h.events !== undefined && (!Array.isArray(h.events) || !h.events.length || !h.events.every((e) => typeof e === 'string' && EVENT.test(e)))) throw new Error(`hooks.json: ${name}: events must be a list of event names`);
+    // A misspelt key would be a rule or a filter that silently does not apply.
+    const unknown = (object, known) => Object.keys(object).find((key) => !known.includes(key));
+    if (unknown(h, ['source', 'events', 'match', 'listeners'])) throw new Error(`hooks.json: ${name}: unknown key ${JSON.stringify(unknown(h, ['source', 'events', 'match', 'listeners'])).slice(0, 60)}`);
+    // GitHub names an event in one word; XenForo's are content type and action.
+    const event = (e) => typeof e === 'string' && EVENT.test(e) && e.includes('.') === (h.source === 'xenforo');
+    if (h.events !== undefined && (!Array.isArray(h.events) || !h.events.length || !h.events.every(event))) throw new Error(`hooks.json: ${name}: events must be a list of this sender's event names`);
     if (h.match !== undefined && (!Array.isArray(h.match) || !h.match.length || h.match.length > 16)) throw new Error(`hooks.json: ${name}: match must be a list of one to sixteen rules`);
     const match = h.match?.map((rule) => {
-      if (typeof rule?.path !== 'string' || !MATCH_PATH.test(rule.path) || typeof rule.pattern !== 'string' || !rule.pattern || rule.pattern.length > 200
-          || (rule.event !== undefined && (typeof rule.event !== 'string' || !EVENT.test(rule.event)))) throw new Error(`hooks.json: ${name}: a match rule needs a dotted path and a pattern`);
+      if (!rule || typeof rule !== 'object' || Array.isArray(rule) || unknown(rule, ['path', 'pattern', 'event'])
+          || typeof rule.path !== 'string' || !MATCH_PATH.test(rule.path) || typeof rule.pattern !== 'string' || !rule.pattern || rule.pattern.length > 200
+          || (rule.event !== undefined && (!event(rule.event) || (h.events && !h.events.includes(rule.event))))) throw new Error(`hooks.json: ${name}: a match rule is a dotted path, a pattern and optionally one of the hook's events`);
       try { return { path: rule.path.split('.'), pattern: new RegExp(rule.pattern), event: rule.event ?? null }; }
       catch { throw new Error(`hooks.json: ${name}: the pattern for ${rule.path} is not a regular expression`); }
     }) ?? null;
@@ -89,7 +99,8 @@ export function matches(rules, event, payload) {
       if (!value || typeof value !== 'object' || Array.isArray(value) || !Object.hasOwn(value, key)) return false;
       value = value[key];
     }
-    return (Array.isArray(value) ? value : [value]).some((v) => (typeof v === 'string' || typeof v === 'number') && rule.pattern.test(String(v).slice(0, 2000)));
+    // A value that is too long is no match; cutting it could make it one.
+    return (Array.isArray(value) ? value.slice(0, MATCH_LIST) : [value]).some((v) => (typeof v === 'string' || typeof v === 'number') && String(v).length <= MATCH_VALUE && rule.pattern.test(String(v)));
   });
 }
 
@@ -114,7 +125,8 @@ export function createHooks({ dir = process.env.WAKE_HOOKS_DIR, dataDir, clock =
     return hooks;
   };
   const secretOf = (name) => {
-    try { const s = readFileSync(join(dir, `${name}.secret`), 'utf8').trim(); return s.length >= 16 ? s : null; } catch { return null; }
+    // 16 to 200 printable ASCII characters: what a header can carry unchanged.
+    try { const s = readFileSync(join(dir, `${name}.secret`), 'utf8').trim(); return /^[\x21-\x7e]{16,200}$/.test(s) ? s : null; } catch { return null; }
   };
 
   // seq counts wakes. It is kept on disk so that a listener that was away over
@@ -137,7 +149,7 @@ export function createHooks({ dir = process.env.WAKE_HOOKS_DIR, dataDir, clock =
     catch (e) { log({ event: 'hook-state-not-saved', hook: name, error: String(e.message).slice(0, 200), at: state.at }); }
     const waiting = [...(waiters.get(name) || [])];
     for (const w of waiting) w.done();
-    log({ event: 'hook-wake', hook: name, source: event, delivery, seq: state.seq, listenersWaiting: waiting.length, at: state.at });
+    log({ event: 'hook-wake', hook: name, on: event, delivery, seq: state.seq, listenersWaiting: waiting.length, at: state.at });
     return state;
   };
 
@@ -232,7 +244,7 @@ export function createHooks({ dir = process.env.WAKE_HOOKS_DIR, dataDir, clock =
 
   // For the operators' own view: what exists and when it last woke anyone.
   const list = () => [...configured()].map(([name, hook]) => ({ name, source: hook.source, events: hook.events ? [...hook.events].sort() : null, matchRules: hook.match?.length || 0,
-    listeners: hook.listeners.map((l) => l.id), listenersWaiting: waiters.get(name)?.size || 0, signed: !!secretOf(name), ...stateOf(name) }));
+    listeners: hook.listeners.map((l) => l.id), listenersWaiting: waiters.get(name)?.size || 0, hasSecret: !!secretOf(name), ...stateOf(name) }));
   const close = () => { for (const set of waiters.values()) for (const w of [...set]) w.done(); };
 
   return { receive, wait, list, close };

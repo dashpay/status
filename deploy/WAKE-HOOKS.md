@@ -48,7 +48,10 @@ wake and would not be for anything that carried an instruction.
 | `401` | missing or wrong signature or secret; also a name that is not a hook, and a hook whose secret file is missing |
 | `413` | larger than 5 MB (nginx on the status host already stops at 1 MB) |
 
-XenForo retries a delivery that was not answered 2xx; GitHub does not.
+XenForo retries a delivery that was not answered 2xx; GitHub does not. Deliveries have
+a rate limit of their own, 6,000 a minute for each sending address, apart from the
+console's general API limit: a hook may take a repository's whole `workflow_job`
+stream, and a delivery answered 429 is gone.
 
 Hook names are not public: a name that does not exist is read, hashed and answered
 exactly like a wrong signature. A hook that is misconfigured therefore shows as `401`
@@ -110,14 +113,34 @@ On the status host, in `/etc/dash-status/hooks/` (root:ubuntu, mode 0750; files 
    A rule names one field of the JSON payload by a dotted path (up to six names) and
    a regular expression. It matches when the field is a string or a number that the
    expression matches, or a list with such an element; one matching rule is enough,
-   and a rule may carry its own `event` to apply to that event only. A repository
-   sends a `workflow_job` delivery for every job of every run; with the rule above
-   only the release jobs wake the listener, and the rest are answered `ignored`.
+   and a rule may carry its own `event` (one of the hook's) to apply to that event
+   only. A repository sends a `workflow_job` delivery for every job of every run;
+   with the rule above only the release jobs wake the listener, and the rest are
+   answered `ignored`.
 
-   Names are lower-case letters, digits and dashes. The file is read again when it changes: no restart. Replace it
-   by rename (write a new file beside it, then `mv`): a file caught half-written does
-   not parse, and while it does not, no hook exists.
-2. `<name>.secret`: the secret GitHub signs with, 16 characters or more.
+   What a rule is tested against was written by outsiders, so: a value longer than
+   256 characters is no match (it is not cut down to one), only the first 200
+   elements of a list are looked at, a path does not go through a list, and `true`
+   and `false` never match. Write patterns that cannot backtrack badly: anchored,
+   no quantifier inside a quantified group (`^(\w+\s?)+$` is the kind to avoid).
+
+   A hook for the forum:
+
+   ```json
+   "forum-queue": {
+     "source": "xenforo",
+     "events": ["user.insert", "post.insert", "thread.insert"],
+     "listeners": { "ubuntu-server-2": "<sha256>" } }
+   ```
+
+   Names are lower-case letters, digits and dashes. A key the console does not know
+   is refused, in a hook and in a rule: a misspelt `match` would be a filter that
+   silently does not apply. The file is read again when it changes: no restart.
+   Replace it by rename (write a new file beside it, then `mv`): a file caught
+   half-written does not parse, and while it does not, no hook exists.
+2. `<name>.secret`: the sender's secret, 16 to 200 printable ASCII characters (it has
+   to travel in a header unchanged). A file outside that opens nothing, and the web
+   log says `hook-secret-missing`.
 3. A listener token is 32 to 128 characters of `A-Z a-z 0-9 _ -`. Only its SHA-256 goes
    into `hooks.json`, so the status host can check a token and cannot use one:
    `printf %s "$token" | sha256sum`.
@@ -134,7 +157,8 @@ The first hook also needs the directory to exist before a deploy: `deploy.sh` in
 ## Looking at it
 
 - `docker logs dash-status-v2-web-1 | grep hook-` shows every wake (`hook-wake`, with
-  the event name, GitHub's delivery id, the count and how many listeners were waiting),
+  the event it was `on`, the sender's delivery id, the count and how many listeners
+  were waiting; a delivery that was `ignored` is not logged),
   a configuration that does not parse (`hooks-config-invalid`), a count that could
   not be saved (`hook-state-not-saved`), and a configured hook that refused a delivery
   (`hook-secret-missing`, `hook-signature-rejected`).

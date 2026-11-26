@@ -173,7 +173,7 @@ test('the configuration is read again when it changes; a damaged file configures
     await new Promise((r) => setTimeout(r, 20));
     f.write({ schemaVersion: 1, hooks: { directory: { source: 'github', listeners: { worker: digest(TOKEN) } }, second: { source: 'github', listeners: {} } } });
     assert.equal((await f.deliver()).body.seq, 2);
-    assert.deepEqual(f.hooks.list().map((h) => [h.name, h.signed, h.seq]), [['directory', true, 2], ['second', false, 0]]);
+    assert.deepEqual(f.hooks.list().map((h) => [h.name, h.source, h.hasSecret, h.seq]), [['directory', 'github', true, 2], ['second', 'github', false, 0]]);
     // A hook without its secret file takes no delivery, and says so in the log.
     assert.equal((await f.hooks.receive('second', gh({ signature: sign('{}'), event: 'push', delivery: DELIVERY }), Readable.from([Buffer.from('{}')]))).status, 401);
     assert.equal(f.logged.filter((e) => e.event === 'hook-secret-missing' && e.hook === 'second').length, 1);
@@ -200,10 +200,22 @@ test('hooks.json is checked strictly', () => {
     { schemaVersion: 1, hooks: { a: { source: 'github' } } }, { schemaVersion: 1, hooks: { a: { source: 'github', listeners: { l: 'plain-token' } } } },
     { schemaVersion: 1, hooks: { a: { ...ok.hooks.a, match: [] } } }, { schemaVersion: 1, hooks: { a: { ...ok.hooks.a, match: { path: 'a', pattern: 'b' } } } },
     { schemaVersion: 1, hooks: { a: { ...ok.hooks.a, match: [{ path: 'a..b', pattern: 'x' }] } } }, { schemaVersion: 1, hooks: { a: { ...ok.hooks.a, match: [{ path: 'a', pattern: '(' }] } } },
-    { schemaVersion: 1, hooks: { a: { ...ok.hooks.a, match: [{ path: 'a' }] } } }, { schemaVersion: 1, hooks: { a: { ...ok.hooks.a, match: [{ path: 'a', pattern: 'x', event: 'No' }] } } }]) {
+    { schemaVersion: 1, hooks: { a: { ...ok.hooks.a, match: [{ path: 'a' }] } } }, { schemaVersion: 1, hooks: { a: { ...ok.hooks.a, match: [{ path: 'a', pattern: 'x', event: 'No' }] } } },
+    { schemaVersion: 1, hooks: { a: { ...ok.hooks.a, match: [null] } } }, { schemaVersion: 1, hooks: { a: { ...ok.hooks.a, match: ['a=b'] } } },
+    { schemaVersion: 1, hooks: { a: { ...ok.hooks.a, match: Array(17).fill({ path: 'a', pattern: 'x' }) } } },
+    { schemaVersion: 1, hooks: { a: { ...ok.hooks.a, match: [{ path: 'a', pattern: 'x'.repeat(201) }] } } },
+    { schemaVersion: 1, hooks: { a: { ...ok.hooks.a, match: [{ path: 'a.b.c.d.e.f.g', pattern: 'x' }] } } },
+    // A misspelt key is refused, not ignored: it would be a filter that does not apply.
+    { schemaVersion: 1, hooks: { a: { ...ok.hooks.a, matches: [{ path: 'a', pattern: 'x' }] } } },
+    { schemaVersion: 1, hooks: { a: { ...ok.hooks.a, match: [{ path: 'a', pattern: 'x', events: 'push' }] } } },
+    { schemaVersion: 1, hooks: { a: { ...ok.hooks.a, match: [{ path: 'a', pattern: 'x', flags: 'i' }] } } },
+    // A rule's event must be one the hook takes, and events are named the sender's way.
+    { schemaVersion: 1, hooks: { a: { ...ok.hooks.a, events: ['push'], match: [{ path: 'a', pattern: 'x', event: 'release' }] } } },
+    { schemaVersion: 1, hooks: { a: { ...ok.hooks.a, events: ['user.insert'] } } },
+    { schemaVersion: 1, hooks: { a: { source: 'xenforo', events: ['user'], listeners: {} } } }]) {
     assert.throws(() => parseHooks(bad), /hooks\.json/);
   }
-  assert.equal(parseHooks({ schemaVersion: 1, hooks: { f: { source: 'xenforo', events: ['user.insert'], listeners: {} } } }).get('f').source, 'xenforo');
+  assert.equal(parseHooks({ schemaVersion: 1, hooks: { f: { source: 'xenforo', events: ['user.insert', 'xfmg2_media.insert'], listeners: {} } } }).get('f').source, 'xenforo');
 });
 
 test('a match rule decides from one field of the payload', () => {
@@ -215,6 +227,14 @@ test('a match rule decides from one field of the payload', () => {
   assert.equal(matches(rules, 'release', { action: 'published' }), true);
   assert.equal(matches(rules, 'workflow_job', { action: 'published' }), false, 'a rule with an event applies to that event only');
   for (const payload of [null, 7, 'text', [], {}, { workflow_job: null }, { workflow_job: [] }, { workflow_job: { labels: [{ a: 1 }, null, true] } }]) assert.equal(matches(rules, 'workflow_job', payload), false);
+  // A number is tested as written. A value too long to test is no match: cutting it could turn "release-1…-x" into one.
+  const id = parseHooks({ schemaVersion: 1, hooks: { a: { source: 'github', listeners: {}, match: [{ path: 'run.id', pattern: '^12$' }] } } }).get('a').match;
+  assert.equal(matches(id, 'push', { run: { id: 12 } }), true);
+  assert.equal(matches(rules, 'workflow_job', { workflow_job: { labels: [`release-${'1'.repeat(300)}-x`] } }), false);
+  assert.equal(matches(rules, 'workflow_job', { workflow_job: { labels: `release-${'1'.repeat(300)}` } }), false);
+  // Only the start of a long list is looked at.
+  assert.equal(matches(rules, 'workflow_job', { workflow_job: { labels: [...Array(199).fill('x'), 'release-1'] } }), true);
+  assert.equal(matches(rules, 'workflow_job', { workflow_job: { labels: [...Array(200).fill('x'), 'release-1'] } }), false);
   // Own properties only.
   const proto = parseHooks({ schemaVersion: 1, hooks: { a: { source: 'github', listeners: {}, match: [{ path: 'constructor.name', pattern: '.' }, { path: 'toString', pattern: '.' }] } } }).get('a').match;
   assert.equal(matches(proto, 'push', {}), false);
@@ -242,7 +262,7 @@ test('XenForo presents its secret in a header; content type and action make the 
     const xf = (headers = {}) => f.hooks.receive('directory', { 'xf-webhook-secret': SECRET, 'xf-content-type': 'user', 'xf-webhook-event': 'insert', 'xf-webhook-id': '3', ...headers },
       Readable.from([Buffer.from('{"content_type":"user","event":"insert","content_id":9,"data":{}}')]));
     assert.deepEqual(await xf(), { status: 202, body: { accepted: true, seq: 1 } });
-    assert.equal(f.logged.at(-1).source, 'user.insert');
+    assert.equal(f.logged.at(-1).on, 'user.insert');
     assert.equal(f.logged.at(-1).delivery, 'xf-3');
     assert.deepEqual(await xf({ 'xf-content-type': 'thread' }), { status: 202, body: { accepted: true, ignored: true } });
     assert.equal((await xf({ 'xf-webhook-event': 'update' })).body.seq, 2);
@@ -253,10 +273,27 @@ test('XenForo presents its secret in a header; content type and action make the 
     assert.deepEqual(await f.hooks.receive('other', { 'xf-webhook-secret': SECRET, 'xf-content-type': 'user', 'xf-webhook-event': 'insert', 'xf-webhook-id': '3' }, Readable.from([Buffer.from('{}')])), wrong);
     // A GitHub signature made with the same secret is not how this hook's sender proves itself, and the other way round.
     assert.deepEqual(await f.deliver('{}'), wrong);
+    // Both proofs at once: only this hook's kind counts.
+    assert.deepEqual(await xf({ 'x-hub-signature-256': sign('anything'), 'xf-webhook-secret': 'not-the-secret-0123456789abcdef' }), wrong);
+    assert.equal((await xf({ 'x-hub-signature-256': sign('anything'), 'xf-webhook-event': 'update' })).status, 202);
+    // A header given twice reaches us joined, or as a list: neither is the secret.
+    assert.deepEqual(await xf({ 'xf-webhook-secret': `${SECRET}, ${SECRET}` }), wrong);
+    assert.deepEqual(await xf({ 'xf-webhook-secret': [SECRET, SECRET] }), wrong);
+    assert.equal((await f.wait()).body.seq, 3);
     assert.equal((await xf({ 'xf-webhook-event': 'Insert!' })).status, 400);
     assert.equal((await xf({ 'xf-webhook-id': undefined })).status, 400);
-    assert.equal((await f.wait()).body.seq, 2);
+    assert.equal((await f.wait()).body.seq, 3);
   } finally { f.done(); }
+  // The secret is 16 to 200 printable ASCII characters, as a header carries them; a file outside that opens nothing.
+  for (const [stored, opens] of [['s'.repeat(15), false], ['s'.repeat(16), true], ['s'.repeat(200), true], ['s'.repeat(201), false], [`${'s'.repeat(20)} x`, false], [`${'s'.repeat(20)}ø`, false]]) {
+    const h = fixture({ source: 'xenforo' });
+    try {
+      writeFileSync(join(h.dir, 'directory.secret'), stored);
+      const r = await h.hooks.receive('directory', { 'xf-webhook-secret': stored, 'xf-content-type': 'user', 'xf-webhook-event': 'insert', 'xf-webhook-id': '1' }, Readable.from([Buffer.from('{}')]));
+      assert.equal(r.status, opens ? 202 : 401, `${stored.length} characters`);
+      if (!opens && stored.length >= 16 && stored.length <= 200) assert.ok(h.logged.some((e) => e.event === 'hook-secret-missing'), 'said in the log');
+    } finally { h.done(); }
+  }
   const g = fixture();
   try {
     assert.equal((await g.hooks.receive('directory', { 'xf-webhook-secret': SECRET, 'xf-content-type': 'user', 'xf-webhook-event': 'insert', 'xf-webhook-id': '3' }, Readable.from([Buffer.from('{}')]))).status, 401,
