@@ -6,8 +6,9 @@
 // A token acts for the admin account that issued it and can only narrow that
 // account's access (shared/settings.js accessFor): removing or demoting the
 // account takes its tokens with it. Only the hash is stored; the token itself is
-// shown once, when issued. Tokens operate networks. They never manage access,
-// settings or other tokens and never read private keys (server/web.js).
+// shown once, when issued. Tokens operate networks. They never manage access
+// or other tokens and never read private keys, and of the settings an admin
+// token changes only the versions a new devnet starts with (server/web.js).
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
 import { ROLES, readJSON, writeAtomic } from '../shared/settings.js';

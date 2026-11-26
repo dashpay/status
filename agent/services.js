@@ -63,7 +63,7 @@ function servicesConfig(name, d, dplan) {
     short: shortName(name), displayName: d.displayName, auxiliary: `${name}/${wallet.name}`, coreNetwork: dplan.coreNetwork, platformChainId: dplan.platformChainId,
     coreRpcPort: ports.coreRPC, coreZmqPort: ports.coreZMQ, hosts: Object.fromEntries(Object.entries(names).map(([k, v]) => [k, v.host])),
     quorumServerImage: d.services.quorumServer.startsWith('docker.io/') ? d.services.quorumServer : `docker.io/${d.services.quorumServer}`,
-    insightImage: (d.services.insightImage || 'dashpay/insight:4.0.9').replace(/^(?!docker\.io\/)/, 'docker.io/'),
+    insightImage: (d.services.insightImage || 'dashpay/insight:4.0.11').replace(/^(?!docker\.io\/)/, 'docker.io/'),
     explorerVersion: d.services.explorerVersion, faucetRef: d.services.faucetRef, faucetAmount: d.services.faucetAmount,
     faucetRateLimit: d.services.faucetRateLimit, faucetFunding: d.services.faucetFunding,
     // The explorer's epoch clock follows the Platform epoch the devnet runs.

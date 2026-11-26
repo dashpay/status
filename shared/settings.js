@@ -42,7 +42,8 @@ export const DEFAULT_SETTINGS = {
     acmeEmail: 'infrastructure@dash.org',
     services: {
       quorumServer: 'dashpay/quorum-list-server:0.7.0',
-      insightImage: 'dashpay/insight:4.0.10',
+      // 4.0.11 is the first Insight that reads Core 24 blocks; 4.0.10 exits on them.
+      insightImage: 'dashpay/insight:4.0.11',
       explorerVersion: '2.5.3',
       faucetRef: 'b927e6058845ebf3c0722e56eb0e89642e98c28b',
       faucetAmount: 10, faucetRateLimit: 20, faucetFunding: 50000, epochSeconds: 3600,
@@ -171,6 +172,31 @@ export function validateDevnetDefaults(d) {
   req(Number.isInteger(sv.epochSeconds) && sv.epochSeconds >= 60, 'services.epochSeconds >= 60');
   req(/^Z[0-9A-Z]+$/.test(d.dnsZoneId) && /^[a-z0-9.-]+\.[a-z]+$/.test(d.dnsSuffix), 'dnsZoneId/dnsSuffix invalid');
   return d;
+}
+
+// The versions a new devnet starts with. This is the one part of the settings
+// an admin API token may change (PATCH /api/settings/devnet-versions): a bot
+// that creates devnets already chooses each of them per request. Where devnets
+// are built, their size, and the faucet's code and amounts are not in it.
+export const DEVNET_VERSION_KEYS = { images: [...COMPONENTS, 'acme'], services: ['quorumServer', 'insightImage', 'explorerVersion'] };
+export function patchDevnetVersions(devnets, patch) {
+  const object = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+  const groups = Object.keys(DEVNET_VERSION_KEYS);
+  if (!object(patch) || !Object.keys(patch).length) throw new Error('expected { "images": {...}, "services": {...} } with the versions to change');
+  const next = structuredClone(devnets), changed = [];
+  for (const [group, part] of Object.entries(patch)) {
+    if (!groups.includes(group)) throw new Error(`"${group}" cannot be changed here; only versions under ${groups.join(' and ')}`);
+    if (!object(part)) throw new Error(`${group} must be an object`);
+    for (const [key, value] of Object.entries(part)) {
+      if (!DEVNET_VERSION_KEYS[group].includes(key)) throw new Error(`${group}.${key} cannot be changed here; allowed: ${DEVNET_VERSION_KEYS[group].join(', ')}`);
+      if (typeof value !== 'string') throw new Error(`${group}.${key} must be a string`);
+      const from = next[group]?.[key] ?? null, to = value.trim();
+      if (from === to) continue;
+      next[group] = { ...next[group], [key]: to };
+      changed.push({ key: `${group}.${key}`, from, to });
+    }
+  }
+  return { devnets: validateDevnetDefaults(next), changed };
 }
 
 export function loadSettings(path) {

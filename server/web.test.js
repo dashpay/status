@@ -605,6 +605,70 @@ test('API tokens operate networks only: no settings, access, tokens, remediation
   } finally { w.close(); }
 });
 
+test('API tokens: an admin token changes the versions a new devnet starts with, and nothing else in the settings', async () => {
+  const w = await start(9920871, [{ id: 77, login: 'op', role: 'operator', networks: ['*'] }]);
+  try {
+    const path = '/api/settings/devnet-versions';
+    const send = (call, body, headers = {}) => call(path, { method: 'PATCH', body: typeof body === 'string' ? body : JSON.stringify(body), headers: { 'content-type': 'application/json', ...headers } });
+    const file = () => JSON.parse(readFileSync(join(w.dataDir, 'settings.json'), 'utf8'));
+    const insight = { services: { insightImage: 'dashpay/insight:4.0.12' } };
+    assert.equal((await send(bot(w), insight)).status, 401, 'signed out, no token');
+    const csrf = await w.login();
+    const before = file();
+    assert.equal(before.devnets.services.insightImage, 'dashpay/insight:4.0.11', 'the built-in default reads Core 24 blocks');
+    const admin = bot(w, (await issueToken(w, csrf, { label: 'admin bot', role: 'admin' })).token);
+    const operator = bot(w, (await issueToken(w, csrf, { label: 'operator bot', role: 'operator', networks: ['*'] })).token);
+    const viewer = bot(w, (await issueToken(w, csrf, { label: 'viewer bot', role: 'viewer', networks: ['*'] })).token);
+    for (const call of [operator, viewer]) {
+      const r = await send(call, insight);
+      assert.equal(r.status, 403);
+      assert.match((await r.json()).error, /Only admins/);
+    }
+
+    // Only the listed version keys, only as strings, and only values the settings would accept from the page.
+    const refused = [
+      {}, [], { images: {} , operators: [{ id: 1, login: 'x', role: 'admin', networks: ['*'] }] }, { settings: { devnets: {} } },
+      { vpcId: 'vpc-0abc' }, { validators: 25 }, { services: { faucetRef: 'a'.repeat(40) } }, { services: { faucetFunding: 1 } }, { services: { epochSeconds: 60 } },
+      { images: { miner: 'dashpay/dashd:24' } }, { images: ['dashpay/dashd:24'] }, { services: 'dashpay/insight:4.0.12' }, { services: { insightImage: 4 } },
+      { services: { insightImage: 'evil/insight:4.0.12' } }, { services: { insightImage: 'dashpay/insight' } }, { images: { core: 'dashpay/drive:5.0.3' } },
+      { services: { explorerVersion: 'latest; rm -rf /' } }, { services: { quorumServer: 'dashpay/insight:4.0.12' } },
+      '{"services":{"__proto__":"dashpay/insight:4.0.12"}}', '{"__proto__":{"insightImage":"dashpay/insight:4.0.12"}}', '{"constructor":{}}',
+    ];
+    for (const body of refused) assert.equal((await send(admin, body)).status, 400, JSON.stringify(body));
+    assert.deepEqual(file(), before, 'a refused request writes nothing');
+
+    const r = await send(admin, { images: { core: ' dashpay/dashd:24.0.3 ' }, services: { insightImage: 'dashpay/insight:4.0.12', explorerVersion: before.devnets.services.explorerVersion } });
+    assert.equal(r.status, 200);
+    const out = await r.json();
+    assert.deepEqual(out.changed, [
+      { key: 'images.core', from: before.devnets.images.core, to: 'dashpay/dashd:24.0.3' },
+      { key: 'services.insightImage', from: 'dashpay/insight:4.0.11', to: 'dashpay/insight:4.0.12' },
+    ], 'a value that is already set is not a change');
+    assert.deepEqual([out.devnets.images.core, out.devnets.services.insightImage], ['dashpay/dashd:24.0.3', 'dashpay/insight:4.0.12']);
+    const after = file();
+    assert.deepEqual([after.devnets.images.core, after.devnets.services.insightImage], ['dashpay/dashd:24.0.3', 'dashpay/insight:4.0.12']);
+    const restored = structuredClone(after);
+    restored.devnets.images.core = before.devnets.images.core;
+    restored.devnets.services.insightImage = before.devnets.services.insightImage;
+    assert.deepEqual(restored, before, 'users, networks, thresholds and every other devnet default are as they were');
+    assert.equal((await (await admin('/api/settings')).json()).settings.devnets.services.insightImage, 'dashpay/insight:4.0.12', 'what the next new devnet reads');
+
+    // The same request again changes nothing and says so.
+    const again = await (await send(admin, insight)).json();
+    assert.deepEqual(again.changed, []);
+    // A signed-in admin may use it too, with the CSRF value like any other write.
+    const back = { images: { core: before.devnets.images.core }, services: { insightImage: 'dashpay/insight:4.0.11' } };
+    assert.equal((await send(w.req, back)).status, 403, 'CSRF required for a session');
+    const viaSession = await send(w.req, back, { 'x-csrf-token': csrf });
+    assert.equal(viaSession.status, 200);
+    assert.deepEqual(file(), before);
+    // Everything else in the settings still needs the signed-in account.
+    const full = await admin('/api/settings', { method: 'PUT', body: JSON.stringify({ settings: before }) });
+    assert.equal(full.status, 403);
+    assert.match((await full.json()).error, /signed-in account/);
+  } finally { w.close(); }
+});
+
 test('API tokens narrow their account: role, networks, expiry, and the account losing access', async () => {
   let now = Date.now();
   const w = await start(9920871, [{ id: 77, login: 'op', role: 'operator', networks: ['testnet'] }], { clock: () => now });

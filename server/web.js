@@ -18,7 +18,7 @@ import { receiveRelease } from './release-webhook.js';
 import { againstReceiver, loadControl, requestClear, setDispatch } from './remediation-control.js';
 import { clearActivity, loadActivity } from './remediation-activity.js';
 import { publicInventory } from './aws-public.js';
-import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, loadSettings, memberOf, operatorFor, readJSON, saveSettings, validateSettings, writeAtomic } from '../shared/settings.js';
+import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, loadSettings, memberOf, operatorFor, patchDevnetVersions, readJSON, saveSettings, validateSettings, writeAtomic } from '../shared/settings.js';
 import { expectations } from '../shared/monitoring.js';
 import { evaluateNetwork, projectNetwork } from '../shared/evaluate.js';
 import { requestDevnetKeys } from './devnet-keys.js';
@@ -447,6 +447,25 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
       settings = saveSettings(settingsPath, next);
       push('settings', { at: new Date(clock()).toISOString() });
       res.json({ settings });
+    } catch (e) { res.status(400).json({ error: e.message }); }
+  });
+
+  // The versions a new devnet starts with (component images, ACME client,
+  // quorum list server, Insight, Explorer). The one settings change an admin
+  // API token may make: it already picks each of these per devnet, and keeping
+  // the defaults current should not wait for a browser session. It edits the
+  // current file and touches nothing else in it.
+  app.patch('/api/settings/devnet-versions', (req, res, next) => { const s = principal(req); if (!s) return res.status(401).json({ error: 'Sign in required' }); req.session = s; next(); }, csrf, (req, res) => {
+    const current = reloadSettings();
+    if (!isAdmin(req)) return res.status(403).json({ error: 'Only admins can change devnet defaults' });
+    try {
+      const { devnets, changed } = patchDevnetVersions(current.devnets, req.body);
+      if (changed.length) {
+        settings = saveSettings(settingsPath, { ...current, devnets });
+        console.info(JSON.stringify({ event: 'devnet-versions-changed', changed, actor: identity(user(req)), at: new Date(clock()).toISOString() }));
+        push('settings', { at: new Date(clock()).toISOString() });
+      }
+      res.json({ devnets: { images: settings.devnets.images, services: settings.devnets.services }, changed });
     } catch (e) { res.status(400).json({ error: e.message }); }
   });
 
