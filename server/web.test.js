@@ -614,6 +614,10 @@ test('API tokens: an admin token changes the versions a new devnet starts with, 
     const insight = { services: { insightImage: 'dashpay/insight:4.0.12' } };
     assert.equal((await send(bot(w), insight)).status, 401, 'signed out, no token');
     const csrf = await w.login();
+    // A settings file as a running console has it: a block and a key this code
+    // does not know, and console devnets that live in devnets.json, not in it.
+    writeFileSync(join(w.dataDir, 'settings.json'), JSON.stringify({ ...file(), remediation: { ignoredCiJobs: [] }, keptForLater: { a: 1 } }));
+    writeFileSync(join(w.dataDir, 'devnets.json'), JSON.stringify({ 'devnet-palmatum': { status: 'ready', coreNetwork: 'palmatum-g1' }, 'devnet-gone': { status: 'deleted' } }));
     const before = file();
     assert.equal(before.devnets.services.insightImage, 'dashpay/insight:4.0.11', 'the built-in default reads Core 24 blocks');
     const admin = bot(w, (await issueToken(w, csrf, { label: 'admin bot', role: 'admin' })).token);
@@ -632,6 +636,7 @@ test('API tokens: an admin token changes the versions a new devnet starts with, 
       { images: { miner: 'dashpay/dashd:24' } }, { images: ['dashpay/dashd:24'] }, { services: 'dashpay/insight:4.0.12' }, { services: { insightImage: 4 } },
       { services: { insightImage: 'evil/insight:4.0.12' } }, { services: { insightImage: 'dashpay/insight' } }, { images: { core: 'dashpay/drive:5.0.3' } },
       { services: { explorerVersion: 'latest; rm -rf /' } }, { services: { quorumServer: 'dashpay/insight:4.0.12' } },
+      { services: { explorerVersion: `${'1'.repeat(40)}.0.0` } }, { images: { acme: '' } }, { images: { acme: '  ' } }, { services: { insightImage: '' } },
       '{"services":{"__proto__":"dashpay/insight:4.0.12"}}', '{"__proto__":{"insightImage":"dashpay/insight:4.0.12"}}', '{"constructor":{}}',
     ];
     for (const body of refused) assert.equal((await send(admin, body)).status, 400, JSON.stringify(body));
@@ -659,6 +664,7 @@ test('API tokens: an admin token changes the versions a new devnet starts with, 
     // A signed-in admin may use it too, with the CSRF value like any other write.
     const back = { images: { core: before.devnets.images.core }, services: { insightImage: 'dashpay/insight:4.0.11' } };
     assert.equal((await send(w.req, back)).status, 403, 'CSRF required for a session');
+    assert.equal((await send(w.req, back, { 'x-csrf-token': csrf, origin: 'https://elsewhere.example' })).status, 403, 'and the console as Origin');
     const viaSession = await send(w.req, back, { 'x-csrf-token': csrf });
     assert.equal(viaSession.status, 200);
     assert.deepEqual(file(), before);
@@ -666,6 +672,29 @@ test('API tokens: an admin token changes the versions a new devnet starts with, 
     const full = await admin('/api/settings', { method: 'PUT', body: JSON.stringify({ settings: before }) });
     assert.equal(full.status, 403);
     assert.match((await full.json()).error, /signed-in account/);
+
+    // A Settings page opened before a bot's change does not put the old version back when it saves something else...
+    const page = (await (await w.req('/api/settings')).json()).settings;
+    assert.equal((await send(admin, insight)).status, 200);
+    const put = (settings, loadedDevnets) => w.req('/api/settings', { method: 'PUT', body: JSON.stringify({ settings, loadedDevnets }), headers: { 'content-type': 'application/json', 'x-csrf-token': csrf } });
+    const edited = structuredClone(page);
+    edited.thresholds.diskWarnPercent = 70;
+    assert.equal((await put(edited, page.devnets)).status, 200);
+    assert.deepEqual([file().thresholds.diskWarnPercent, file().devnets.services.insightImage], [70, 'dashpay/insight:4.0.12']);
+    // ...and a version edited on that page is the admin's choice and is saved.
+    edited.devnets.services.insightImage = 'dashpay/insight:4.0.13';
+    assert.equal((await put(edited, page.devnets)).status, 200);
+    assert.equal(file().devnets.services.insightImage, 'dashpay/insight:4.0.13');
+
+    // The account behind the token is demoted: the token no longer changes defaults.
+    const good = file();
+    writeFileSync(join(w.dataDir, 'settings.json'), JSON.stringify({ ...good, operators: [{ id: 77, login: 'op', role: 'admin', networks: ['*'] }, { id: 9920871, login: 'someone', role: 'operator', networks: ['*'] }] }));
+    assert.equal((await send(admin, back)).status, 403);
+    // A damaged settings file is never replaced by defaults plus the change.
+    writeFileSync(join(w.dataDir, 'settings.json'), '{ not json');
+    assert.equal((await send(admin, back)).status, 503);
+    assert.equal((await send(w.req, back, { 'x-csrf-token': csrf })).status, 503);
+    assert.equal(readFileSync(join(w.dataDir, 'settings.json'), 'utf8'), '{ not json');
   } finally { w.close(); }
 });
 

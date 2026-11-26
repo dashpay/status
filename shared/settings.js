@@ -164,7 +164,7 @@ export function validateDevnetDefaults(d) {
   const sv = d.services || {};
   req(IMAGE_TAG.test(sv.quorumServer || '') && /^(docker\.io\/)?dashpay\/quorum-list-server[:@]/.test(sv.quorumServer), 'services.quorumServer must be dashpay/quorum-list-server:<tag>');
   req(IMAGE_TAG.test(sv.insightImage || '') && /^(docker\.io\/)?dashpay\/insight[:@]/.test(sv.insightImage), 'services.insightImage must be dashpay/insight:<tag>');
-  req(/^\d+\.\d+\.\d+$|^nightly$/.test(sv.explorerVersion || ''), 'services.explorerVersion like 2.5.3');
+  req(/^\d{1,5}\.\d{1,5}\.\d{1,5}$|^nightly$/.test(sv.explorerVersion || ''), 'services.explorerVersion like 2.5.3');
   req(/^[0-9a-f]{40}$/.test(sv.faucetRef || ''), 'services.faucetRef must be a full dash-faucet commit');
   req(typeof sv.faucetAmount === 'number' && sv.faucetAmount > 0 && sv.faucetAmount <= 1000, 'services.faucetAmount 0..1000');
   req(Number.isInteger(sv.faucetRateLimit) && sv.faucetRateLimit >= 1 && sv.faucetRateLimit <= 10000, 'services.faucetRateLimit >= 1');
@@ -191,12 +191,31 @@ export function patchDevnetVersions(devnets, patch) {
       if (!DEVNET_VERSION_KEYS[group].includes(key)) throw new Error(`${group}.${key} cannot be changed here; allowed: ${DEVNET_VERSION_KEYS[group].join(', ')}`);
       if (typeof value !== 'string') throw new Error(`${group}.${key} must be a string`);
       const from = next[group]?.[key] ?? null, to = value.trim();
+      // An empty ACME image is a mode (self-signed gateways), not a version.
+      if (!to) throw new Error(`${group}.${key} cannot be empty`);
       if (from === to) continue;
       next[group] = { ...next[group], [key]: to };
       changed.push({ key: `${group}.${key}`, from, to });
     }
   }
   return { devnets: validateDevnetDefaults(next), changed };
+}
+
+// A page-wide save carries the whole document as the browser loaded it. A
+// version changed since then (by a bot, or in another tab) and not edited on
+// that page keeps its newer value instead of being put back. `loaded` is the
+// page's copy of the devnet defaults from when it was opened.
+export function keepNewerDevnetVersions(devnets, loaded, disk) {
+  const object = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+  if (!object(devnets) || !object(loaded) || !object(disk)) return devnets;
+  const next = structuredClone(devnets);
+  for (const [group, keys] of Object.entries(DEVNET_VERSION_KEYS)) {
+    for (const key of keys) {
+      const was = loaded[group]?.[key], now = disk[group]?.[key];
+      if (typeof now === 'string' && now !== was && object(next[group]) && next[group][key] === was) next[group][key] = now;
+    }
+  }
+  return next;
 }
 
 export function loadSettings(path) {
