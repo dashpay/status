@@ -229,19 +229,48 @@ test('the status of a hook: is anyone listening, and what arrived', async () => 
     now += 1000;
     await f.deliver();
     assert.equal(one().level, 'ok');
-    assert.deepEqual(f.hooks.summary(), { hooks: 1, ok: 1, warn: 0, down: 0, starting: 0, lastWakeAt: '2026-11-26T12:04:03.000Z', lastDeliveryAt: '2026-11-26T12:04:03.000Z', woke: 2, ignored: 2, refused: 1 });
+    assert.deepEqual(f.hooks.status().summary, { hooks: 1, listening: 1, down: 0, starting: 0, woke: 2, ignored: 2, warn: 0, refused: 1, lastWakeAt: '2026-11-26T12:04:03.000Z', lastDeliveryAt: '2026-11-26T12:04:03.000Z' });
+    // For a visitor without access: no refusals, no warn, and times to the minute.
+    assert.deepEqual(f.hooks.status().open, { hooks: 1, listening: 1, down: 0, starting: 0, woke: 2, ignored: 2, lastWakeAt: '2026-11-26T12:04:00.000Z', lastDeliveryAt: '2026-11-26T12:04:00.000Z', startedAt: '2026-11-26T12:00:00.000Z' });
+    // The clock stepping back does not hide a refusal: the newest delivery is the one that arrived last.
+    now -= 5000;
+    await f.deliver('{}', { signature: sign('other') });
+    assert.equal(one().level, 'warn');
+    // And what a refusal moves is exactly what the public answer leaves out.
+    assert.deepEqual([f.hooks.status().summary.warn, f.hooks.status().summary.refused, f.hooks.status().open.listening], [1, 2, 1]);
+    assert.equal('refused' in f.hooks.status().open || 'warn' in f.hooks.status().open, false);
     // A name that is not a hook counts nothing, however often it is tried.
     await f.hooks.receive('other', gh({ signature: sign('{}'), event: 'push', delivery: DELIVERY }), Readable.from([Buffer.from('{}')]));
     assert.equal(f.hooks.list().length, 1);
-    assert.equal(f.hooks.summary().refused, 1);
+    assert.equal(f.hooks.status().summary.refused, 2);
   } finally { f.done(); }
+  // Two listeners: one that is away does not make the hook useless, and the words say which.
+  const OTHER = 'second-listener-token-0123456789abcdef';
+  let later = Date.parse('2026-11-26T12:00:00Z');
+  const two = fixture({ listeners: { worker: digest(TOKEN), other: digest(OTHER) } }, { clock: () => later, waitMs: 20 });
+  try {
+    await two.wait();
+    assert.deepEqual([two.hooks.list()[0].level, two.hooks.list()[0].reason], ['info', 'The console restarted; waiting for listener other to ask again.']);
+    later += LISTENER_AWAY_MS - 1000;
+    await two.wait();
+    later += 1000;
+    assert.equal(two.hooks.list()[0].level, 'down');
+    assert.match(two.hooks.list()[0].reason, /^Listener other is not connected: a delivery does not wake it/);
+    assert.deepEqual(two.hooks.list()[0].listeners.map((l) => [l.id, l.connected]), [['worker', true], ['other', false]]);
+    await two.wait(undefined, OTHER);
+    assert.equal(two.hooks.list()[0].level, 'ok');
+  } finally { two.done(); }
   // No secret file: down, whatever the listener does.
   const g = fixture({}, { waitMs: 20 });
   try {
     rmSync(join(g.dir, 'directory.secret'));
     await g.wait('0');
     assert.deepEqual([g.hooks.list()[0].level, g.hooks.list()[0].hasSecret], ['down', false]);
-    assert.equal(g.hooks.summary().down, 1);
+    assert.deepEqual([g.hooks.status().summary.down, g.hooks.status().open.down, g.hooks.status().invalid], [1, 1, false]);
+    // A hooks.json that does not parse: no hook exists, and that is said.
+    await new Promise((r) => setTimeout(r, 20));
+    g.write('{ not json');
+    assert.deepEqual([g.hooks.status().invalid, g.hooks.status().hooks.length, g.hooks.status().open.hooks], [true, 0, 0]);
   } finally { g.done(); }
 });
 
@@ -385,7 +414,7 @@ test('over HTTP: a delivery reaches a listener holding a request, before any bod
     assert.deepEqual(open.hooks, []);
     assert.equal(open.summary.hooks, 1);
     assert.equal(open.summary.woke, 1);
-    assert.equal(open.summary.refused, 1);
+    assert.equal('refused' in open.summary || 'warn' in open.summary, false, 'nothing a caller without the secret can move');
     assert.equal(/directory|worker|lookalike|pull_request/.test(JSON.stringify(open)), false);
     assert.equal((await (await fetch(`${base}/api/hooks/directory/wait`, { headers: { authorization: `Bearer ${LOOKALIKE}` } })).json()).listener, 'lookalike');
     // A hook that exists and one that does not cannot be told apart from outside.

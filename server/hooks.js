@@ -116,28 +116,29 @@ export function createHooks({ dir = process.env.WAKE_HOOKS_DIR, dataDir, clock =
   // What happened since this process started, for the status page. Kept in
   // memory, and only for hooks in the configuration: a guessed name counts nothing.
   const tallies = new Map(), seen = new Map();
-  const tally = (name) => tallies.get(name) || tallies.set(name, { woke: 0, ignored: 0, refused: 0, lastDeliveryAt: null, lastRefusedAt: null }).get(name);
+  const tally = (name) => tallies.get(name) || tallies.set(name, { woke: 0, ignored: 0, refused: 0, last: null, lastDeliveryAt: null, lastRefusedAt: null }).get(name);
   const delivered = (name, outcome) => {
     const t = tally(name);
     t[outcome] += 1;
+    t.last = outcome;
     t[outcome === 'refused' ? 'lastRefusedAt' : 'lastDeliveryAt'] = clock();
   };
   // Read again whenever the file changes, so a hook is added without a restart.
   // A file that does not parse configures nothing: every route then answers as
   // if no hook existed, and the fault is logged once per version of the file.
-  let cache = { key: null, hooks: new Map() };
+  let cache = { key: null, hooks: new Map(), invalid: false };
   const configured = () => {
     if (!dir) return cache.hooks;
     const file = join(dir, 'hooks.json');
     let key;
     try { const st = statSync(file); key = `${st.mtimeMs}|${st.size}|${st.ino}`; } catch { key = 'absent'; }
     if (key === cache.key) return cache.hooks;
-    let hooks = new Map();
+    let hooks = new Map(), invalid = false;
     if (key !== 'absent') {
       try { hooks = parseHooks(JSON.parse(readFileSync(file, 'utf8'))); }
-      catch (e) { log({ event: 'hooks-config-invalid', error: String(e.message).slice(0, 200), at: iso() }); }
+      catch (e) { invalid = true; log({ event: 'hooks-config-invalid', error: String(e.message).slice(0, 200), at: iso() }); }
     }
-    cache = { key, hooks };
+    cache = { key, hooks, invalid };
     return hooks;
   };
   const secretOf = (name) => {
@@ -265,7 +266,7 @@ export function createHooks({ dir = process.env.WAKE_HOOKS_DIR, dataDir, clock =
 
   // For the status page: what exists, whether each hook can do its job right
   // now, and what arrived since this process started. No secret and no token
-  // digest. A hook is `down` when a delivery to it would wake nobody.
+  // digest. A hook is `down` when a delivery to it would not wake a listener.
   const list = () => {
     const now = clock();
     return [...configured()].map(([name, hook]) => {
@@ -274,28 +275,41 @@ export function createHooks({ dir = process.env.WAKE_HOOKS_DIR, dataDir, clock =
         const last = seen.get(`${name}|${l.id}`) ?? null, waiting = held.filter((w) => w.listener === l.id).length;
         return { id: l.id, waiting, lastSeenAt: last === null ? null : iso(last), connected: waiting > 0 || (last !== null && now - last < LISTENER_AWAY_MS) };
       });
-      const away = listeners.filter((l) => !l.connected).map((l) => l.id);
+      const away = listeners.filter((l) => !l.connected), ids = away.map((l) => l.id).join(', ');
       let level = 'ok', reason = null;
       if (!hasSecret) [level, reason] = ['down', 'No usable secret file on the status host: every delivery is refused.'];
       else if (!listeners.length) [level, reason] = ['down', 'No listener is configured.'];
       // After a restart of this process a listener needs a moment to come back.
-      else if (away.length && now - startedAt < LISTENER_AWAY_MS && !listeners.some((l) => l.lastSeenAt)) [level, reason] = ['info', 'The console restarted; waiting for the listener to ask again.'];
-      else if (away.length) [level, reason] = ['down', `Listener ${away.join(', ')} is not connected: a delivery wakes nobody, and the work runs on its own timer until it is back.`];
-      else if (t.lastRefusedAt !== null && now - t.lastRefusedAt < REFUSAL_SHOWN_MS && (t.lastDeliveryAt === null || t.lastRefusedAt > t.lastDeliveryAt)) [level, reason] = ['warn', 'The newest delivery was refused: its signature or secret was wrong.'];
+      else if (away.length && now - startedAt < LISTENER_AWAY_MS && away.every((l) => l.lastSeenAt === null)) [level, reason] = ['info', `The console restarted; waiting for listener ${ids} to ask again.`];
+      else if (away.length) [level, reason] = ['down', away.length === listeners.length
+        ? `Listener ${ids} is not connected: a delivery wakes nobody, and the work runs on its own timer until it is back.`
+        : `Listener ${ids} is not connected: a delivery does not wake it, and its work runs on its own timer until it is back.`];
+      // The newest delivery by order of arrival, not by comparing two clock readings.
+      else if (t.last === 'refused' && Math.abs(now - t.lastRefusedAt) < REFUSAL_SHOWN_MS) [level, reason] = ['warn', 'The newest delivery was refused: its signature or secret was wrong.'];
       return { name, level, reason, source: hook.source, events: hook.events ? [...hook.events].sort() : null, matchRules: hook.match?.length || 0,
-        listeners, listenersWaiting: held.length, hasSecret, ...stateOf(name),
+        listeners, listenersWaiting: listeners.reduce((n, l) => n + l.waiting, 0), hasSecret, ...stateOf(name),
         deliveries: { woke: t.woke, ignored: t.ignored, refused: t.refused, lastAt: t.lastDeliveryAt === null ? null : iso(t.lastDeliveryAt), lastRefusedAt: t.lastRefusedAt === null ? null : iso(t.lastRefusedAt) } };
     });
   };
-  // The same without anything that names a hook, a listener or an event.
-  const summary = () => {
-    const hooks = list(), newest = (values) => values.filter(Boolean).sort().pop() || null;
-    const count = (level) => hooks.filter((h) => h.level === level).length;
-    return { hooks: hooks.length, ok: count('ok'), warn: count('warn'), down: count('down'), starting: count('info'),
-      lastWakeAt: newest(hooks.map((h) => h.at)), lastDeliveryAt: newest(hooks.map((h) => h.deliveries.lastAt)),
-      woke: hooks.reduce((n, h) => n + h.deliveries.woke, 0), ignored: hooks.reduce((n, h) => n + h.deliveries.ignored, 0), refused: hooks.reduce((n, h) => n + h.deliveries.refused, 0) };
+  // Everything the page needs, from one look. `summary` goes with the list to an
+  // account that has access. `open` is for everyone else, and holds nothing that
+  // a caller without a secret can move: a refused delivery changes `refused` and
+  // a hook's `warn`, and if those showed here, sending a bad signature to a
+  // guessed name and reading the counts again would tell which names exist. So
+  // `open` counts a hook that is listening whether or not it is on `warn`,
+  // leaves refusals out, and gives times to the minute. `invalid`: hooks.json is
+  // there and does not parse, so no hook exists; that names nothing.
+  const status = () => {
+    const hooks = list(), count = (level) => hooks.filter((h) => h.level === level).length;
+    const newest = (values) => values.filter(Boolean).sort().pop() || null, total = (key) => hooks.reduce((n, h) => n + h.deliveries[key], 0);
+    const minute = (at) => (at ? `${at.slice(0, 16)}:00.000Z` : null);
+    const listening = count('ok') + count('warn'), lastWakeAt = newest(hooks.map((h) => h.at)), lastDeliveryAt = newest(hooks.map((h) => h.deliveries.lastAt));
+    const shared = { hooks: hooks.length, listening, down: count('down'), starting: count('info'), woke: total('woke'), ignored: total('ignored') };
+    return { invalid: cache.invalid, hooks, startedAt: iso(startedAt),
+      summary: { ...shared, warn: count('warn'), refused: total('refused'), lastWakeAt, lastDeliveryAt },
+      open: { ...shared, lastWakeAt: minute(lastWakeAt), lastDeliveryAt: minute(lastDeliveryAt), startedAt: minute(iso(startedAt)) } };
   };
   const close = () => { for (const set of waiters.values()) for (const w of [...set]) w.done(); };
 
-  return { receive, wait, list, summary, startedAt: () => iso(startedAt), close };
+  return { receive, wait, list, status, close };
 }

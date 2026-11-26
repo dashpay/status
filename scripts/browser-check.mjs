@@ -201,7 +201,8 @@ try {
     const text = await page.locator('body').innerText();
     assert.ok(text.includes('dn-testnet-masternode-1') && text.includes('Unattached volume') && text.includes('$3,271'));
     await page.screenshot({ path: `artifacts/aws-${label}.png`, fullPage: true });
-    // Webhooks: deliveries arrive, three listeners hold a request, the fourth was never seen.
+    // Webhooks: deliveries arrive; three listeners have asked (two still hold their request, the one whose hook woke
+    // was answered), the fourth was never seen.
     const deliver = (hook, event, body) => fetch(`${origin}/api/hooks/${hook}`, { method: 'POST', body, headers: { 'content-type': 'application/json', 'x-github-event': event,
       'x-github-delivery': '5d2b6b10-cb1c-11f0-9d5f-0123456789ab', 'x-hub-signature-256': `sha256=${createHmac('sha256', hookSecret).update(body).digest('hex')}` } });
     const listening = new AbortController();
@@ -218,7 +219,7 @@ try {
     const hooksPage = await page.locator('body').innerText();
     assert.ok(['agent-directory', 'platform-release-jobs', 'forum-queue', 'worker-vm', 'XenForo', '1 rule', 'never seen'].every((t) => hooksPage.includes(t)), 'hooks, senders, rules and listeners');
     // In the console's first two minutes a listener that has not asked yet is "starting", after that it is away.
-    assert.ok(hooksPage.includes('3/4') && /fixture-absent-listener is not connected|waiting for the listener to ask again/.test(hooksPage) && hooksPage.includes('The newest delivery was refused'), 'what is wrong is said in words');
+    assert.ok(hooksPage.includes('3/4') && /fixture-absent-listener is not connected|waiting for listener fixture-absent-listener to ask again/.test(hooksPage) && hooksPage.includes('The newest delivery was refused'), 'what is wrong is said in words');
     assert.ok(!hooksPage.includes(hookSecret) && !hooksPage.includes(tokenDigest), 'no secret and no token digest on the page');
     await page.screenshot({ path: `artifacts/webhooks-${label}.png`, fullPage: true });
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), `${label}: the Webhooks page does not scroll sideways`);
@@ -242,6 +243,7 @@ try {
   await anon.goto(origin + '/webhooks');
   await anon.getByText('Public view: counts only').waitFor();
   const hooksPublic = await anon.locator('body').innerText();
+  assert.ok(!/refused|to check/i.test(hooksPublic), 'public Webhooks page shows nothing a refused delivery moves');
   assert.ok(/hooks listening/i.test(hooksPublic) && hooksPublic.includes('3/4') && !/agent-directory|platform-release|forum-queue|worker-vm|ubuntu-server-2|pull_request|workflow_job/.test(hooksPublic), 'public Webhooks page names nothing');
   await anon.screenshot({ path: 'artifacts/webhooks-public.png', fullPage: true });
 

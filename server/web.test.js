@@ -828,6 +828,26 @@ test('API tokens: an open operation log and event stream end when the token is r
   } finally { w.close(); }
 });
 
+test('the public Webhooks answer cannot be used to find hook names by guessing', async () => {
+  const hooksDir = mkdtempSync(join(tmpdir(), 'web-hooks-'));
+  writeFileSync(join(hooksDir, 'hooks.json'), JSON.stringify({ schemaVersion: 1, hooks: { 'agent-directory': { source: 'github', events: ['pull_request'], listeners: { 'worker-vm': 'a'.repeat(64) } } } }));
+  writeFileSync(join(hooksDir, 'agent-directory.secret'), 'fixture-hook-secret-0123456789\n');
+  let now = Date.now();
+  const w = await start(9920871, [], { hooksDir, clock: () => now });
+  try {
+    const look = async () => { const answer = await (await fetch(`${w.base}/api/hooks`)).json(); delete answer.at; return answer; };
+    const probe = (name) => fetch(`${w.base}/api/hooks/${name}`, { method: 'POST', body: '{}', headers: { 'x-github-event': 'push', 'x-github-delivery': 'x', 'x-hub-signature-256': `sha256=${'0'.repeat(64)}` } });
+    const before = await look();
+    for (const name of ['agent-directory', 'agent-directory', 'nothing-here']) assert.equal((await probe(name)).status, 401);
+    now += 20_000; // past the few seconds the public answer is kept
+    assert.deepEqual(await look(), before, 'refusals of a real name move nothing a stranger can read');
+    // They did happen, and an account with access sees them.
+    await w.login();
+    const full = await (await w.req('/api/hooks')).json();
+    assert.deepEqual([full.hooks[0].deliveries.refused, full.summary.refused, full.hooks[0].level], [2, 2, 'info']);
+  } finally { w.close(); rmSync(hooksDir, { recursive: true, force: true }); }
+});
+
 test('the Webhooks page: an account with access sees the hooks by name, everyone else counts', async () => {
   const hooksDir = mkdtempSync(join(tmpdir(), 'web-hooks-'));
   writeFileSync(join(hooksDir, 'hooks.json'), JSON.stringify({ schemaVersion: 1, hooks: {
@@ -845,6 +865,10 @@ test('the Webhooks page: an account with access sees the hooks by name, everyone
     assert.deepEqual(anonymous.hooks, []);
     assert.deepEqual([anonymous.summary.hooks, anonymous.summary.down, anonymous.summary.starting], [2, 1, 1], 'one has no secret file, one waits for its listener');
     assert.equal(named(anonymous), false, 'nothing that names a hook, a listener or an event');
+    assert.deepEqual(Object.keys(anonymous.summary).sort(), ['down', 'hooks', 'ignored', 'lastDeliveryAt', 'lastWakeAt', 'listening', 'startedAt', 'starting', 'woke'], 'no refusals and no warn: a stranger could move those');
+    const answer = await fetch(`${admin.base}/api/hooks`);
+    assert.equal(answer.headers.get('cache-control'), 'no-store');
+    assert.match(answer.headers.get('vary') || '', /Cookie/);
 
     const csrf = await admin.login();
     const full = await (await admin.req('/api/hooks')).json();

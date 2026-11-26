@@ -78,8 +78,14 @@ lost.
 `GET /api/hooks` is what the **Webhooks** page shows. An account with access (and an
 API token for every network) gets each hook by name: its sender, events and rules, its
 listeners and whether each is connected, the last wake, and what arrived since the
-console started (woke, ignored, refused). Everyone else gets the counts and nothing
-that names a hook, a listener or an event. No secret and no token digest, for anyone.
+console started (woke, ignored, refused). Everyone else gets counts: how many hooks
+there are and how many are listening, deliveries that woke or were ignored, and two
+times to the minute. Nothing in that names a hook, a listener or an event, and nothing
+in it can be moved by a caller who holds no secret. Refused deliveries and the `warn`
+level are left out of it for that reason: a refusal is counted only for a name that
+exists, so a count of them would let anyone find names by sending a bad signature to a
+guess and looking again. No secret and no token digest, for anyone. `invalid` is true
+when `hooks.json` is there and does not parse.
 
 A hook's level says whether a delivery would do its job right now:
 
@@ -88,7 +94,7 @@ A hook's level says whether a delivery would do its job right now:
 | `ok` | the secret file is usable and every listener asked within the last two minutes (a listener asks at least every 50 seconds) |
 | `info` | the console started less than two minutes ago and the listener has not asked yet |
 | `warn` | the newest delivery was refused (wrong signature or secret), within the last day |
-| `down` | no usable secret file, no listener configured, or a listener that has not asked for two minutes: a delivery wakes nobody, and the work runs on its own timer |
+| `down` | no usable secret file, no listener configured, or a listener that has not asked for two minutes: a delivery does not wake it, and its work runs on its own timer |
 
 The counts of deliveries are kept in memory and start again with the console; the
 count of wakes and the last wake are on disk.

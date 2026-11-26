@@ -588,10 +588,16 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   // The Webhooks page. Like the other infrastructure pages: an account with
   // access sees every hook, by name, with its listeners and what arrived;
   // anyone else gets counts. Hook names are not public, so the public answer
-  // names no hook, no listener and no event.
+  // names no hook, no listener and no event, and holds no count that a caller
+  // without a secret can move (server/hooks.js, status): otherwise guessing a
+  // name and reading the counts again would tell whether it exists.
   app.get('/api/hooks', (req, res) => {
-    const full = seesInfrastructure(user(req)), at = new Date(clock()).toISOString();
-    res.vary('Cookie').json({ public: !full, at, startedAt: hooks.startedAt(), summary: hooks.summary(), hooks: full ? hooks.list() : [] });
+    res.vary('Cookie');
+    if (!seesInfrastructure(user(req))) {
+      return res.json(cached('hooks-public', () => { const s = hooks.status(); return { public: true, at: new Date(clock()).toISOString(), startedAt: s.open.startedAt, invalid: s.invalid, summary: s.open, hooks: [] }; }));
+    }
+    const s = hooks.status();
+    res.json({ public: false, at: new Date(clock()).toISOString(), startedAt: s.startedAt, invalid: s.invalid, summary: s.summary, hooks: s.hooks });
   });
   app.get('/api/aws', (req, res) => {
     const inv = readJSON(join(awsDir, 'inventory.json'));
