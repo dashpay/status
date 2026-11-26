@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { createHooks, parseHooks, MAX_BODY } from './hooks.js';
+import { createHooks, parseHooks, MAX_BODY, MAX_WAITS_PER_LISTENER } from './hooks.js';
 import { createWeb } from './web.js';
 import { DEFAULT_SETTINGS } from '../shared/settings.js';
 
@@ -80,9 +80,24 @@ test('only the signature decides: the payload is never parsed', async () => {
     assert.equal((await f.deliver('{}', { signature: 'sha256=zz' })).status, 401);
     assert.equal((await f.deliver('{}', { event: 'Pull Request' })).status, 400);
     assert.equal((await f.deliver('{}', { delivery: 'a b' })).status, 400);
-    assert.equal((await f.hooks.receive('other', { signature: sign('{}'), event: 'push', delivery: DELIVERY }, Readable.from([Buffer.from('{}')]))).status, 404);
-    assert.equal((await f.hooks.receive('../directory', { signature: sign('{}'), event: 'push', delivery: DELIVERY }, Readable.from([Buffer.from('{}')]))).status, 404);
     assert.equal((await f.wait()).body.seq, 1, 'one wake: the delivery that was signed');
+    // Said in the log for a hook that exists, at most once a minute.
+    assert.equal(f.logged.filter((e) => e.event === 'hook-signature-rejected').length, 1);
+  } finally { f.done(); }
+});
+
+test('a name that is not a hook answers exactly like a wrong signature', async () => {
+  const f = fixture();
+  try {
+    const to = (name, headers = {}) => f.hooks.receive(name, { signature: sign('{}'), event: 'push', delivery: DELIVERY, ...headers }, Readable.from([Buffer.from('{}')]));
+    const wrong = await to('directory', { signature: sign('{}', 'another-secret-0123456789') });
+    assert.deepEqual(wrong, { status: 401, body: { error: 'Invalid signature' } });
+    for (const name of ['other', '../directory', 'Directory', '', undefined]) assert.deepEqual(await to(name), wrong, String(name));
+    // Nor do the unsigned headers tell them apart: they are looked at only after the signature.
+    assert.deepEqual(await to('other', { event: 'Not An Event' }), wrong);
+    assert.deepEqual(await to('directory', { signature: sign('x'), event: 'Not An Event' }), wrong);
+    assert.equal(f.logged.some((e) => e.hook === 'other'), false, 'a guessed name is never logged');
+    assert.equal((await f.wait()).body.seq, 0);
   } finally { f.done(); }
 });
 
@@ -102,7 +117,13 @@ test('a delivery over the limit is refused and wakes nobody', async () => {
     const chunk = Buffer.alloc(1024 * 1024, 0x61);
     const body = Readable.from(Array.from({ length: MAX_BODY / chunk.length + 1 }, () => chunk));
     assert.equal((await f.hooks.receive('directory', { signature: sign('x'), event: 'push', delivery: DELIVERY }, body)).status, 413);
+    // A declared length over the limit is refused before a byte is read, whatever the name.
+    const unread = { [Symbol.asyncIterator]() { throw new Error('the body must not be read'); } };
+    for (const name of ['directory', 'other']) assert.equal((await f.hooks.receive(name, { signature: sign('x'), event: 'push', delivery: DELIVERY, length: String(MAX_BODY + 1) }, unread)).status, 413);
     assert.equal((await f.wait()).body.seq, 0);
+    // Exactly the limit is taken.
+    const full = Buffer.alloc(MAX_BODY, 0x62);
+    assert.equal((await f.hooks.receive('directory', { signature: sign(full), event: 'push', delivery: DELIVERY, length: String(MAX_BODY) }, Readable.from([full]))).status, 202);
   } finally { f.done(); }
 });
 
@@ -119,14 +140,20 @@ test('a listener needs its own token; an unknown hook answers the same', async (
   } finally { f.done(); }
 });
 
-test('no more than eight listeners are held on one hook', async () => {
-  const f = fixture({}, { waitMs: 60_000 });
+test('one listener holds a few requests at most, and cannot take another listener\'s place', async () => {
+  const OTHER = 'second-listener-token-0123456789abcdef';
+  const f = fixture({ listeners: { worker: digest(TOKEN), other: digest(OTHER) } }, { waitMs: 60_000 });
   try {
-    const held = Array.from({ length: 8 }, () => f.wait('0'));
+    const held = Array.from({ length: MAX_WAITS_PER_LISTENER }, () => f.wait('0'));
     await new Promise((r) => setImmediate(r));
     assert.equal((await f.wait('0')).status, 429);
+    const others = f.wait('0', OTHER);
+    await new Promise((r) => setImmediate(r));
+    assert.equal(f.hooks.list()[0].listenersWaiting, MAX_WAITS_PER_LISTENER + 1);
     await f.deliver();
-    assert.deepEqual((await Promise.all(held)).map((r) => r.body.seq), Array(8).fill(1));
+    assert.deepEqual((await Promise.all(held)).map((r) => r.body.seq), Array(MAX_WAITS_PER_LISTENER).fill(1));
+    assert.equal((await others).body.listener, 'other');
+    assert.equal(f.hooks.list()[0].listenersWaiting, 0);
   } finally { f.done(); }
 });
 
@@ -136,15 +163,16 @@ test('the configuration is read again when it changes; a damaged file configures
     assert.equal((await f.deliver()).status, 202);
     await new Promise((r) => setTimeout(r, 20));
     f.write('{ not json');
-    assert.equal((await f.deliver()).status, 404);
+    assert.equal((await f.deliver()).status, 401);
     assert.equal((await f.wait()).status, 401);
     assert.equal(f.logged.filter((e) => e.event === 'hooks-config-invalid').length, 1, 'said once, not on every request');
     await new Promise((r) => setTimeout(r, 20));
     f.write({ schemaVersion: 1, hooks: { directory: { source: 'github', listeners: { worker: digest(TOKEN) } }, second: { source: 'github', listeners: {} } } });
     assert.equal((await f.deliver()).body.seq, 2);
     assert.deepEqual(f.hooks.list().map((h) => [h.name, h.signed, h.seq]), [['directory', true, 2], ['second', false, 0]]);
-    // A hook without its secret file takes no delivery.
-    assert.equal((await f.hooks.receive('second', { signature: sign('{}'), event: 'push', delivery: DELIVERY }, Readable.from([Buffer.from('{}')]))).status, 404);
+    // A hook without its secret file takes no delivery, and says so in the log.
+    assert.equal((await f.hooks.receive('second', { signature: sign('{}'), event: 'push', delivery: DELIVERY }, Readable.from([Buffer.from('{}')]))).status, 401);
+    assert.equal(f.logged.filter((e) => e.event === 'hook-secret-missing' && e.hook === 'second').length, 1);
   } finally { f.done(); }
 });
 
@@ -171,7 +199,9 @@ test('hooks.json is checked strictly', () => {
 });
 
 test('over HTTP: a delivery reaches a listener holding a request, before any body parser or API token', async () => {
-  const f = fixture();
+  // A listener token that looks like a console API token still belongs to the hook.
+  const LOOKALIKE = `dst_0a1b2c3d_${'A'.repeat(43)}`;
+  const f = fixture({ listeners: { worker: digest(TOKEN), lookalike: digest(LOOKALIKE) } });
   writeFileSync(join(f.dataDir, 'settings.json'), JSON.stringify(structuredClone(DEFAULT_SETTINGS)));
   const app = createWeb({ dataDir: f.dataDir, origin: 'http://127.0.0.1', hooksDir: f.dir, hookWaitMs: 5000, auth: { clientId: 'c', clientSecret: 's', fetcher: async () => Response.json({}) } });
   const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
@@ -193,6 +223,20 @@ test('over HTTP: a delivery reaches a listener holding a request, before any bod
     assert.equal((await fetch(`${base}/api/hooks/directory/wait?after=1&after=2`, { headers: { authorization: `Bearer ${TOKEN}` } })).status, 400);
     assert.equal((await fetch(`${base}/api/hooks/directory/wait`)).status, 401);
     assert.equal((await fetch(`${base}/api/hooks`)).status, 403, 'the list is for admins');
-    assert.equal((await fetch(`${base}/api/hooks/unknown`, { method: 'POST', body: '{}' })).status, 404);
+    assert.equal((await (await fetch(`${base}/api/hooks/directory/wait`, { headers: { authorization: `Bearer ${LOOKALIKE}` } })).json()).listener, 'lookalike');
+    // A hook that exists and one that does not cannot be told apart from outside.
+    const probe = async (name, headers = {}) => { const r = await fetch(`${base}/api/hooks/${name}`, { method: 'POST', body: '{}', headers }); return [r.status, await r.text()]; };
+    assert.deepEqual(await probe('unknown'), await probe('directory'));
+    assert.deepEqual(await probe('unknown', { 'x-hub-signature-256': sign('x') }), await probe('directory', { 'x-hub-signature-256': sign('x') }));
+    assert.equal((await probe('unknown'))[0], 401);
+    // A listener that goes away frees its place.
+    const gone = new AbortController();
+    const left = fetch(`${base}/api/hooks/directory/wait?after=1`, { headers: { authorization: `Bearer ${TOKEN}` }, signal: gone.signal }).catch(() => 'aborted');
+    await new Promise((r) => setTimeout(r, 50));
+    gone.abort();
+    assert.equal(await left, 'aborted');
+    await new Promise((r) => setTimeout(r, 50));
+    const session = await fetch(`${base}/api/hooks/directory/wait?after=1`, { headers: { authorization: `Bearer ${TOKEN}` }, signal: AbortSignal.timeout(200) }).catch(() => 'held');
+    assert.equal(session, 'held', 'a new request is held, not refused');
   } finally { app.close(); server.close(); f.done(); }
 });
