@@ -386,6 +386,18 @@ api -X POST https://status.testnet.networks.dash.org/api/ops/$id/confirm -d "{\"
 - Revoke in Settings. A token that may have leaked is revoked first and replaced
   after.
 
+### Wake hooks
+
+The machines that run our automation cannot be reached from outside, so GitHub
+cannot deliver a webhook to them. The console takes the delivery instead
+(`POST /api/hooks/<name>`, signed) and wakes a listener that holds a request
+open from its own side (`GET /api/hooks/<name>/wait`). A wake carries no data:
+the delivery is checked for its signature and never parsed or passed on, and the
+listener then looks for itself. Hooks are files on the status host, not settings;
+adding one, the protocol and its limits are in
+[deploy/WAKE-HOOKS.md](deploy/WAKE-HOOKS.md). Without `/etc/dash-status/hooks`
+both routes answer as if no hook existed.
+
 ### Devnet operator keys
 
 Connect → **Private devnet keys** is available to operators of that managed

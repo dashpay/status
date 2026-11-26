@@ -15,6 +15,7 @@ import { operationMaintenance } from './operation-maintenance.js';
 import { loadIncidentState, publicIssues, apiAuthorized, readSecret, validIgnoredCiJobs } from './incidents.js';
 import { remediationView } from './remediation.js';
 import { receiveRelease } from './release-webhook.js';
+import { createHooks } from './hooks.js';
 import { againstReceiver, loadControl, requestClear, setDispatch } from './remediation-control.js';
 import { clearActivity, loadActivity } from './remediation-activity.js';
 import { publicInventory } from './aws-public.js';
@@ -46,7 +47,7 @@ export function ttlCache(clock, ttl = 15_000) {
   return Object.assign(cached, { delete: (key) => entries.delete(key), size: () => entries.size });
 }
 
-export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, clock = Date.now, ciGithub = null, ciQueue = {}, mainnetReportToken = process.env.MAINNET_REPORT_TOKEN, keyReader = requestDevnetKeys, keySocket = process.env.DEVNET_KEYS_SOCKET } = {}) {
+export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, clock = Date.now, ciGithub = null, ciQueue = {}, mainnetReportToken = process.env.MAINNET_REPORT_TOKEN, keyReader = requestDevnetKeys, keySocket = process.env.DEVNET_KEYS_SOCKET, hooksDir = process.env.WAKE_HOOKS_DIR, hookWaitMs } = {}) {
   const settingsPath = join(dataDir, 'settings.json');
   const dirs = { state: join(dataDir, 'state'), requests: join(dataDir, 'requests'), ops: join(dataDir, 'ops') };
   for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
@@ -55,6 +56,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   const app = express();
   const auth = createAuth({ origin }, { store: join(dataDir, 'sessions.json'), ...authDeps });
   const tokens = createApiTokens({ dataDir, clock });
+  const hooks = createHooks({ dir: hooksDir, dataDir, clock, ...(hookWaitMs ? { waitMs: hookWaitMs } : {}) });
   const clients = new Set();
   const cache = new Map();
   // Each module reads the other only when a request is served, so ci gets a late-bound runningJobs.
@@ -106,6 +108,21 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
         signature: req.get('x-hub-signature-256'), event: req.get('x-github-event'), delivery: req.get('x-github-delivery'), now: clock() });
       res.status(202).json(result);
     } catch (e) { res.status(e.status || 503).json({ error: e.status ? e.message : 'Release persistence unavailable; redeliver this event' }); }
+  });
+  // Wake hooks (server/hooks.js): a signed delivery from outside wakes a
+  // listener on a machine this host cannot reach, which holds the second
+  // request open from its side. The delivery is hashed as a stream and never
+  // parsed, so both routes sit before the JSON parser; the listener's token is
+  // its own kind, so they sit before the API tokens too.
+  app.post('/api/hooks/:name', async (req, res) => {
+    const r = await hooks.receive(req.params.name, { signature: req.get('x-hub-signature-256'), event: req.get('x-github-event'), delivery: req.get('x-github-delivery'), length: req.get('content-length') }, req);
+    res.status(r.status).json(r.body);
+  });
+  app.get('/api/hooks/:name/wait', async (req, res) => {
+    const closed = new Promise((resolve) => { res.on('close', resolve); });
+    const after = req.query.after === undefined || typeof req.query.after === 'string' ? req.query.after : '';
+    const r = await hooks.wait(req.params.name, req.get('authorization'), after, closed);
+    if (!res.destroyed) res.status(r.status).set('Cache-Control', 'no-store').json(r.body);
   });
   app.use(express.json({ limit: '64kb' }));
   app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
@@ -560,6 +577,9 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   app.delete('/api/ci/reporters/:id', ...adminWrite, (req, res) => {
     try { ci.removeReporter(req.params.id); res.json({ ok: true }); } catch (e) { res.status(404).json({ error: e.message }); }
   });
+  // Which wake hooks exist and when each last woke a listener. Admins only:
+  // hook names are not public.
+  app.get('/api/hooks', (req, res) => (isAdmin(req) ? res.json({ hooks: hooks.list() }) : res.status(403).json({ error: 'Only admins see wake hooks' })));
   app.get('/api/aws', (req, res) => {
     const inv = readJSON(join(awsDir, 'inventory.json'));
     if (!inv) return res.status(404).json({ error: 'No AWS inventory yet; the agent collects it every 10 minutes' });
@@ -609,7 +629,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     app.get('/{*path}', (req, res) => res.set('Cache-Control', 'no-cache').sendFile('index.html', { root: dist }));
   }
   app.use((error, req, res, next) => { if (res.headersSent) return next(error); res.status([400, 413].includes(error.status) ? error.status : 500).json({ error: error.status === 413 ? 'Request body too large' : 'Request could not be processed' }); });
-  app.close = () => { for (const w of watchers) w.close(); for (const c of clients) c.res.end(); orgQueue.flush(); };
+  app.close = () => { for (const w of watchers) w.close(); for (const c of clients) c.res.end(); hooks.close(); orgQueue.flush(); };
   app.ci = ci;
   app.tickQueue = () => orgQueue.tick().then(pushQueue);
   return app;

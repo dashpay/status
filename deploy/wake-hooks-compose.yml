@@ -1,0 +1,8 @@
+# Wake hooks (deploy/WAKE-HOOKS.md). Web reads which hooks exist, the senders'
+# secrets and the digests of the listeners' tokens. Read-only, and web only.
+services:
+  web:
+    environment:
+      WAKE_HOOKS_DIR: /hooks
+    volumes:
+      - /etc/dash-status/hooks:/hooks:ro
