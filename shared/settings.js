@@ -42,7 +42,8 @@ export const DEFAULT_SETTINGS = {
     acmeEmail: 'infrastructure@dash.org',
     services: {
       quorumServer: 'dashpay/quorum-list-server:0.7.0',
-      insightImage: 'dashpay/insight:4.0.10',
+      // 4.0.11 is the first Insight that reads Core 24 blocks; 4.0.10 exits on them.
+      insightImage: 'dashpay/insight:4.0.11',
       explorerVersion: '2.5.3',
       faucetRef: 'b927e6058845ebf3c0722e56eb0e89642e98c28b',
       faucetAmount: 10, faucetRateLimit: 20, faucetFunding: 50000, epochSeconds: 3600,
@@ -163,7 +164,7 @@ export function validateDevnetDefaults(d) {
   const sv = d.services || {};
   req(IMAGE_TAG.test(sv.quorumServer || '') && /^(docker\.io\/)?dashpay\/quorum-list-server[:@]/.test(sv.quorumServer), 'services.quorumServer must be dashpay/quorum-list-server:<tag>');
   req(IMAGE_TAG.test(sv.insightImage || '') && /^(docker\.io\/)?dashpay\/insight[:@]/.test(sv.insightImage), 'services.insightImage must be dashpay/insight:<tag>');
-  req(/^\d+\.\d+\.\d+$|^nightly$/.test(sv.explorerVersion || ''), 'services.explorerVersion like 2.5.3');
+  req(/^\d{1,5}\.\d{1,5}\.\d{1,5}$|^nightly$/.test(sv.explorerVersion || ''), 'services.explorerVersion like 2.5.3');
   req(/^[0-9a-f]{40}$/.test(sv.faucetRef || ''), 'services.faucetRef must be a full dash-faucet commit');
   req(typeof sv.faucetAmount === 'number' && sv.faucetAmount > 0 && sv.faucetAmount <= 1000, 'services.faucetAmount 0..1000');
   req(Number.isInteger(sv.faucetRateLimit) && sv.faucetRateLimit >= 1 && sv.faucetRateLimit <= 10000, 'services.faucetRateLimit >= 1');
@@ -171,6 +172,50 @@ export function validateDevnetDefaults(d) {
   req(Number.isInteger(sv.epochSeconds) && sv.epochSeconds >= 60, 'services.epochSeconds >= 60');
   req(/^Z[0-9A-Z]+$/.test(d.dnsZoneId) && /^[a-z0-9.-]+\.[a-z]+$/.test(d.dnsSuffix), 'dnsZoneId/dnsSuffix invalid');
   return d;
+}
+
+// The versions a new devnet starts with. This is the one part of the settings
+// an admin API token may change (PATCH /api/settings/devnet-versions): a bot
+// that creates devnets already chooses each of them per request. Where devnets
+// are built, their size, and the faucet's code and amounts are not in it.
+export const DEVNET_VERSION_KEYS = { images: [...COMPONENTS, 'acme'], services: ['quorumServer', 'insightImage', 'explorerVersion'] };
+export function patchDevnetVersions(devnets, patch) {
+  const object = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+  const groups = Object.keys(DEVNET_VERSION_KEYS);
+  if (!object(patch) || !Object.keys(patch).length) throw new Error('expected { "images": {...}, "services": {...} } with the versions to change');
+  const next = structuredClone(devnets), changed = [];
+  for (const [group, part] of Object.entries(patch)) {
+    if (!groups.includes(group)) throw new Error(`"${group}" cannot be changed here; only versions under ${groups.join(' and ')}`);
+    if (!object(part)) throw new Error(`${group} must be an object`);
+    for (const [key, value] of Object.entries(part)) {
+      if (!DEVNET_VERSION_KEYS[group].includes(key)) throw new Error(`${group}.${key} cannot be changed here; allowed: ${DEVNET_VERSION_KEYS[group].join(', ')}`);
+      if (typeof value !== 'string') throw new Error(`${group}.${key} must be a string`);
+      const from = next[group]?.[key] ?? null, to = value.trim();
+      // An empty ACME image is a mode (self-signed gateways), not a version.
+      if (!to) throw new Error(`${group}.${key} cannot be empty`);
+      if (from === to) continue;
+      next[group] = { ...next[group], [key]: to };
+      changed.push({ key: `${group}.${key}`, from, to });
+    }
+  }
+  return { devnets: validateDevnetDefaults(next), changed };
+}
+
+// A page-wide save carries the whole document as the browser loaded it. A
+// version changed since then (by a bot, or in another tab) and not edited on
+// that page keeps its newer value instead of being put back. `loaded` is the
+// page's copy of the devnet defaults from when it was opened.
+export function keepNewerDevnetVersions(devnets, loaded, disk) {
+  const object = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+  if (!object(devnets) || !object(loaded) || !object(disk)) return devnets;
+  const next = structuredClone(devnets);
+  for (const [group, keys] of Object.entries(DEVNET_VERSION_KEYS)) {
+    for (const key of keys) {
+      const was = loaded[group]?.[key], now = disk[group]?.[key];
+      if (typeof now === 'string' && now !== was && object(next[group]) && next[group][key] === was) next[group][key] = now;
+    }
+  }
+  return next;
 }
 
 export function loadSettings(path) {

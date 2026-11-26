@@ -367,6 +367,19 @@ api -X POST https://status.testnet.networks.dash.org/api/ops/$id/confirm -d "{\"
   includes devnet lifecycle and Platform resets). They never change settings,
   access, tokens, remediation controls or CI reporters and never read private
   devnet keys; those answer `403` and need a signed-in account.
+- One exception in the settings: an `admin` token may change **the versions a new
+  devnet starts with**, because it already picks each of them per devnet.
+  `PATCH /api/settings/devnet-versions` takes only the keys to change, under
+  `images` (`core`, `drive`, `tenderdash`, `dapi`, `gateway`, `helper`, `acme`)
+  and `services` (`quorumServer`, `insightImage`, `explorerVersion`); anything
+  else in the body is refused. It answers with the resulting defaults and the
+  list of changes, and the web process logs each change with the account and the
+  token id. A signed-in admin can call it too (with the CSRF value).
+
+  ```sh
+  api -X PATCH https://status.testnet.networks.dash.org/api/settings/devnet-versions \
+    -d '{"services":{"insightImage":"dashpay/insight:4.0.11"}}'
+  ```
 - Operations record the account and the token id (`actor.token`), shown as
   "via API token" on the operation and in its log. Issue and revoke are logged by
   the web process with the admin's id. `lastUsedAt` is kept to the minute.

@@ -18,7 +18,7 @@ import { receiveRelease } from './release-webhook.js';
 import { againstReceiver, loadControl, requestClear, setDispatch } from './remediation-control.js';
 import { clearActivity, loadActivity } from './remediation-activity.js';
 import { publicInventory } from './aws-public.js';
-import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, loadSettings, memberOf, operatorFor, readJSON, saveSettings, validateSettings, writeAtomic } from '../shared/settings.js';
+import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, keepNewerDevnetVersions, loadSettings, memberOf, operatorFor, patchDevnetVersions, readJSON, saveSettings, validateSettings, writeAtomic } from '../shared/settings.js';
 import { expectations } from '../shared/monitoring.js';
 import { evaluateNetwork, projectNetwork } from '../shared/evaluate.js';
 import { requestDevnetKeys } from './devnet-keys.js';
@@ -440,7 +440,11 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     try {
       // Access has its own endpoints; a page-wide save never carries a stale
       // operator list over them.
-      const next = validateSettings({ ...req.body?.settings, operators: reloadSettings().operators });
+      const current = reloadSettings(), doc = req.body?.settings;
+      // Nor does it put back a devnet version that changed after the page was
+      // opened (PATCH below) and that this page did not edit.
+      const devnets = doc?.devnets ? { devnets: keepNewerDevnetVersions(doc.devnets, req.body?.loadedDevnets, current.devnets) } : {};
+      const next = validateSettings({ ...doc, ...devnets, operators: current.operators });
       // Checked on save only: a list damaged on disk ignores nothing, it does
       // not take the rest of the settings down with it.
       validIgnoredCiJobs(next.remediation?.ignoredCiJobs);
@@ -448,6 +452,30 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
       push('settings', { at: new Date(clock()).toISOString() });
       res.json({ settings });
     } catch (e) { res.status(400).json({ error: e.message }); }
+  });
+
+  // The versions a new devnet starts with (component images, ACME client,
+  // quorum list server, Insight, Explorer). The one settings change an admin
+  // API token may make: it already picks each of these per devnet, and keeping
+  // the defaults current should not wait for a browser session. It edits the
+  // current file and touches nothing else in it.
+  app.patch('/api/settings/devnet-versions', (req, res, next) => { const s = principal(req); if (!s) return res.status(401).json({ error: 'Sign in required' }); req.session = s; next(); }, csrf, (req, res) => {
+    // Never from the built-in defaults: with the file missing or damaged, a
+    // save here would replace users and networks with them.
+    let current;
+    try { validateSettings(JSON.parse(readFileSync(settingsPath, 'utf8'))); current = reloadSettings(); }
+    catch { return res.status(503).json({ error: 'Settings unavailable' }); }
+    if (!isAdmin(req)) return res.status(403).json({ error: 'Only admins can change devnet defaults' });
+    let devnets, changed;
+    try { ({ devnets, changed } = patchDevnetVersions(current.devnets, req.body)); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
+    if (changed.length) {
+      try { settings = saveSettings(settingsPath, { ...current, devnets }); }
+      catch (e) { console.error(`settings: devnet versions not saved: ${e.message}`); return res.status(500).json({ error: 'Settings could not be saved' }); }
+      console.info(JSON.stringify({ event: 'devnet-versions-changed', changed, actor: identity(user(req)), at: new Date(clock()).toISOString() }));
+      push('settings', { at: new Date(clock()).toISOString() });
+    }
+    res.json({ devnets: { images: settings.devnets.images, services: settings.devnets.services }, changed });
   });
 
   // Access changes save immediately (no page-wide Save). Each call edits the

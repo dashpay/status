@@ -42,7 +42,7 @@ export default function Settings() {
   const set = (fn) => setDoc((d) => { const x = structuredClone(d); fn(x); return x; });
   const save = async () => {
     setStatus('saving'); setError(null);
-    try { const r = await api('/api/settings', { method: 'PUT', body: { settings: doc } }); setDoc(r.settings); setSaved(JSON.stringify(r.settings)); setStatus('saved'); }
+    try { const r = await api('/api/settings', { method: 'PUT', body: { settings: doc, loadedDevnets: JSON.parse(saved).devnets } }); setDoc(r.settings); setSaved(JSON.stringify(r.settings)); setStatus('saved'); }
     catch (e) { setError(e); setStatus(null); }
   };
   const ro = !admin;
