@@ -4,7 +4,7 @@ import { Dot, Empty, Err, Section, Stat } from '../ui.jsx';
 
 // Wake hooks: a webhook from GitHub or the forum is taken here and wakes a
 // listener on a machine the sender cannot reach (deploy/WAKE-HOOKS.md).
-const SENDER = { github: 'GitHub', xenforo: 'XenForo' };
+const SENDER = { github: 'GitHub', xenforo: 'XenForo', console: 'This console' };
 const WORD = { ok: 'listening', warn: 'check', down: 'not listening', info: 'starting' };
 
 function Listener({ listener, now }) {

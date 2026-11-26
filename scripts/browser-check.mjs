@@ -56,7 +56,10 @@ writeFileSync(join(hooksDir, 'hooks.json'), JSON.stringify({ schemaVersion: 1, h
   'platform-release-jobs': { source: 'github', events: ['workflow_job'], match: [{ path: 'workflow_job.labels', pattern: '^platform-release-' }], listeners: { 'ubuntu-server-2': tokenDigest } },
   'forum-queue': { source: 'xenforo', events: ['user.insert', 'post.insert', 'thread.insert'], listeners: { 'fixture-absent-listener': 'c'.repeat(64) } } } }));
 for (const name of ['agent-directory', 'platform-release', 'platform-release-jobs', 'forum-queue']) writeFileSync(join(hooksDir, `${name}.secret`), hookSecret);
-const app = createWeb({ dataDir, origin, hooksDir, auth: { clientId: 'fixture', clientSecret: 'fixture', fetcher }, fetcher });
+// The triage worker's token, as the console holds it: a digest.
+const triageToken = 'fixture-triage-worker-token-0123456789abc', triageWorkersFile = join(temp, 'triage-workers.json');
+writeFileSync(triageWorkersFile, JSON.stringify({ schemaVersion: 1, workers: { infraclaw: createHash('sha256').update(triageToken).digest('hex') } }));
+const app = createWeb({ dataDir, origin, hooksDir, triageWorkersFile, auth: { clientId: 'fixture', clientSecret: 'fixture', fetcher }, fetcher });
 const server = app.listen(4799, '127.0.0.1');
 const browser = await chromium.launch();
 mkdirSync('artifacts', { recursive: true });
@@ -247,90 +250,91 @@ try {
   assert.ok(/hooks listening/i.test(hooksPublic) && hooksPublic.includes('3/4') && !/agent-directory|platform-release|forum-queue|worker-vm|ubuntu-server-2|pull_request|workflow_job/.test(hooksPublic), 'public Webhooks page names nothing');
   await anon.screenshot({ path: 'artifacts/webhooks-public.png', fullPage: true });
 
-  // Remediation joins monitoring recovery with durable response outcomes.
-  // A completed blocked response is never displayed as a successful fix.
-  const board = { generatedAt: at, outbox: [], issues: [], delivery: { lastAckAt: at, receiver: { workerAt: Date.parse(at) / 1000, remediation: {
-    schemaVersion: 1, generatedAt: at, enabled: true, maxActive: 2, cases: [],
-  } } } };
-  for (const [id, workerState, outcome, status] of [
-    ['working', 'running', null, 'open'], ['queued', 'queued', null, 'open'],
-    ['blocked', 'completed', 'blocked', 'open'], ['followup', 'completed', 'blocked', 'resolved'], ['fixed', 'completed', 'resolved', 'resolved'],
-    ['verifying', 'completed', 'resolved', 'open'],
-  ]) {
-    board.issues.push({ id, domain: 'network', scope: 'testnet', target: `private-${id}-host`,
-      code: 'host_health', severity: 'warning', status, firstSeen: at, lastSeen: at, resolvedAt: status === 'resolved' ? at : null });
-    board.delivery.receiver.remediation.cases.push({ issueId: id, workerState, active: id === 'working',
-      pendingEvents: id === 'queued' ? 2 : 0, waitReason: 'resource_conflict',
-      lastResponse: outcome ? { outcome, summary: `Private ${id} response`, blocker: id === 'blocked' ? 'Root cause still open' : null,
-        nextAction: 'Existing owner retains follow-up', changes: ['Verified supporting-service correction'] } : null });
-  }
-  // The same job failing twice is one line that opens into its two cases, each
-  // saying what failed. An ended case says why it ended.
-  for (const n of [1, 2]) board.issues.push({ id: `job-${n}`, domain: 'ci', scope: 'private-ci-host', target: `dashpay/platform/${n}/private-ci-host`,
-    code: 'job_failed', severity: 'warning', status: 'open', firstSeen: at, lastSeen: at,
-    evidence: { repo: 'dashpay/platform', runId: 100 + n, attempt: 1, jobName: 'Swift SDK build', workflow: 'Tests', branch: 'private-branch', runner: 'private-ci-host' } });
-  board.issues.push({ id: 'gone', domain: 'network', scope: 'testnet', target: 'private-gone-host', code: 'host_health', severity: 'critical', status: 'resolved',
-    firstSeen: at, lastSeen: at, resolvedAt: at, resolutionEvidence: { reason: 'target_removed' } });
+  // Triage: what monitoring reports is sorted into incidents and piles. An
+  // administrator files an incident as known with a reason, the worker reports
+  // on another through its own token, and without an account the page names no
+  // host, repository or reason.
+  const board = { generatedAt: new Date().toISOString(), outbox: [], issues: [] };
+  const fault = (id, domain, scope, target, code, severity, evidence = {}, more = {}) => ({ id, domain, scope, target, code, severity, status: 'open', firstSeen: at, lastSeen: at, evidence, ...more });
+  board.issues.push(
+    fault('insight', 'network', 'testnet', 'private-insight', 'endpoint_failed', 'warning', { kind: 'http', status: 502 }),
+    fault('core', 'network', 'testnet', 'private-host-1', 'host_health', 'critical', { reasons: ['private core is not running'] }),
+    fault('held', 'network', 'testnet', 'private-host-2', 'host_health', 'warning', { reasons: ['restarting'] }, { suppressed: true }),
+    fault('volume', 'aws', 'us-west-2', 'vol-private', 'idle_volume', 'info', { sizeGiB: 80 }),
+    fault('gone', 'network', 'testnet', 'private-gone-host', 'host_health', 'critical', {}, { status: 'resolved', resolvedAt: at }));
+  // The same job failing twice is one incident with two faults.
+  for (const n of [1, 2]) board.issues.push(fault(`job-${n}`, 'ci', 'private-ci-host', `dashpay/platform/${n}/private-ci-host/1`, 'job_failed', 'warning',
+    { repo: 'dashpay/platform', runId: 100 + n, attempt: 1, jobName: 'Swift SDK build', workflow: 'Tests', branch: 'private-branch', runner: 'private-ci-host' }));
   const boardFile = join(dataDir, 'incidents', 'state.json');
-  writeFileSync(boardFile, JSON.stringify(board));
+  const writeBoard = (generatedAt = new Date().toISOString()) => writeFileSync(boardFile, JSON.stringify({ ...board, generatedAt }));
+  writeBoard();
   const boardErrors = [];
   page.on('pageerror', (error) => boardErrors.push(error.message));
+  const workerSays = (id, body) => fetch(`${origin}/api/remediation/incidents/${id}`, { method: 'PUT', body: JSON.stringify(body), headers: { 'content-type': 'application/json', authorization: `Bearer ${triageToken}` } });
   for (const [label, viewport] of [['desktop', { width: 1600, height: 1000 }], ['mobile', { width: 390, height: 844 }]]) {
     await page.setViewportSize(viewport);
     await page.getByRole('link', { name: 'Remediation', exact: true }).click();
-    await page.getByText('Autonomous dispatch enabled').waitFor();
-    // The page opens on what is wrong now: six open faults, the ended ones a click away.
-    assert.match(await page.locator('[data-fault-summary]').innerText(), /OPEN FAULTS\s*6/i);
-    assert.equal(await page.locator('[data-issue-id="followup"]').count(), 0, 'a recovered case is not listed among open faults');
-    assert.equal(await page.locator('[data-issue-group]').count(), 1);
-    await page.locator('[data-issue-group] > summary').click();
-    assert.match(await page.locator('[data-issue-id="job-1"] [data-issue-detail]').innerText(), /dashpay\/platform · Tests · Swift SDK build · private-branch/);
-    await page.getByLabel('Remediation state').selectOption('history');
-    assert.match(await page.locator('[data-issue-id="gone"]').innerText(), /Closed[\s\S]*no longer exists/);
-    await page.getByLabel('Remediation state').selectOption('all');
-    await page.locator('[data-issue-id="blocked"] summary').click();
-    await page.getByText('Root cause still open').waitFor();
-    assert.ok((await page.locator('[data-issue-id="blocked"]').innerText()).includes('Blocked'));
-    assert.ok((await page.locator('[data-issue-id="followup"]').innerText()).includes('Recovered · follow-up'));
+    await page.getByText('Agent repair:').waitFor();
+    if (label === 'desktop') {
+      // Two incidents from five open faults: the network and the failing job.
+      await page.locator('[data-incident]').first().waitFor();
+      assert.match(await page.locator('[data-triage-summary]').innerText(), /NEW\s*2/i);
+      assert.equal(await page.locator('[data-incident]').count(), 2);
+      const network = page.locator('[data-incident]', { hasText: 'testnet' }), job = page.locator('[data-incident]', { hasText: 'Swift SDK build' });
+      assert.match(await job.innerText(), /2 faults/);
+      await network.locator('summary').click();
+      assert.match(await network.innerText(), /private-insight[\s\S]*private core is not running/);
+      assert.ok(!(await network.innerText()).includes('private-host-2'), 'a fault held for an operation is not part of the incident');
+      assert.ok(!(await page.locator('body').innerText()).includes('private-gone-host'), 'a resolved fault is in no pile');
+      // The worker reports on the job through its own token; the page follows without a reload.
+      const jobId = await job.getAttribute('data-incident');
+      assert.equal((await workerSays(jobId, { state: 'needs_you', summary: 'Private worker report: the build needs a maintainer', slack: { channel: 'C0C5QSM5FFG', ts: '1764237600.000100' } })).status, 200);
+      await page.getByText('Private worker report: the build needs a maintainer').waitFor({ timeout: 10_000 });
+      assert.match(await page.locator('[data-triage-summary]').innerText(), /NEW\s*1[\s\S]*NEEDS YOU\s*1/i);
+      // "Known…": a reason, and whatever else it causes on that network.
+      await network.locator('[data-known-open]').click();
+      assert.ok(await network.getByRole('button', { name: 'File as known' }).isDisabled(), 'no reason, no filing');
+      await network.getByLabel('Why is this known?').fill('Private reason: testnet web host is being rebuilt this week');
+      await network.getByLabel('and whatever else it causes on testnet').check();
+      await network.getByRole('button', { name: 'File as known' }).click();
+      await page.locator('[data-known]').waitFor();
+      assert.equal(await page.locator('[data-incident]').count(), 1);
+      assert.match(await page.locator('[data-triage-summary]').innerText(), /NEW\s*0[\s\S]*KNOWN\s*2/i);
+      assert.match(await page.locator('[data-known]').innerText(), /Private reason: testnet web host is being rebuilt[\s\S]*2 open now[\s\S]*fixture-operator/);
+      // Something else fails on that network: expected, not new.
+      board.issues.push(fault('faucet', 'network', 'testnet', 'private-faucet', 'endpoint_failed', 'warning', { kind: 'http', status: 500 }));
+      writeBoard();
+      await page.getByText('1 expected').first().waitFor({ timeout: 10_000 });
+      assert.match(await page.locator('[data-triage-summary]').innerText(), /NEW\s*0[\s\S]*EXPECTED\s*1/i);
+      // The switch is the administrator's, and says what it does before it does it.
+      page.once('dialog', (dialog) => { assert.match(dialog.message(), /Switch agent repair on\?/); dialog.accept(); });
+      await page.locator('[data-repair-switch]').click();
+      await page.getByText('switched on', { exact: true }).waitFor();
+    }
+    await page.locator('[data-known] summary').click();
     await page.evaluate(() => scrollTo(0, 0));
     await page.screenshot({ path: `artifacts/remediation-${label}.png`, fullPage: true });
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `${label}: remediation fits viewport`);
-    await page.getByLabel('Remediation state').selectOption('fixed');
-    assert.equal(await page.locator('[data-issue-id]').count(), 1);
-    assert.ok(await page.locator('[data-issue-id="fixed"]').count());
-    await page.getByLabel('Remediation state').selectOption('followup');
-    assert.equal(await page.locator('[data-issue-id]').count(), 1);
-    assert.ok(await page.locator('[data-issue-id="followup"]').count());
-    await page.getByLabel('Remediation state').selectOption('all');
-    await page.getByLabel('Filter remediation issues').fill('private-queued-host');
-    assert.equal(await page.locator('[data-issue-id]').count(), 1);
-    await page.getByLabel('Filter remediation issues').fill('');
     // Reset details for the next viewport without reloading identity.
     await page.goto(origin + '/aws');
   }
   await anon.goto(origin + '/remediation');
-  await anon.getByText('Autonomous dispatch enabled').waitFor();
+  await anon.getByText('Public view: counts by network and area').waitFor();
   const publicBoard = await anon.locator('body').innerText();
-  assert.ok(!publicBoard.includes('private-') && !publicBoard.includes('Private blocked response') && !publicBoard.includes('Root cause still open'));
+  assert.ok(!/private|Private|Swift SDK|dashpay\/platform|fixture-operator|vol-/.test(publicBoard), 'the public page names no host, job, reason or report');
+  assert.match(publicBoard, /Agent repair: switched on/);
+  assert.equal(await anon.locator('[data-repair-switch]').count(), 0);
   await anon.screenshot({ path: 'artifacts/remediation-public.png', fullPage: true });
   // Actual server file watcher -> SSE -> client refresh, without navigation.
-  board.delivery.receiver.remediation.enabled = false;
-  writeFileSync(boardFile, JSON.stringify(board));
-  await anon.getByText('New dispatch paused', { exact: true }).waitFor({ timeout: 10_000 });
-  // The worker stops reporting while dispatch is switched off in the console
-  // (no control file means off): the page is a list of faults, not a stalled queue.
-  board.delivery.receiver.remediation.generatedAt = '2020-01-01T00:00:00Z';
-  writeFileSync(boardFile, JSON.stringify(board));
-  await anon.getByText('Automatic repair is switched off', { exact: true }).waitFor({ timeout: 10_000 });
-  assert.equal(await anon.locator('[data-repair-summary]').count(), 0);
-  assert.equal(await anon.getByText('Remediation cannot make progress').count(), 0);
+  board.issues.push(fault('alarm', 'aws', 'us-west-2', 'private-alarm', 'aws_alarm', 'warning', { state: 'ALARM' }));
+  writeBoard();
+  await anon.getByText('AWS · Area').first().waitFor({ timeout: 10_000 });
   await anon.setViewportSize({ width: 390, height: 844 });
-  await anon.screenshot({ path: 'artifacts/remediation-off-mobile.png', fullPage: true });
-  assert.ok(await anon.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'faults list fits a phone');
-  // Switched on in the console with the worker still silent: that is a gap.
-  writeFileSync(join(dataDir, 'remediation-control.json'), JSON.stringify({ schemaVersion: 1, seq: 1, dispatch: 'on', clearSeq: 0 }));
-  writeFileSync(boardFile, JSON.stringify(board));
-  await anon.getByText('Remediation status is stale or unavailable').waitFor({ timeout: 10_000 });
+  await anon.screenshot({ path: 'artifacts/remediation-public-mobile.png', fullPage: true });
+  assert.ok(await anon.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'triage fits a phone');
+  // Monitoring stops: the page says the list is old, and nothing is opened or closed on it.
+  writeBoard('2020-01-01T00:00:00Z');
+  await anon.getByText('Monitoring is stale or unavailable').waitFor({ timeout: 20_000 });
   assert.deepEqual(boardErrors, []);
   await anon.close();
   console.log(JSON.stringify({ public: 'passed', deployRequest: q.id, settings: 'user added' }));
