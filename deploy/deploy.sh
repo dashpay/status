@@ -34,6 +34,10 @@ compose() {
     env_file="--env-file /etc/dash-status/incidents/compose.env"; files="$files -f deploy/incident-compose.yml"
   fi
   if [ -d /srv/dash-status/key-access ]; then files="$files -f deploy/devnet-keys-compose.yml"; fi
+  # Wake hooks are on wherever their configuration directory exists
+  # (deploy/WAKE-HOOKS.md). Leaving the file out would silently turn every
+  # hook into a 404, and the senders do not retry.
+  if [ -d /etc/dash-status/hooks ]; then files="$files -f deploy/wake-hooks-compose.yml"; fi
   # shellcheck disable=SC2086 # deliberate word splitting of fixed option lists
   docker compose $env_file $files "$@"
 }
