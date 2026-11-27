@@ -1,5 +1,5 @@
 [Unit]
-Description=Collect Dash website response timing every five minutes
+Description=Collect Dash website response timing and page checks every five minutes
 
 [Timer]
 OnBootSec=45s

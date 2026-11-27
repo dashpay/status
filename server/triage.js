@@ -9,7 +9,7 @@
 //   new       none of the above
 //
 // and groups what is new into incidents: one per network, CI host, repository
-// queue, failing job or AWS resource, so that thirty jobs waiting for the same
+// queue, failing job, AWS resource or website, so that thirty jobs waiting for the same
 // runners are one thing to look at. A new incident wakes the triage worker
 // through a wake hook (server/hooks.js); the worker looks, repairs what it may,
 // and reports back here what it did. Monitoring alone decides when a fault is
@@ -27,7 +27,7 @@ import { describe } from './remediation.js';
 const RANK = { info: 0, warning: 1, critical: 2 };
 const rank = (severity) => RANK[severity] ?? 1;
 const worst = (severities) => severities.reduce((a, b) => (rank(b) > rank(a) ? b : a), 'info');
-const DOMAINS = ['network', 'ci', 'aws', 'maintenance'];
+const DOMAINS = ['network', 'ci', 'aws', 'maintenance', 'website'];
 // After the last fault of an incident clears, the incident stays open this
 // long: a fault that comes back within the hour is the same incident, with the
 // same Slack thread, not a new one.
@@ -116,6 +116,10 @@ export function groupOf(issue) {
   if (issue.domain === 'aws' && ['aws_stale', 'aws_collection_failed', 'aws_health_missing'].includes(code)) return { key: ['aws', 'monitor'], title: 'AWS collection', kind: 'AWS', exact, wide: null };
   if (issue.domain === 'aws') return { key: ['aws', scope, target], title: `${target} (${scope})`, kind: 'AWS', exact, wide: null };
   if (issue.domain === 'maintenance') return { key: ['maintenance', code, target], title: `${TITLES[code] || 'Release task'}${str(e.tag) ? ` · ${str(e.tag).slice(0, 100)}` : ''}`, kind: 'Release task', exact, wide: null };
+  // One incident for a website, whichever of its pages are wrong: a site that
+  // is down fails every page at once.
+  if (issue.domain === 'website' && code === 'website_stale') return { key: ['website', 'monitor'], title: 'Website page checks', kind: 'Website', exact, wide: null };
+  if (issue.domain === 'website') return { key: ['website', scope], title: scope, kind: 'Website', exact, wide: { domain: 'website', scope, target: '*', code: '*', severity } };
   return { key: [str(issue.domain), scope, target], title: target || scope, kind: 'Other', exact, wide: null };
 }
 
@@ -318,7 +322,7 @@ const filedAsCounted = (episode, issue, entries) => ['known', 'expected'].includ
 // resources, and a reason is somebody's note: both are for administrators and
 // the worker. Everyone else gets counts by network or area, as on the other
 // pages.
-const AREA = { ci: 'CI', aws: 'AWS', maintenance: 'Release tasks' };
+const AREA = { ci: 'CI', aws: 'AWS', maintenance: 'Release tasks', website: 'Websites' };
 function listing(items, full) {
   const groups = new Map();
   for (const { issue } of items) {

@@ -1,5 +1,5 @@
 [Unit]
-Description=Dash public website performance probes (status-host vantage point)
+Description=Dash public website performance probes and page checks (status-host vantage point)
 After=network-online.target
 Wants=network-online.target
 
@@ -8,7 +8,7 @@ Type=oneshot
 User=ubuntu
 Group=ubuntu
 ExecStart=/usr/bin/python3 /opt/dash-status/websites/probe.py --output /srv/dash-status/data/websites/report.json
-TimeoutStartSec=140
+TimeoutStartSec=280
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

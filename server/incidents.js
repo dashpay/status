@@ -8,6 +8,7 @@ import { REASON_CODES } from '../shared/reasons.js';
 import { readJSON, writeAtomic } from '../shared/settings.js';
 import { dynamoScaleInControl } from '../shared/aws-alarm-semantics.js';
 import { activityKey } from './change-activity.js';
+import { pageChecks } from './websites.js';
 
 export const issueId = (...parts) => createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 24);
 const iso = (now) => new Date(now).toISOString();
@@ -95,6 +96,7 @@ export const TITLES = {
   aws_instance_impaired: 'EC2 status check failed', aws_alarm: 'CloudWatch alarm is active', aws_scaling_control: 'Scale-in control alarm (informational)',
   aws_health_missing: 'AWS runtime health collection unavailable', aws_scheduled_event: 'EC2 scheduled maintenance event', idle_volume: 'Unattached EBS volume requires ownership review',
   idle_address: 'Unassociated public address requires ownership review',
+  website_stale: 'Website page checks missing or stale', page_unreachable: 'Website page not reachable', page_shape: 'Website page is not what it should be',
 };
 
 // A case that can never be proven recovered must still end. These periods say
@@ -103,6 +105,9 @@ export const JOB_FAILED_MAX_AGE_MS = 24 * 3600_000; // the producer sees finishe
 export const QUEUE_WAIT_UNSEEN_MS = 24 * 3600_000; // GitHub itself gives up on a job queued for a day
 export const GONE_AFTER_MS = 10 * 60_000; // a target missing from complete inventories this long is gone
 export const QUIET_SAMPLES = 10; // healthy samples before a host fault with no proof of its own is dropped
+export const WEBSITE_MAX_AGE_MS = 15 * 60_000; // three collections of the website probe
+export const PAGE_FAILURES = 2; // readings in a row before a page that is wrong or unreachable is a fault
+const GRAVE_PAGE_PROBLEMS = ['defaced', 'download_link'];
 
 // settings.remediation.ignoredCiJobs: jobs whose failure is a verdict on the
 // change under test (title lint, milestone, review bots), not a CI fault. Each
@@ -163,7 +168,7 @@ function passedLater(passed, job) {
   return next ? { reason: 'later_run_passed', ...next } : null;
 }
 
-export function deriveIssues({ settings, states, ci, aws, operations = [], maintenance = {}, activity = null, now = Date.now() }) {
+export function deriveIssues({ settings, states, ci, aws, websites = null, operations = [], maintenance = {}, activity = null, now = Date.now() }) {
   const issues = [], sources = {}, checks = {}, samples = {}, suppressions = {}, heldInstances = new Set();
   // Where a target that is absent can be told from a target that was not
   // looked at: only a complete, current inventory says "it is not there". The
@@ -427,6 +432,29 @@ export function deriveIssues({ settings, states, ci, aws, operations = [], maint
       if (a.state === 'ALARM' && !control) add('aws', a.region, a.name, 'aws_alarm', 'warning', 'aws:health', { state: a.state }, health.at);
     }
   }
+  // Website page checks: the collector on the status host reads each page every
+  // five minutes and says what is wrong with it (monitoring/websites). A console
+  // whose collector writes no page checks has no website faults at all.
+  const pages = pageChecks(websites);
+  if (pages) {
+    source('website:monitor', iso(now), true, WEBSITE_MAX_AGE_MS);
+    const current = source('website:pages', pages.at, true, WEBSITE_MAX_AGE_MS);
+    check('website', 'collector', 'pages', 'website_stale', 'website:pages', current);
+    if (!current) add('website', 'collector', 'pages', 'website_stale', 'warning', 'website:monitor', { lastObservationAt: sources['website:pages'].observedAt });
+    else {
+      inventories['website:pages'] = pages.at;
+      for (const p of pages.pages) {
+        const pk = `website:page:${p.site}${p.path}`, valid = source(pk, p.at, true, WEBSITE_MAX_AGE_MS);
+        check('website', p.site, p.path, 'page_unreachable', pk, valid && p.reachable);
+        check('website', p.site, p.path, 'page_shape', pk, valid && p.ok);
+        // One failed reading is not a fault: the collector counts them in a row.
+        if (!valid || p.ok || p.failures < PAGE_FAILURES) continue;
+        const grave = !p.reachable || p.problems.some((x) => GRAVE_PAGE_PROBLEMS.includes(x.code));
+        add('website', p.site, p.path, p.reachable ? 'page_shape' : 'page_unreachable', grave ? 'critical' : 'warning', pk,
+          { problems: p.problems, status: p.status, similarity: p.similarity, failures: p.failures, since: p.since }, p.at);
+      }
+    }
+  }
   return { issues, sources, checks, samples, suppressions, inventories, queue, passed, ignored, jobEndings,
     networks: list(settings.networks).map((n) => n.name), reporters: Array.isArray(ci?.reporters) ? list(ci.reporters).map((r) => r.id) : null,
     excludedCiHosts: (Array.isArray(settings.remediation?.excludedCiHosts) ? settings.remediation.excludedCiHosts : []).filter((id) => typeof id === 'string') };
@@ -505,7 +533,8 @@ export function reconcile(previous, derived, now = Date.now()) {
     collector_stale: (i) => `network:${i.scope}`, discovery_failed: (i) => `network:${i.scope}`,
     disk_pressure: (i) => `ci:host:${i.scope}:disks`, runner_offline: (i) => `ci:host:${i.scope}`,
     idle_volume: () => 'aws:inventory', idle_address: () => 'aws:inventory', aws_instance_impaired: () => 'aws:health',
-    aws_scheduled_event: () => 'aws:health', aws_alarm: () => 'aws:health', aws_scaling_control: () => 'aws:health' };
+    aws_scheduled_event: () => 'aws:health', aws_alarm: () => 'aws:health', aws_scaling_control: () => 'aws:health',
+    page_unreachable: () => 'website:pages', page_shape: () => 'website:pages' };
   const REPORTER = ['reporter_missing', 'reporter_stale', 'disk_pressure', 'memory_pressure', 'runner_offline'];
   const gone = (issue, check) => {
     // Settings and the reporter register are read afresh each cycle: now is when they were seen.

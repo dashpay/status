@@ -21,7 +21,8 @@ export async function cycle({ dataDir, ci, now = Date.now() }) {
   // Upgrades, redeploys and reboots seen in live observations are held like
   // dashboard operations, so their expected downtime is not filed as new.
   const activity = recognizeActivity({ settings, states, previous: previous?.activity, now });
-  const derived = deriveIssues({ settings, states, operations, maintenance, activity, ci: (ci || createCi({ dataDir })).summary({ admin: true, whole: true }), aws, now });
+  const websites = readJSON(join(dataDir, 'websites', 'report.json'));
+  const derived = deriveIssues({ settings, states, operations, maintenance, activity, ci: (ci || createCi({ dataDir })).summary({ admin: true, whole: true }), aws, websites, now });
   const state = reconcile(previous, derived, now);
   state.maintenance = maintenance;
   state.activity = activity;

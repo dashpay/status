@@ -43,10 +43,44 @@ function site(s) {
     history: (Array.isArray(s.history) ? s.history : []).map(sample).filter(Boolean).sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).slice(-MAX_HISTORY) };
 }
 
+// Page checks: whether a page still is the page it is supposed to be (`shape`
+// in the collector's report, monitoring/websites/README.md). What can be wrong
+// with one is this list and nothing else; a code the collector does not know
+// how to write is dropped here.
+export const PAGE_PROBLEMS = {
+  unreachable: 'no answer', status: 'answered with an error', not_html: 'did not answer with a page', moved: 'leads to another address',
+  short: 'almost no text', title: 'another title', phrase: 'expected text is missing', defaced: 'carries a defacement marker',
+  download_link: 'a download link points somewhere else', no_downloads: 'no download links', changed: 'most of the text changed at once',
+};
+const MAX_PAGES = 64, MAX_PROBLEMS = 12;
+const pagePath = (v) => typeof v === 'string' && /^\/[A-Za-z0-9/_.~%-]{0,200}$/.test(v) ? v : null;
+const plain = (v, max) => typeof v === 'string' ? [...v].filter((ch) => ch.charCodeAt(0) >= 32 && ch.charCodeAt(0) !== 127).join('').slice(0, max) : null;
+function pageCheck(p) {
+  const name = hostname(p?.site), path = pagePath(p?.path), at = timestamp(p?.at);
+  if (!name || !path || !at || typeof p.ok !== 'boolean') return null;
+  const problems = (Array.isArray(p.problems) ? p.problems : []).filter((x) => Object.hasOwn(PAGE_PROBLEMS, x?.code)).slice(0, MAX_PROBLEMS)
+    .map((x) => ({ code: x.code, ...(plain(x.detail, 120) ? { detail: plain(x.detail, 120) } : {}) }));
+  // A page with nothing wrong is in order; one that says it is not, and names nothing we know, is still not.
+  return { site: name, path, at, ok: p.ok === true && !problems.length, reachable: p.reachable === true, status: integer(p.status),
+    similarity: finite(p.similarity) !== null && p.similarity <= 1 ? p.similarity : null, failures: integer(p.failures) ?? 0, since: timestamp(p.since), problems };
+}
+// For monitoring and administrators: every page with what is wrong and the
+// collector's own detail (a phrase from its list, a number, a host name).
+// null where the collector writes no page checks at all.
+export function pageChecks(report) {
+  const shape = report?.schemaVersion === 1 ? report.shape : null;
+  if (!shape || typeof shape !== 'object' || !Array.isArray(shape.pages)) return null;
+  const pages = shape.pages.slice(0, MAX_PAGES).map(pageCheck).filter((p, i, all) => p && all.findIndex((x) => x && x.site === p.site && x.path === p.path) === i);
+  return { at: timestamp(shape.at), pages };
+}
+// For everyone: which pages, whether each is in order, and the kinds of problem. No detail.
+const publicPages = (checks) => (checks ? { at: checks.at, list: checks.pages.map((p) => ({ site: p.site, path: p.path, at: p.at, ok: p.ok, reachable: p.reachable,
+  status: p.status, failures: p.failures, since: p.since, problems: [...new Set(p.problems.map((x) => x.code))] })) } : null);
+
 function normalize(report) {
   if (report?.schemaVersion !== 1 || !Array.isArray(report.sites)) return null;
   const sites = report.sites.slice(0, MAX_SITES).map(site).filter((s, i, all) => s && all.findIndex((x) => x?.site === s.site) === i);
-  return { generatedAt: timestamp(report.generatedAt), location: text(report.location, 80), sites };
+  return { generatedAt: timestamp(report.generatedAt), location: text(report.location, 80), sites, pages: publicPages(pageChecks(report)) };
 }
 
 // One parse per collector write. A file modified within the last two seconds is

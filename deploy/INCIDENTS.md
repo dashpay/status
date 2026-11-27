@@ -75,7 +75,7 @@ Three kinds of case still wait for their own proof and can stay open: an
 | Reason | Rule |
 |---|---|
 | `network_removed` | The network is no longer configured. |
-| `target_removed` | The host, endpoint, disk, runner, reporter, volume, address, instance or alarm has been absent for 10 minutes (`GONE_AFTER_MS`), judged only by complete, current inventories of its kind. The 10 minutes are measured between the inventories' own times, so it takes a later inventory to end a case; the same one read again counts once. The collector and discovery cases of a network generation that a reset replaced end the same way. An inventory with an error, a failed discovery, a stale report, or a host report that lists only the first six of more disks is not evidence of absence, and does not restart the clock. A replaced instance is a new identity: its predecessor's case closes this way, never because the successor is healthy. |
+| `target_removed` | The host, endpoint, disk, runner, reporter, volume, address, instance, alarm or checked website page has been absent for 10 minutes (`GONE_AFTER_MS`), judged only by complete, current inventories of its kind. The 10 minutes are measured between the inventories' own times, so it takes a later inventory to end a case; the same one read again counts once. The collector and discovery cases of a network generation that a reset replaced end the same way. An inventory with an error, a failed discovery, a stale report, or a host report that lists only the first six of more disks is not evidence of absence, and does not restart the clock. A replaced instance is a new identity: its predecessor's case closes this way, never because the successor is healthy. |
 | `expired` | `job_failed`: 24 hours after the failure with no later pass on record (the producer sees finished jobs for a day). `queue_wait`: not seen waiting for 24 hours while the queue was being observed. |
 | `ignored_job` | `job_failed` for a job listed in `remediation.ignoredCiJobs` (see the README). |
 | `superseded` | A release compatibility task whose release has a newer one in the same `major.minor` line. A release is superseded only by a newer release; a prerelease by any newer version. A superseded release is never opened as a task. |
@@ -102,8 +102,8 @@ for it; an alarm that fails verification is filed as `aws_alarm` as before.
 The unprivileged `STATUS_MODE=incidents` sidecar is the **single writer** of
 `data/incidents/state.json`. The rest of `/data` is read-only to it; it has no
 cloud, SSH or Docker credentials and makes no network request. Every minute it
-evaluates network state, CI reporters, the GitHub queue and the AWS inventory
-and runtime-health results, and writes the file. Its container is healthy while
+evaluates network state, CI reporters, the GitHub queue, the AWS inventory
+and runtime-health results and the website page checks, and writes the file. Its container is healthy while
 the file is less than three minutes old.
 
 Deploy `compose.yml` together with `incident-compose.yml`. The deployment
@@ -181,6 +181,29 @@ and external networks are never held by inference.
 An abandoned operation record expires after 35 minutes without a saved progress
 update, with an absolute 24-hour cap, so it cannot silence monitoring for good.
 
+## Website pages
+
+The website collector on the status host (`monitoring/websites`, a systemd
+timer, every five minutes) reads a list of pages and writes for each whether it
+still is the page it should be, and if not, what is wrong: `shape` in
+`data/websites/report.json`. The sidecar turns that into issues of the domain
+`website`, with the site as scope and the page's path as target:
+
+| Code | Severity | When |
+| --- | --- | --- |
+| `page_unreachable` | critical | The page did not answer, or answered with an HTTP error, on two readings in a row. |
+| `page_shape` | warning; critical with a defacement marker or a download link that points somewhere else | The page answered and is not what it should be (another address, title or text, almost no text, most of its text changed at once), on two readings in a row. |
+| `website_stale` | warning | The collector's page checks are older than 15 minutes (three collections), or dated ahead of the clock. |
+
+One failed reading files nothing: a fault is filed from the second in a row
+(`PAGE_FAILURES`), counted by the collector. A page fault ends on a later
+reading of that page that is in order (`page_unreachable`: that answered), and
+as `target_removed` when the page is taken off the collector's list. What is
+wrong is in the evidence as codes with the collector's detail, which is never
+text of the page. The report is read through an allowlist
+(`pageChecks` in `server/websites.js`). A console whose collector writes no
+page checks has no website issues at all, stale or otherwise.
+
 ## Upstream release compatibility tasks
 
 A network is built from three components: Dash Core, Platform and Tenderdash. A
@@ -231,6 +254,7 @@ Not covered: images with no GitHub release (nightlies, forks, patched tags).
 | Networks | Fresh collector/discovery, per-host evaluated faults, endpoints, Core/Platform/DAPI/service checks | Existing inventory scope; mainnet remains a limited observer, not fleet ownership. No production payment/transaction sent as a synthetic check. |
 | CI | Every registered reporter including never-seen hosts, measured freshness, disk/memory, unavailable runners, failed jobs and stale/long queue | Only registered reporters/known repositories; failed tests are not necessarily infrastructure faults. No human-idleness inference from runner-idle alone. |
 | AWS | Inventory freshness/errors, EC2 system/instance checks and scheduled events, existing CloudWatch alarms, review-only unattached resources | Existing alarms only, not automatic alarm provisioning. No target-group health, AWS Health API, S3/application SLO checks or cost-anomaly/budget detector yet. Empty alarm sets are not proof of service health. |
+| Websites | Ten pages of dash.org every five minutes from the status host: reachable, at their own address, with their title and text, no defacement marker, download links where they should be, no sudden change of most of the text | One vantage point, HTML only: no scripts run, no images or styles are fetched, and what a visitor's browser renders is not looked at. dash.dev is timed on the Websites page and not checked. A change of less than 40% of a page's words that keeps its title and phrases is not noticed. |
 | Pipeline | Freshness of the sidecar's state: `stale` in every answer, HTTP 503 from `GET /api/issues`, the container health check. Triage moves nothing on a stale state. | Nothing outside the status host notices that the host, or the sidecar, has stopped. |
 
 `dash-network-go`'s artifact resolution proves architecture/digest availability,

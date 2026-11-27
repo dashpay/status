@@ -57,7 +57,8 @@ test('public report is rebuilt from an allowlist: unknown fields, unusable sites
     siteAt(now), null, 'dash.org',
   ] };
   const out = withReport(report, (dir) => websiteReport(dir, now));
-  assert.deepEqual(Object.keys(out).sort(), ['generatedAt', 'location', 'sites', 'stale']);
+  assert.deepEqual(Object.keys(out).sort(), ['generatedAt', 'location', 'pages', 'sites', 'stale']);
+  assert.equal(out.pages, null);
   assert.equal(out.stale, false);
   assert.doesNotMatch(JSON.stringify(out), /PRIVATE-COLLECTOR-DETAIL/);
   assert.deepEqual(out.sites.map((s) => s.site), ['dash.org', 'dash.dev']);
