@@ -77,7 +77,7 @@ test('exact read/write alarms replay as verified informational controls and posi
     assert.equal(issue.resolutionEvidence.reason, 'verified_control_signal');
     assert.equal(issue.resolutionEvidence.state, 'ALARM');
     assert.match(issue.resolutionEvidence.explanation, /not evidence of table recovery/);
-    assert.ok(next.outbox.some((e) => e.issue.id === issue.id && e.transition === 'resolved' && e.issue.resolutionEvidence));
+    assert.equal(issue.revision, 2, 'opened, then ended');
   }
 });
 

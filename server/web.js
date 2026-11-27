@@ -17,7 +17,7 @@ import { remediationView } from './remediation.js';
 import { receiveRelease } from './release-webhook.js';
 import { createHooks } from './hooks.js';
 import { createTriage } from './triage.js';
-import { againstReceiver, loadControl, requestClear, setDispatch } from './remediation-control.js';
+import { loadControl, setDispatch } from './remediation-control.js';
 import { clearActivity, loadActivity } from './remediation-activity.js';
 import { publicInventory } from './aws-public.js';
 import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, keepNewerDevnetVersions, loadSettings, memberOf, operatorFor, patchDevnetVersions, readJSON, saveSettings, validateSettings, writeAtomic } from '../shared/settings.js';
@@ -229,7 +229,9 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     const state = loadIncidentState(dataDir);
     const full = isAdmin(req) || apiAuthorized(req.get('authorization'), readSecret(process.env.INCIDENT_API_TOKEN_FILE));
     const maintenance = operationMaintenance(dataDir, settings, clock());
-    const body = full && state ? { schemaVersion: 1, generatedAt: state.generatedAt, maintenance, issues: state.issues, sources: state.sources, delivery: { ...state.delivery, pending: state.outbox?.length || 0, quarantined: state.quarantined?.length || 0 } } : publicIssues(state, visible(req).map((n) => n.name));
+    // `delivery` is from when issues were also sent to a repair receiver. It is
+    // kept for readers of that answer and always says that none is configured.
+    const body = full && state ? { schemaVersion: 1, generatedAt: state.generatedAt, maintenance, issues: state.issues, sources: state.sources, delivery: { configured: false, pending: 0, quarantined: 0 } } : publicIssues(state, visible(req).map((n) => n.name));
     const observedAt = Date.parse(state?.generatedAt);
     const stale = !Number.isFinite(observedAt) || clock() - observedAt > 180_000 || observedAt > clock() + 60_000;
     res.status(stale ? 503 : 200).json({ ...body, stale });
@@ -240,8 +242,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   app.get('/api/remediation', (req, res) => {
     reloadSettings();
     const full = isAdmin(req) || apiAuthorized(req.get('authorization'), readSecret(process.env.INCIDENT_API_TOKEN_FILE));
-    const incidents = loadIncidentState(dataDir);
-    res.json(remediationView({ ...incidents, activityHistory: loadActivity(dataDir), maintenance:operationMaintenance(dataDir, settings, clock()), control: againstReceiver(loadControl(dataDir), incidents?.delivery?.receiver?.control) }, { full, visibleNetworks: visible(req).map((n) => n.name), now: clock() }));
+    res.json(remediationView({ ...loadIncidentState(dataDir), activityHistory: loadActivity(dataDir), maintenance:operationMaintenance(dataDir, settings, clock()), control: loadControl(dataDir) }, { full, visibleNetworks: visible(req).map((n) => n.name), now: clock() }));
   });
   app.get('/api/me', (req, res) => {
     const u = user(req);
@@ -565,17 +566,15 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     } catch (e) { res.status(404).json({ error: e.message }); }
   });
 
-  // Remediation controls: administrators only. They record the request; the
-  // incident sidecar forwards it on its next signed heartbeat and the board
-  // shows it as pending until the receiver acknowledges it. A command is
-  // numbered above what the receiver last acknowledged, so it is never stale.
-  const acknowledged = () => loadIncidentState(dataDir)?.delivery?.receiver?.control;
-  const controlled = (res, control) => { push('remediation', { at: new Date(clock()).toISOString() }); res.json({ control }); };
+  // The repair switch: administrators only. It is a file of its own
+  // (server/remediation-control.js) and takes effect at once: triage answers
+  // with it as `fixing`, and that is all the worker goes by.
   app.post('/api/remediation/dispatch', ...adminWrite, (req, res) => {
     if (typeof req.body?.enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be true or false' });
-    controlled(res, setDispatch(dataDir, req.body.enabled, req.session.user.login, clock(), acknowledged()));
+    const control = setDispatch(dataDir, req.body.enabled, req.session.user.login, clock());
+    push('remediation', { at: new Date(clock()).toISOString() });
+    res.json({ control });
   });
-  app.post('/api/remediation/clear', ...adminWrite, (req, res) => controlled(res, requestClear(dataDir, req.session.user.login, clock(), acknowledged())));
   app.post('/api/remediation/activity/clear', ...adminWrite, (req, res) => {
     const activityHistory = clearActivity(dataDir, loadIncidentState(dataDir), req.session.user.login, clock());
     push('remediation', { at: new Date(clock()).toISOString() });
@@ -605,7 +604,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     // Without an account the answer is the last look, kept for a few seconds:
     // such a request sorts nothing, writes nothing and wakes nobody.
     res.set('Cache-Control', 'private, no-store').vary('Cookie').json(triage.view({ full, visibleNetworks: visible(req).map((n) => n.name),
-      dispatch: () => againstReceiver(loadControl(dataDir), acknowledged()).dispatch, maintenance: () => operationMaintenance(dataDir, settings, clock()) }));
+      dispatch: () => loadControl(dataDir).dispatch, maintenance: () => operationMaintenance(dataDir, settings, clock()) }));
   });
   app.post('/api/remediation/known', triageActor, (req, res) => triaged(res, () => ({ entry: triage.file(req.body, req.actor, { worker: !!req.worker }) }), 201));
   app.patch('/api/remediation/known/:id', triageActor, (req, res) => triaged(res, () => ({ entry: triage.attach(req.params.id, req.body, req.actor, { worker: !!req.worker }) })));

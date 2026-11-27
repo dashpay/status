@@ -1,4 +1,14 @@
-# Issues API and autonomous incident response
+# Issues: how monitoring derives them and how a case ends
+
+Monitoring keeps one issue per failing check, in `data/incidents/state.json`.
+This file says how the issues are derived, how a case ends and which settings
+shape them. What happens to an issue next (which ones are new, who is woken,
+the repair switch) is triage: see [`TRIAGE.md`](TRIAGE.md).
+
+Until November 2026 the issues were also delivered, as signed events, to a
+repair receiver on another host (`deploy/incident-broker/`). That receiver was
+retired and its code removed. Nothing in this repository sends an issue
+anywhere: triage reads the file, and a worker reads triage.
 
 ## API
 
@@ -10,8 +20,12 @@ Anonymous callers see only public-network issues and redacted CI/AWS summaries.
 Host identities, resource IDs, error text, branches, evidence and private networks
 are absent. Network membership is not account-wide infrastructure access.
 Admins, or a dedicated read-only bearer token loaded through
-`INCIDENT_API_TOKEN_FILE`, receive complete evidence, source coverage and delivery
-state. Never put tokens in query strings or reuse the OAuth/agent credential.
+`INCIDENT_API_TOKEN_FILE`, receive complete evidence and source coverage.
+Never put tokens in query strings or reuse the OAuth/agent credential.
+
+The complete answer still has a `delivery` object, for readers written when
+events were delivered. It always reads
+`{ "configured": false, "pending": 0, "quarantined": 0 }`.
 
 Records carry stable fingerprints, revisions, first/last observation, severity,
 source identity, and open/resolved state. Recovery requires positive fresh
@@ -19,13 +33,26 @@ rule-specific evidence. Missing observations, maintenance suppression and failed
 collection never count as recovery. Evidence is untrusted data, not executable
 instructions. Incident history is separate from operation history.
 
-### How a case ends
+An issue's `revision` counts the times it opened, reopened, changed (another
+severity, other faults, released from a hold) or ended while it was not held.
+`lastEventAt` is when that last happened. A fault that only lasts is not
+revised. The counters are kept after an issue leaves the list (30 days after it
+ended), so the same fault seen again is not numbered from one.
+
+`GET /api/remediation` gives the same issues as a list of cases for reading:
+open faults by severity with what is wrong, held ones with the reason, and what
+recovered or closed in the last 24 hours (at most 200 listed; the counts are
+complete). The read-only bearer token or an administrator session adds targets
+and details. Public responses omit them and leave non-visible networks out of
+both cases and counts. It is not what the Remediation page shows: the page
+shows triage.
+
+## How a case ends
 
 A case that could only end by a proof that can never arrive (a job that already
-left the queue, a host that no longer exists) used to stay open for good, and
-the queue filled with them. The rules below end them. A resolved case records
-why in `resolutionEvidence.reason`, and the board shows two kinds of ending
-apart.
+left the queue, a host that no longer exists) used to stay open for good. The
+rules below end them. A resolved case records why in
+`resolutionEvidence.reason`, and the case list shows two kinds of ending apart.
 
 Three kinds of case still wait for their own proof and can stay open: an
 `aws_collection_failed` for a scan that is not refreshed with every inventory
@@ -56,238 +83,81 @@ Three kinds of case still wait for their own proof and can stay open: an
 A maintenance hold does not keep a closed case open: an operation on a network
 does not preserve the cases of the hosts it replaced.
 
-### Backlog
+Cases resolved before the receiver was retired can carry the reason
+`compatibility_report` (a release task its worker reported on). No rule gives
+that reason any more.
 
-When more than one delivery batch (50 events) is waiting, the receiver is away
-or behind. The producer then keeps only the newest waiting event of each issue.
-A receiver that returns is told the current state of each issue, not the
-history it missed. The newest event is kept even when it is the ending of an
-issue the receiver may never have heard of: an earlier event can have been
-accepted with its acknowledgement lost, and only the ending closes it there.
-Events are never rewritten, so a redelivered one still matches by ID and bytes.
+DynamoDB scale-in controls are informational only when fresh complete collection
+proves the exact alarm, action and target-tracking policy/resource association.
+The collector requires read-only `application-autoscaling:DescribeScalingPolicies`
+in the checked-in status IAM policy. Names alone never suppress alarms; denied,
+partial, stale or mismatched evidence keeps the warning actionable. Correction
+of an old generic warning records explicit classification evidence and is shown
+as **Monitoring corrected**, not table recovery. No scaling policy is modified.
+A verified control is in `ALARM` whenever its table is idle, so no case is filed
+for it; an alarm that fails verification is filed as `aws_alarm` as before.
 
-## Data and delivery
+## The sidecar
 
 The unprivileged `STATUS_MODE=incidents` sidecar is the **single writer** of
-`data/incidents/state.json`. The rest of `/data` is read-only; it has no cloud,
-SSH, Docker or OpenClaw credentials. Every minute it evaluates network state,
-CI reporters/GitHub queue and AWS inventory/runtime-health results. Events are
-committed before transmission and acknowledged only after receiver persistence.
+`data/incidents/state.json`. The rest of `/data` is read-only to it; it has no
+cloud, SSH or Docker credentials and makes no network request. Every minute it
+evaluates network state, CI reporters, the GitHub queue and the AWS inventory
+and runtime-health results, and writes the file. Its container is healthy while
+the file is less than three minutes old.
 
-- Deterministic issue/revision IDs; receiver rejects conflicting duplicates.
-- HMAC-SHA256 over `timestamp + '.' + exact JSON body`, five-minute request window.
-- HTTPS to a pinned Tailscale node; redirect following disabled. The status host
-  remains publicly accessible over its existing HTTPS listener.
-- Durable outbox, byte-bounded batches, retry backoff, and poison-event quarantine.
-  Delivery health reports backlog, last ACK, receiver worker state and quarantines.
-- A local receiver watchdog diagnoses a missing producer heartbeat after five
-  minutes, even if the status server itself cannot send an alert.
+Deploy `compose.yml` together with `incident-compose.yml`. The deployment
+script includes this override while the file
+`/etc/dash-status/incidents/compose.env` exists; the override itself no longer
+reads anything from that file. The web container gets the read-only token for
+`GET /api/issues` and `GET /api/remediation` as a restricted file
+(`INCIDENT_API_TOKEN_FILE`), never through Git, container environment text,
+command-line arguments or build layers.
 
-Deploy `compose.yml` together with `incident-compose.yml`. The normal deployment
-script automatically retains this override when
-`/etc/dash-status/incidents/compose.env` exists. The environment file supplies
-`INCIDENT_WEBHOOK_URL`, `INCIDENT_RECEIVER_HOST`, and `INCIDENT_RECEIVER_IP`.
-The latter pins the FQDN to its tailnet IPv4 address while TLS verifies its name.
-Provision distinct HMAC and API-reader secrets as restricted files, never Git,
-container environment text, command-line arguments or build layers.
+The settings of the retired receiver (`INCIDENT_WEBHOOK_URL`,
+`INCIDENT_HMAC_FILE`, `INCIDENT_ALERT_WEBHOOK_FILE`) are ignored when they are
+still set.
 
 The Go deployment binary remains pinned by `DASHNET_REF`; enabling monitoring
 must not implicitly upgrade a network or adopt a newer deployment recipe.
 
-## Receiver and worker
+### The state file across releases
 
-`deploy/incident-broker/broker.py` uses Python's standard library and SQLite
-(WAL + FULL synchronization). Install its systemd unit on the trusted OpenClaw
-host, not the public status server. Site-specific unit settings supply paths,
-the exact Tailscale peer and the container state-directory mapping.
+A state written by the release that still delivered events holds an `outbox`
+of waiting events, possibly a `quarantined` list, the receiver's last answer in
+`delivery`, and a `stall` record. The first cycle of this release drops all
+four: `outbox` is written as an empty list, `delivery` as
+`{ "configured": false }`, and the other two are gone. Issues, their ids,
+revisions and times are untouched, and the revision counters first take in any
+higher revision that only a waiting event remembered.
 
-Bind the receiver to loopback behind **Tailscale Serve HTTPS port 8444**. Serve
-must stay tailnet-only; do not enable Funnel. It forwards the authenticated
-network peer in `X-Forwarded-For`; the receiver also verifies the HMAC. Preserve
-any existing dashboard Serve handler. Root/public nginx does not proxy this API.
+That earlier release can read the file again: it finds an empty `outbox`, which
+it requires, and treats the rest as a state with no receiver contacted yet.
+Going back to it also needs what its own `incident-compose.yml` asks for: the
+three receiver variables in `compose.env` and the HMAC secret file.
 
-Before activation, install a local `authorization.json` recording the real owner
-instruction, source session and allowed scope. The repository policy alone does
-not authorize infrastructure changes. An `ENABLED` file admits worker execution;
-removing it pauses new work without discarding the inbox.
+## Settings
 
-The worker defaults to one batch, with per-scope sessions and a 15-minute
-cooldown, capped globally at eight batches/hour and 48/day. An operator-reviewed
-`concurrency.json` beside the inbox may allow up to three disjoint batches
-(the example allows two):
+Both are in `settings.json` under `remediation` and are described in the README.
 
-```json
-{
-  "schemaVersion": 1,
-  "maxActive": 2,
-  "scopes": {
-    "network:example-a": ["fleet:example-a", "host:shared-builder"],
-    "network:example-b": ["fleet:example-b"],
-    "ci:shared-builder": ["host:shared-builder"],
-    "aws:example-region": ["fleet:example-a", "fleet:example-b"]
-  }
-}
-```
+- `excludedCiHosts`: CI reporter IDs whose cases are left out of triage and of
+  the case list. The observations stay; the cases are kept exactly as they are
+  and neither end nor are revised while the host is excluded.
+- `ignoredCiJobs`: jobs whose failure is a verdict on the change under test.
+  No case is filed for them, and cases already filed end as `ignored_job`.
 
-The map is trusted local deployment configuration, never telemetry. Review
-physical host aliases, network ownership, AWS overlap and shared infrastructure
-before granting concurrency. Pause admission and check existing ownership before
-changing it; never shrink the resource set of an active/uncertain scope. Missing
-configuration preserves serial behavior; malformed configuration admits nothing.
-Unknown scopes run only alone. SQLite atomically reserves capacity and intersecting
-resource locks; running **and uncertain** scopes count toward the two-slot cap.
-The same scope cannot run twice. Agents must stay within their assigned scope;
-shared control-plane changes require coordinated exclusive admission. These are
-scheduler reservations and agent constraints, not an OS-level mutation sandbox.
-
-An optional `bindings` array narrows admission for **exact** verified targets,
-not every alert in the same region. Each entry has `scope`, `code`, `target`,
-nonempty `resources`, and `identity` (the expected live identity to reverify).
-For example, a known CloudWatch disk alarm bound to an exact Testnet EC2 ID
-can carry `fleet:testnet` and `ec2:<instance-id>` instead of a broad AWS-region
-lock. Unknown targets keep the conservative scope locks. A missing/mismatched
-live identity is a hold, not permission to follow the new target. Event resource
-locks persist in SQLite at claim time and survive config changes and restart.
-
-Fresh private API readback
-supersedes stale/recovered backlog before triage. The fixed local policy requires
-independent live reproduction before every mutation. Payload strings never choose
-commands, models, tools, session paths or credentials.
-
-Before each invocation the worker uses `sessions.patch` to persist and verify
-`openai/gpt-6-astra@openai:work` at `high` (the owner's
-`daniel@ktechmidas.net` OAuth account). User-origin model/account pins disable
-the Gateway model fallback ladder. Invocation is through
-`docker exec infraclaw openclaw agent --model openai/gpt-6-astra --thinking high`,
-without a shell or external delivery. A failed/mismatched pin never invokes a
-model and never inherits the global CLIProxy default: the batch returns to the
-queue and the same route is retried with backoff (see "Self-recovery" below). A
-per-run `.route.json` records the verified selection without credentials.
-Normal completion requires explicit CLI success and a fresh run-specific
-completion receipt declaring no outstanding child sessions. Uncertain completion
-is independently reconciled from the Gateway. It never
-claims service recovery from agent completion. Uncertainty retains
-its slot/locks and a `HELD-<run>` marker: a known scope leaves a reviewed
-disjoint lane free, serial mode and unknown scopes admit nothing else. Restart
-converts `running` rows that had reached the model to `uncertain` with the same
-run and saved locks; rows claimed but never invoked return to the queue. A
-supervisor exits if an essential thread dies so
-systemd's restart policy can recover instead of silently losing the worker.
-
-### Self-recovery: nothing waits for a person to notice
-
-`ENABLED` is the host operator's switch and the broker never renames or removes
-it (the dashboard switch below is a second, independent gate).
-Automatic holds live in SQLite. Those with nothing running underneath end by
-themselves; one that may still have work running is kept and reported:
-
-- **Before the model is invoked** (fresh readback, evidence files, route pin, any
-  unexpected error or a restart) nothing has run, so the batch returns to the
-  queue. `events.invoked` is written immediately before the agent call and is
-  the only thing that turns an interruption into a hold.
-- **Route breaker.** A failed pin, or an invocation that ends within three
-  minutes without a verified result (typically an unavailable account), opens
-  `route_breaker`. Admission backs off 1, 2, 5, 10, then 30 minutes; the first
-  claim after each delay is the probe and success closes the breaker. There is
-  no fallback model or account.
-- **An attempt that did no work returns to the queue.** A hold older than its
-  lease (15 minutes when the invocation ended at once, two hours otherwise) is
-  returned to the queue when two Gateway observations a minute apart give
-  positive evidence that nothing can be running underneath it:
-  - `hasActiveRun` is false, `activeRunIds` is empty and
-    `childOwnerSessionKeys` is empty, stated by the Gateway (one that does not
-    report them releases nothing);
-  - `lastActivityAt` shows no activity since the attempt was claimed, and is
-    exactly what the worker snapshotted immediately before invoking the agent,
-    where that snapshot exists;
-  - the session is inactive (`INACTIVE_STATES`, no pending permission, quiet
-    for 15 minutes);
-  - there is no receipt file and the CLI output reports no turn.
-
-  This is how OpenClaw 2026.11.3 reports an unavailable account: the CLI
-  prints `ok: false` with a `cli_error`, and the session shows a new
-  `lastRunId` with `status: failed` and a runtime of about 50 ms, while
-  `lastActivityAt` stays where it was. Nothing was played, so nothing is
-  replayed; `<run>.released.json` records the basis and the route breaker
-  paces the next attempt.
-- **Once a turn has done anything, only a receipt releases its locks.** An idle
-  parent session proves nothing about children or remote commands still
-  running underneath it, so idleness never releases a hold. Activity after the
-  claim, a child session, a run still executing, a turn reported by the CLI
-  and a receipt file of any content all keep it. A receipt with
-  `pendingChildren` above zero is an explicit statement that work continues.
-  An active session and a Gateway that cannot be read keep it too. Such a hold
-  is ended by a terminal receipt declaring no pending work (the bookkeeping
-  check asks for one) or by a person, and it is reported in `attention` after
-  30 minutes.
-- **Bookkeeping check.** Up to three attempts per run (immediately, after 15
-  minutes, after an hour). The route is pinned before an attempt is recorded,
-  so an unavailable route defers the check instead of consuming it.
-- **Admission delay.** A new event waits five minutes before it can be claimed,
-  so the producer can recognise an upgrade in progress (below) and the fresh
-  readback can withdraw the event. Withdrawn batches consume no dispatch budget.
-
-Whatever still needs a person is listed in `attention` in the authenticated
-ACK: an open route breaker, a hold older than 30 minutes, a queue that has
-waited over an hour, or a configuration/worker/lifecycle error. The producer
-turns that into the stall alert below.
-
-On first start this release restores `ENABLED` from a single
-`PAUSED-route-unavailable` or `PAUSED-<run>` left by an earlier release, since
-those were automatic pauses. Any other `PAUSED-*` name is treated as an
-operator's pause and left alone.
-
-Every 30 seconds, read-only lifecycle reconciliation verifies the actual session.
-Two identical terminal observations at least 30 seconds apart, a non-aborted
-terminal run, and a fresh no-children receipt after admission can release a held
-response. Original CLI output (including timeout) remains untouched; a separate
-`.reconciled.json` records the basis. This does not resolve the service incident.
-No receipt-based release while the session is active or identity/completion
-evidence is missing. If an idle session lacks a valid receipt, a bounded number
-of bookkeeping-only requests is allowed on the required route. They cannot redo
-the repair, spawn children, mutate infrastructure or send messages. Each attempt
-is recorded before its invocation. A run whose turn ran and never produces a
-valid terminal receipt keeps its reservation; it is never released on the
-parent session's idleness.
-
-`queue-state.json` and authenticated delivery health expose active scopes, queued
-events and admission reasons (paused, route, capacity, resource conflict, budget,
-cooldown, settling, eligible), plus lifecycle/check status. They contain no credentials.
-Read these before assuming an idle slot means the queue is empty. Receiver-wide
-outage still needs the independent external observer described below.
-
-Scoped **infrastructure, service and network/wallet operations** are autonomous.
-The owner's latest clarification explicitly allows ProTx/PoSe recovery, mixing
-controls, incident-related wallet/network-state repairs and Core/Platform runtime
-configuration changes. Do not fork/patch Core or Platform product code, libraries
-or custom builds; report product defects to the configured Slack alerts channel
-(`C0C5QSM5FFG`). Operating those products is not modifying their source. Difficult auxiliary-service
-or cross-repository issues are discussed with a direct Astra/High session on the
-same pinned work account carrying the
-same limits. Every incident request includes this boundary through the fixed
-`incident-broker/policy.md`; keep the live local authorization record aligned.
-Require durable root-cause correction and recurrence verification, not merely
-file deletion, a restart or additional disk space. For example, diagnose and fix
-broken log rotation/retention rather than repeatedly clear logs. A temporarily
-recovered service with an unresolved cause remains an explicit follow-up/blocker.
-Human CI jobs/workspaces/caches, wallet backups and unrelated balances/data are
-preserved. No broad prune, destructive reset or idle-resource deletion is
-authorized merely by telemetry. Reverify target/network/wallet identity and live
-ownership before operational repairs; no duplicate active repair. See
-`incident-broker/policy.md` and the deployment-local authorization record.
-
-## Recognised change: upgrades do not enter the queue
+## Recognised change: upgrades are held, not reported as new
 
 Expected downtime is held, never resolved and never hidden. A held issue stays
-open on the board as **Maintenance** with the reason, emits no event, and is
-withdrawn by the receiver's fresh readback if it was already queued. When the
-hold ends, a fault that is still present is emitted with fresh evidence.
+open, marked `suppressed`, and is not revised. Triage puts it in its `held`
+pile, so it opens no incident and wakes nobody. When the hold ends, a fault
+that is still present is revised with fresh evidence and is new to triage.
 
 | Signal | Holds | Ends |
 | --- | --- | --- |
-| Dashboard operation confirmed/running (existing) | the network | terminal status, or lease expiry |
+| Dashboard operation confirmed/running | the network | terminal status, or lease expiry |
 | Dashboard operation **succeeded** | the network | 20 minutes after it finished |
-| dashnet journal claimed by another runner (existing) | the network | 20 minutes after release; at once if the journal records an error |
+| dashnet journal claimed by another runner | the network | 20 minutes after release; at once if the journal records an error |
 | Container recreated (started under 20 minutes ago, `RestartCount` 0, running) | that host, the network's endpoint checks, its EC2 status check | 20 minutes after the last such start |
 | Host rebooted (uptime under 20 minutes) | same | 20 minutes after boot |
 | Two or more hosts changing at once | the network, except a host in a crash loop | when fewer than two are changing |
@@ -299,83 +169,24 @@ operation. A crash loop under a restart policy increments `RestartCount` and is
 not a planned change; seen in a fresh probe, it ends that host's hold at once,
 even inside the settle window an earlier clean start opened. A network hold
 inferred from other hosts changing does not cover that host either: its fault
-and its EC2 status check are sent for repair while the rest of the network
-stays held. A dashboard operation or a journal claim still holds every host,
-since restarts are part of the operation. Failed, cancelled and interrupted operations get no
-settle window, and a journal that records an error also ends rolling inference
-for that operation. Holds are bounded: a host is held at most 90 minutes per
-episode and a network at most three hours, so a recreate loop, or a journal
-claim left behind by a crashed runner, becomes actionable. Mainnet and external networks are never held by inference.
+and its EC2 status check stay actionable while the rest of the network stays
+held. A dashboard operation or a journal claim still holds every host, since
+restarts are part of the operation. Failed, cancelled and interrupted
+operations get no settle window, and a journal that records an error also ends
+rolling inference for that operation. Holds are bounded: a host is held at most
+90 minutes per episode and a network at most three hours, so a recreate loop,
+or a journal claim left behind by a crashed runner, becomes actionable. Mainnet
+and external networks are never held by inference.
 
-## Stall alert
-
-A stalled worker cannot report its own stall through the queue it is failing to
-drain. The producer therefore raises it out of band when the receiver is
-unreachable, the worker heartbeat is stale, dispatch is paused on the receiver
-host with a backlog (switching it off from the dashboard is deliberate and is
-not a stall), or the ACK's `attention` list is not empty. It posts to the
-optional webhook at most twice per stall: once after the stall has lasted 15
-minutes, and once when it is over. Nothing is repeated while a stall lasts. A
-stall is over only after staying clear for 15 minutes, so a brief recovery
-neither announces a recovery nor makes the stall look new. The `/remediation`
-board shows the current reasons (details for administrators only).
-
-Set `INCIDENT_ALERT_WEBHOOK_FILE` to a restricted file holding an `https`
-Slack-compatible incoming-webhook URL. It is a credential: never Git, command
-lines or container environment text. The message names scopes and blockers,
-never evidence. Without it the stall is still recorded and shown.
-
-## Dispatch switch and queue clear
-
-Administrators have two controls on `/remediation`:
-
-- **Switch off / Switch on.** The switch is **off by default**: a new or upgraded
-  receiver dispatches nothing until an administrator switches it on. Switching
-  off starts nothing new; repairs in progress continue, and holds are still
-  reconciled and released. The receiver host's `ENABLED` file remains the
-  master switch: dispatch needs both, and the dashboard can never enable
-  dispatch that the host has disabled.
-- **Clear queue.** Marks queued fault events `cleared` without repairing them.
-  Running and held runs are untouched. An issue that is still open returns on
-  the producer's next revision (a change, or the six-hourly reminder). Queued
-  release compatibility tasks are kept: they are delivered once and nothing
-  would raise them again.
-
-`POST /api/remediation/dispatch` (`{"enabled": true|false}`) and
-`POST /api/remediation/clear` require an administrator session and the CSRF
-token; the read-only incident bearer token cannot use them. The web process
-records the request, with who and when, in `data/remediation-control.json`.
-The incident sidecar, which has that file read-only, forwards three fields on
-its next signed heartbeat: `seq`, `dispatch` (`on`/`off`) and `clearSeq`. The
-receiver validates that closed vocabulary, applies it inside the ingest
-transaction and reports what it applied in the ACK, so the board shows a
-request as pending until it is acknowledged (normally within a minute; longer
-while delivery is failing). The counters only move forward, so redelivery and
-a replayed older envelope change nothing. Payloads still never choose commands,
-targets, models, sessions or credentials.
-
-The receiver keeps the highest sequence it has applied and only learns
-sequences from this file. If the file is lost, damaged or replaced by an older
-copy, its numbering restarts below the receiver's, and commands numbered from
-it, including OFF, would be ignored as stale while the receiver kept its last
-setting. The status server therefore reads the file against the sequence in
-the receiver's last ACK. When the receiver is ahead, the request is **off**,
-sent one above the receiver's sequence, and the next switch or clear is
-numbered above it as well. No clear is inferred: the clear counter sent is the
-one the receiver already applied. The board says the saved setting was lost;
-switching on again is an administrator action. The sidecar never writes the
-file.
-
-Controls are sent only after the receiver has announced them in an ACK, so an
-older receiver never sees an unknown envelope field. Deploy the receiver first;
-until then the buttons are disabled.
+An abandoned operation record expires after 35 minutes without a saved progress
+update, with an absolute 24-hour cap, so it cannot silence monitoring for good.
 
 ## Upstream release compatibility tasks
 
 A network is built from three components: Dash Core, Platform and Tenderdash. A
 new release of any of them can break `dash-network-go` before anyone deploys
-it, so each published release becomes one task for the repair worker: check
-`dash-network-go` against that exact release and prepare a fix for review.
+it, so each published release becomes one issue: check `dash-network-go`
+against that exact release.
 
 | Repository | GitHub ID | Issue code |
 | --- | --- | --- |
@@ -383,7 +194,7 @@ it, so each published release becomes one task for the repair worker: check
 | `dashpay/dash` | 19352450 | `core_release_compatibility` |
 | `dashpay/tenderdash` | 283521505 | `tenderdash_release_compatibility` |
 
-The worker host has no public ingress, so GitHub delivers to the status server:
+GitHub delivers to the status server:
 
 - `POST /api/webhooks/github/release` (the original
   `/api/webhooks/github/platform-release` is the same handler and keeps
@@ -397,103 +208,21 @@ The worker host has no public ingress, so GitHub delivers to the status server:
   the same release and creates nothing new.
 - What is kept is repository, release ID, tag, pre-release flag and times, in
   `data/release-inbox/<repository ID>-<release ID>.json`. **The title and
-  release notes are never stored or forwarded**: they are upstream free text
+  release notes are never stored or passed on**: they are upstream free text
   and must not reach an agent as instructions. The tag must look like a
   version.
 - The incident sidecar turns each record into one `maintenance` issue (scope
-  `dash-network-go`, severity `info`) and sends it over the signed channel. No
-  six-hourly reminder: a release is one piece of work, not a recurring fault.
-  Core and Tenderdash tasks are sent only once the receiver announces
-  `releaseRepositories` in its acknowledgement, so a receiver that predates
-  them never rejects a batch. Until then their records wait in the inbox.
+  `dash-network-go`, severity `info`), with `mode: code-and-tests-only` and
+  `liveChangesAllowed: false` in its evidence. Triage takes it as new, like
+  any other issue. A release of any of the three repositories becomes a task
+  at once.
 
-The receiver accepts only these three repositories with their fixed IDs and
-codes, `mode: code-and-tests-only` and `liveChangesAllowed: false`. The
-instructions it gives the worker are written locally and name the component
-from that table, never from the event. They allow source, generator and test
-changes to `dash-network-go` in an isolated worktree and a draft pull request,
-and forbid deploying, upgrading, changing version pins, resetting, restarting,
-publishing or merging. The worker is told to test the release together with
-the other two components (the combination deployed now and the newest released
-one) and to keep the release lines still deployed working.
-
-A task is resolved only by a completion receipt carrying version-bound proof:
-`releaseId`, the release tag and its 40-hex commit, the tested
-`dash-network-go` commit, `result` (`compatible` or `fixed`), a report path
-and at least one passing test. Platform receipts use `platformTag` and
-`platformCommit`; Core and Tenderdash receipts name their `repository` and use
-`releaseTag` and `releaseCommit`. Anything else stays open as blocked or
-awaiting a complete report.
-
-All three share the scope `maintenance:dash-network-go`: one task per attempt,
-one session, and a separate budget of one admission an hour and four a day.
-They wait while dispatch is switched off, and a queue clear leaves them queued.
+A task ends when a newer release of its line supersedes it. Nothing else ends
+one: the version-bound report that used to resolve a task came through the
+retired receiver, and no replacement for it exists. A worker's report on the
+incident (`TRIAGE.md`) is recorded there and does not end the issue.
 
 Not covered: images with no GitHub release (nightlies, forks, patched tags).
-
-## Remediation board
-
-`/remediation` opens on the faults monitoring reports now: counts by severity,
-then each open case with what is wrong (the failing reasons of a host, the job
-and branch of a CI failure with a link to its run, disk use, and so on; details
-for administrators only). Cases of the same job are folded into one line.
-Recovered and closed cases are a separate view, listed for 24 hours and at most
-200 at a time; the counts are complete.
-
-With dispatch switched off in the console and no repair worker reporting, the
-board says exactly that: automatic repair is off. It does not call the missing
-worker a stall, and it does not present what the worker last said about a case
-(queued, working) as its current state; the last blocker and summary remain as
-history. If the worker never acknowledged the switch-off, the board says so.
-With dispatch switched on, a missing worker is a gap again and is shown as one.
-
-It also shows queued event revisions, active work, waiting
-reasons, blockers and recovery. `GET /api/remediation` is read-only; the existing
-incident API bearer token or administrator session enables curated repair notes.
-Public responses omit target identities, session keys, resource locks and notes,
-and exclude non-visible networks from both cases and counts. SSE invalidation
-contains only a timestamp; 15-second polling provides a reconnect fallback.
-
-The receiver adds a bounded remediation snapshot to its authenticated delivery
-ACK, which the producer already persists. No separate public receiver, new
-inbound endpoint on the receiver, session enumeration or executable report
-parsing is added; the administrator controls above reuse the signed heartbeat.
-Missing/stale data is explicit, never an apparently healthy empty queue.
-
-Terminal receipts include `summary`, `changes` (verified changes only),
-`blocker` and `nextAction`, plus `issues` keyed by issue ID with each issue's
-own `outcome` (`resolved`, `blocked`, or `no_change`) and notes. One blocked
-dependency must not contaminate unrelated verified repairs in the same batch.
-Historical receipts can be supplemented by a private
-`presentations.json` in the receiver state directory, keyed by run ID; optional
-`issues` maps override notes and response outcome by issue ID only after explicit
-report/evidence review. It cannot change the stored receipt, release reservations,
-or resolve monitoring incidents. Never
-copy secrets or raw report bodies into it. It is not committed to the repository.
-
-A blocked response with independently recovered symptoms is shown as
-**Recovered · follow-up**, preserving its root-cause work without counting an
-ongoing blocked outage. A resolved
-response is only shown as verified fixed when independent monitoring also records
-recovery; otherwise it awaits verification. Monitoring-only recovery is labelled
-recovered, without attributing an autonomous fix. Completed investigations are
-not automatically successful repairs. The only dashboard actions that change the
-queue are the administrator switch and clear above; neither starts a repair.
-
-DynamoDB scale-in controls are informational only when fresh complete collection
-proves the exact alarm, action and target-tracking policy/resource association.
-The collector requires read-only `application-autoscaling:DescribeScalingPolicies`
-in the checked-in status IAM policy. Names alone never suppress alarms; denied,
-partial, stale or mismatched evidence keeps the warning actionable. Correction
-of an old generic warning records explicit classification evidence and is shown
-as **Monitoring corrected**, not table recovery. No scaling policy is modified.
-A verified control is in `ALARM` whenever its table is idle, so no case is filed
-for it; an alarm that fails verification is filed as `aws_alarm` as before.
-
-Each readmission has a distinct attempt ID derived from its persisted admission
-time. Earlier receipts/results are retained, not overwritten by retrying the
-same event IDs. Receiver updates must wait for active invocations to finish;
-an idle-boundary rollout must preserve current owner authorization and locks.
 
 ## Coverage and remaining limits
 
@@ -502,7 +231,7 @@ an idle-boundary rollout must preserve current owner authorization and locks.
 | Networks | Fresh collector/discovery, per-host evaluated faults, endpoints, Core/Platform/DAPI/service checks | Existing inventory scope; mainnet remains a limited observer, not fleet ownership. No production payment/transaction sent as a synthetic check. |
 | CI | Every registered reporter including never-seen hosts, measured freshness, disk/memory, unavailable runners, failed jobs and stale/long queue | Only registered reporters/known repositories; failed tests are not necessarily infrastructure faults. No human-idleness inference from runner-idle alone. |
 | AWS | Inventory freshness/errors, EC2 system/instance checks and scheduled events, existing CloudWatch alarms, review-only unattached resources | Existing alarms only, not automatic alarm provisioning. No target-group health, AWS Health API, S3/application SLO checks or cost-anomaly/budget detector yet. Empty alarm sets are not proof of service health. |
-| Pipeline | Producer snapshot freshness, durable delivery/backlog, receiver watchdog and worker state | Host/tailnet-wide failure needs an independently hosted external observer for redundancy. |
+| Pipeline | Freshness of the sidecar's state: `stale` in every answer, HTTP 503 from `GET /api/issues`, the container health check. Triage moves nothing on a stale state. | Nothing outside the status host notices that the host, or the sidecar, has stopped. |
 
 `dash-network-go`'s artifact resolution proves architecture/digest availability,
 not Platform Explorer compatibility. Explorer is launched by `status`'s auxiliary
@@ -511,68 +240,12 @@ codec cannot handle newer V2 document transitions. A replacement requires the
 real failing block fixture, protocol-aware handlers, isolated replay through tip,
 and immutable artifact pins; restarting/skipping a block is not a repair.
 
-## Validation and rollback
+## Validation
 
-Run Node tests with an executable `TMPDIR` when `/tmp` is mounted noexec, lint,
-frontend build, Python probe tests, and `incident-broker/test_broker.py`. Test
-invalid/stale/future authentication, replay, crash/lost-ACK recovery, private API
-projection, positive-only resolution, pagination failure, and worker ambiguity.
-A `pipeline_self_test` is explicitly no-mutation and verifies a real private
-OpenClaw turn and its completion receipt.
+Run the Node tests with an executable `TMPDIR` when `/tmp` is mounted noexec,
+then lint and the frontend build. The tests cover private API projection,
+positive-only resolution, every rule that ends a case, pagination failure, and
+the first cycle over a state of the release that still delivered events.
 
-Before rollout preserve the image ID, compose files, settings and authorization
-record. Verify no active network operation before replacing the agent. Rollback
-restores the prior image/compose while preserving incident inbox/outbox and all
-network/CI/user data. Pause the worker by removing `ENABLED`; do not delete its
-database or rerun uncertain records. Stop the producer before editing its code.
-
-
-## Known CI blockers before admission
-
-The broker correlates queued `ci/job_failed` events **before** concurrency,
-cooldown or hourly/daily budget admission. A match requires identical immutable
-job evidence (repository, run, attempt, runner, job, completion time, complete
-evidence object, target/source identity, severity and last-fault time), plus a
-completed, terminal, no-children receipt with that exact issue's explicit
-`blocked` outcome and nonempty blocker. Batch-level blockers, presentation text,
-missing/uncertain receipts and similar error/runner labels are not proof.
-
-A matching occurrence is retained as `deduplicated`, with a durable
-`event_correlations` link to the original response. It starts no worker, obtains
-no locks and has no admission timestamp, so spends no allowance. The board keeps
-the original blocker/owner/next action; neither receipt nor monitoring recovery
-is forged. Duplicate deliveries/restarts retain the same correlation.
-
-Changed failure evidence, severity, job/attempt/run, intervening resolution,
-reopened incidents and an explicit local operator recheck are admitted normally.
-Network incidents (including routine PoSe recovery), capacity/runner-health
-signals and release compatibility tasks are deliberately outside this exact-job
-gate. Different runs can share a root cause, but current producer evidence does
-not contain a proven cross-run test/error + relevant-source fingerprint. Those
-must still be compared by a worker, not silently merged on their job name.
-A new job containing an actual fix is therefore not hidden by an old blocker.
-
-For an explicitly authorized recheck of unchanged evidence, an operator can put
-an exact issue-ID key and reason in local `ci-dedup-recheck.json` before its next
-reminder. Remove that entry after the requested recheck. Workers must not write
-this shared control file or release their own blockers.
-
-### Audited allowance reset
-
-A local operator may, **only with explicit owner authority**, record
-`meta['budget_reset:ordinary']` as JSON with numeric UTC epoch `at` and a nonempty
-`reason`. Ordinary hourly and daily counts use admissions after the later of
-that epoch and their normal rolling cutoff. This resets accounting, not event
-history: old starts, receipts, locks, pending work, active sessions and configured
-8/hour/48/day limits remain intact. Compatibility uses a separate
-`budget_reset:maintenance` key; an ordinary reset never changes its 1/hour/4/day
-allowance. Invalid/future resets never bypass the existing limits.
-
-Pause new admissions and wait for running/uncertain work to finish before a
-receiver rollout or reset; preserve a consistent SQLite backup and an authority
-receipt. Verify the new gate first, then record the reset, confirm zero usage
-while paused, restore ENABLED and verify fresh dispatch/heartbeat. Once work
-resumes the usage counter will naturally increment again. Queue-state exposes
-both budget windows and the reset epoch. Do not delete queue rows to reset usage.
-
-Validation: `python3 -m unittest discover -s deploy/incident-broker -p 'test*.py'`.
+Before a rollout preserve the image ID, compose files and settings. Verify no
+active network operation before replacing the agent.

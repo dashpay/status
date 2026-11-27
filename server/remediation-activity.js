@@ -1,4 +1,4 @@
-// Display history only. Never changes monitoring, delivery, receipts or locks.
+// Display history only. Never changes monitoring.
 import { join } from 'node:path';
 import { readJSON, writeAtomic } from '../shared/settings.js';
 
@@ -17,9 +17,7 @@ export function clearActivity(dataDir, state, actor, now = Date.now()) {
   return { clearedAt: value.clearedAt, clearedBy: value.clearedBy };
 }
 
-export function activityHidden(issue, response, state) {
-  // Always retain current ownership and queued work, including stale feeds.
-  if (response?.active || response?.workerState === 'queued' || response?.pendingEvents > 0 || state?.outbox?.some((e) => e.issue?.id === issue.id)) return false;
+export function activityHidden(issue, state) {
   // A fault monitoring has seen since the clear is the present, not history.
   if (issue.status === 'open' && Date.parse(issue.lastSeen) > Date.parse(state?.activityHistory?.clearedAt)) return false;
   const revisions = state?.activityHistory?.revisions;

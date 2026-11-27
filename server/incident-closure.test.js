@@ -5,8 +5,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BACKLOG_EVENTS, GONE_AFTER_MS, JOB_FAILED_MAX_AGE_MS, QUEUE_WAIT_UNSEEN_MS, QUIET_SAMPLES,
-  ciJobIgnored, compactBacklog, deriveIssues, loadIncidentState, reconcile, saveIncidentState, validIgnoredCiJobs, wildcard } from './incidents.js';
+import { GONE_AFTER_MS, JOB_FAILED_MAX_AGE_MS, QUEUE_WAIT_UNSEEN_MS, QUIET_SAMPLES,
+  ciJobIgnored, deriveIssues, loadIncidentState, reconcile, saveIncidentState, validIgnoredCiJobs, wildcard } from './incidents.js';
 import { cycle } from './incident-service.js';
 import { reconcileReleaseTasks, supersededBy } from './release-webhook.js';
 import { remediationView, HISTORY_MAX, HISTORY_MS } from './remediation.js';
@@ -47,11 +47,11 @@ test('a waiting job that leaves a whole listing of its repository is recovered, 
   assert.equal(only(s, 'queue_wait').status, 'open');
   // Back in the next listing: it never left, and the count starts over.
   const back = reconcile(s, deriveCi(now + 6 * MIN, { ...ciHost(now + 6 * MIN), queue: queueOf(now + 6 * MIN, [waiting(now)]) }), now + 6 * MIN);
-  assert.deepEqual([only(back, 'queue_wait').status, only(back, 'queue_wait').absentAt, back.outbox.length], ['open', undefined, s.outbox.length]);
+  assert.deepEqual([only(back, 'queue_wait').status, only(back, 'queue_wait').absentAt, only(back, 'queue_wait').revision], ['open', undefined, 1]);
   s = reconcile(s, deriveCi(now + 6 * MIN, { ...ciHost(now + 6 * MIN), queue: queueOf(now + 6 * MIN, []) }), now + 6 * MIN);
   const left = only(s, 'queue_wait');
   assert.deepEqual([left.status, reason(left), left.resolutionEvidence.how, left.observedAt, left.absentAt], ['resolved', 'left_queue', 'no longer queued', stamp(now + 6 * MIN), undefined]);
-  assert.equal(s.outbox.at(-1).transition, 'resolved');
+  assert.equal(left.revision, 2, 'opened, then ended');
 });
 
 test('a run the poller no longer follows cannot prove its job left; the case ends by age instead, once the queue is being observed', () => {
@@ -216,24 +216,23 @@ test('a disk or runner missing from a current report for ten minutes is gone; a 
   assert.ok([...byCode(gone, 'disk_pressure'), ...byCode(gone, 'runner_offline')].every((i) => i.status === 'resolved' && reason(i) === 'target_removed'));
 });
 
-test('cases of a host excluded from remediation are left as they are: nothing ends them, nothing is parked for them', () => {
+test('cases of a host excluded from remediation are left as they are: nothing ends them, nothing revises them', () => {
   const remediation = { excludedCiHosts: ['shared'] };
   const bad = ciHost(now, { disks: [{ path: '/', total: 100, free: 5 }, { path: '/data', total: 100, free: 5 }] });
   const failure = failed(now);
   let s = reconcile(null, deriveCi(now, { ...bad, recent: [failure] }), now);
-  const parked = () => (s.quarantined || []).length;
+  const revisions = () => s.issues.filter((i) => i.scope === 'shared').map((i) => i.revision);
   // Excluded from then on; the disk goes, the reporter is deregistered, the failure ages out.
   s = reconcile(s, deriveCi(now + MIN, { ...ciHost(now + MIN, { disks: [{ path: '/', total: 100, free: 5 }] }), recent: [failure] }, remediation), now + MIN);
-  const before = parked();
   for (const ms of [now + 20 * MIN, now + 40 * MIN, now + 25 * HOUR, now + 26 * HOUR]) s = reconcile(s, deriveCi(ms, { reporters: [], hosts: [], runners: [], recent: [] }, remediation), ms);
   assert.deepEqual(s.issues.filter((i) => i.scope === 'shared').map((i) => [i.code, i.status, i.remediationExcluded]).sort(),
     [['disk_pressure', 'open', true], ['disk_pressure', 'open', true], ['job_failed', 'open', true]]);
-  assert.equal(parked(), before, 'no ending is emitted only to be quarantined');
-  // The exclusion is lifted: the cases end by the ordinary rules, and their endings are sent.
+  assert.deepEqual(revisions(), [1, 1, 1]);
+  // The exclusion is lifted: the cases end by the ordinary rules.
   s = reconcile(s, deriveCi(now + 27 * HOUR, { reporters: [], hosts: [], runners: [], recent: [] }), now + 27 * HOUR);
   s = reconcile(s, deriveCi(now + 28 * HOUR, { reporters: [], hosts: [], runners: [], recent: [] }), now + 28 * HOUR);
   assert.deepEqual(s.issues.filter((i) => i.scope === 'shared').map((i) => [i.code, reason(i)]).sort(), [['disk_pressure', 'target_removed'], ['disk_pressure', 'target_removed'], ['job_failed', 'expired']]);
-  assert.equal(s.outbox.filter((e) => e.issue.scope === 'shared' && e.transition === 'resolved').length, 3);
+  assert.deepEqual(revisions(), [2, 2, 2]);
 });
 
 // ---- networks ------------------------------------------------------------
@@ -348,10 +347,10 @@ test('a fault that returns restarts its count; one that stays away is dropped fr
   assert.equal(only(s, 'host_health').quiet['["container","task"]'].n, 4);
   assert.equal(step(true, true).quiet, undefined, 'seen again: no fault is waiting to be dropped');
   for (let n = 1; n < QUIET_SAMPLES; n++) assert.equal(step(false, true).evidence.faults.length, 2, `sample ${n}`);
-  const before = s.outbox.length;
+  const before = only(s, 'host_health').revision;
   const trimmed = step(false, true);
   assert.deepEqual([trimmed.status, trimmed.evidence.faults, trimmed.evidence.reasons.length], ['open', ['["service","api"]'], 1]);
-  assert.equal(s.outbox.at(-1).transition, 'changed'); assert.equal(s.outbox.length, before + 1);
+  assert.equal(trimmed.revision, before + 1, 'other faults than before: the case is revised');
 });
 
 // ---- release tasks -------------------------------------------------------
@@ -371,78 +370,39 @@ test('a release with a newer one in its line is superseded: its task closes, and
   assert.deepEqual(trial.map((r) => supersededBy(r, trial)?.tag || null), [null, null, 'v5.0.4-rc.1']);
   assert.equal(supersededBy(trial[1], [...trial, release('v5.0.4', 4)]).tag, 'v5.0.4');
   // Tasks filed one by one as the releases came out, none of them ever worked on.
-  const state = { schemaVersion: 1, issues: [], outbox: [], revisionCounters: {}, delivery: { receiver: {} } };
+  const state = { schemaVersion: 1, issues: [], outbox: [], revisionCounters: {} };
   reconcileReleaseTasks(state, releases.slice(0, 1), now);
   assert.deepEqual(state.issues.map((i) => [i.target, i.status]), [['Platform v5.0.0-beta.3', 'open']]);
   reconcileReleaseTasks(state, releases, now + MIN);
-  assert.deepEqual(state.issues.map((i) => [i.target, i.status, i.resolutionEvidence?.by || null]),
-    [['Platform v5.0.0-beta.3', 'resolved', 'v5.0.10'], ['Platform v5.0.10', 'open', null], ['Platform v5.1.0-dev.1', 'open', null]]);
-  assert.deepEqual(state.outbox.map((e) => [e.issue.target, e.transition]),
-    [['Platform v5.0.0-beta.3', 'opened'], ['Platform v5.0.0-beta.3', 'resolved'], ['Platform v5.0.10', 'opened'], ['Platform v5.1.0-dev.1', 'opened']]);
+  assert.deepEqual(state.issues.map((i) => [i.target, i.status, i.resolutionEvidence?.by || null, i.revision]),
+    [['Platform v5.0.0-beta.3', 'resolved', 'v5.0.10', 2], ['Platform v5.0.10', 'open', null, 1], ['Platform v5.1.0-dev.1', 'open', null, 1]]);
+  assert.deepEqual(state.outbox, []);
   const again = structuredClone(state); reconcileReleaseTasks(again, releases, now + 2 * MIN);
-  assert.deepEqual(again, state, 'nothing is opened, closed or sent twice');
+  assert.deepEqual(again, state, 'nothing is opened or closed twice');
   const view = remediationView({ ...state, generatedAt: stamp(now + MIN), control: { dispatch: 'off' } }, { full: true, now: now + MIN });
   const shown = view.cases.find((c) => c.title.endsWith('v5.0.0-beta.3'));
   assert.deepEqual([shown.stage, shown.reason], ['closed', 'Superseded by v5.0.10']);
 });
 
-// ---- backlog -------------------------------------------------------------
-const event = (id, revision, status = 'open', transition = status === 'resolved' ? 'resolved' : revision === 1 ? 'opened' : 'changed') =>
-  ({ schemaVersion: 1, eventId: `${id}:${revision}`, occurredAt: stamp(now), transition, issue: { id, revision, domain: 'ci', scope: 'github', target: id, code: 'queue_wait', severity: 'warning', status, sourceKey: 'ci:queue' } });
-const issueOf = (id, revision, status = 'open', extra = {}) => ({ id, revision, domain: 'ci', scope: 'github', target: id, code: 'queue_wait', severity: 'warning', status, ...extra });
-
-test('a backlog keeps only the newest waiting event of each issue, an ending included', () => {
-  const filler = Array.from({ length: BACKLOG_EVENTS }, (_, n) => `f${n}`);
-  const issues = [issueOf('seen', 9, 'resolved'), issueOf('unseen', 2, 'resolved'), issueOf('still', 3), ...filler.map((id) => issueOf(id, 1))];
-  const state = { issues: structuredClone(issues), outbox: [event('seen', 7), event('unseen', 1), event('still', 1), event('seen', 8), event('gone', 4),
-    ...filler.map((id) => event(id, 1)), event('still', 2), event('unseen', 2, 'resolved'), event('seen', 9, 'resolved'), event('still', 3), event('gone', 5, 'resolved')] };
-  const small = { issues: state.issues, outbox: state.outbox.slice(0, BACKLOG_EVENTS) };
-  assert.equal(compactBacklog(structuredClone(small)).outbox.length, BACKLOG_EVENTS, 'one batch is not a backlog: every event is delivered as it is');
-  compactBacklog(state);
-  // unseen opened and ended with nothing acknowledged, and its ending is kept all the
-  // same: its opening may have been accepted by a receiver whose answer was lost.
-  assert.deepEqual(state.outbox.filter((e) => !e.issue.id.startsWith('f')).map((e) => e.eventId), ['unseen:2', 'seen:9', 'still:3', 'gone:5']);
-  assert.equal(state.outbox.length, BACKLOG_EVENTS + 4);
-  assert.deepEqual(state.issues, issues, 'issues are not touched');
-  // Stable: a second pass changes nothing, and no event was rewritten.
-  const once = structuredClone(state); compactBacklog(state); assert.deepEqual(state, once);
-  assert.deepEqual(state.outbox.at(-1), event('gone', 5, 'resolved'));
-});
-
-test('a receiver that accepted an opening and lost its answer is still told the ending, once it returns', async () => {
-  const dataDir = mkdtempSync(join(tmpdir(), 'incidents-backlog-'));
+// ---- the queue, whole ----------------------------------------------------
+test('the sidecar reads the queue whole: sixty waiting jobs are sixty cases, and each ends once it has left', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'incidents-queue-'));
   mkdirSync(join(dataDir, 'incidents'));
   writeFileSync(join(dataDir, 'settings.json'), JSON.stringify(DEFAULT_SETTINGS));
   const jobs = (ms) => Array.from({ length: 60 }, (_, n) => waiting(ms, { id: 100 + n }));
   let queue = queueOf(now, jobs(now)), clock = now;
   const ci = { summary: (options) => { assert.equal(options.whole, true); return { ...ciHost(clock), queue }; } };
-  const destination = 'https://receiver.example-tailnet.ts.net:8444/v1/events';
-  const sent = [];
-  const accept = async (_, opts) => { const batch = JSON.parse(opts.body).events; sent.push(...batch); return Response.json({ accepted: batch.map((e) => e.eventId), health: { status: 'ok' } }); };
-  // The receiver stores the first batch; the connection drops before it answers.
-  const stored = [];
-  await cycle({ dataDir, ci, destination, secret: 'test-secret', now: clock, fetcher: async (_, opts) => { stored.push(...JSON.parse(opts.body).events); throw new Error('connection lost after acceptance'); } });
-  const openThere = new Set(stored.filter((e) => e.issue.code === 'queue_wait').map((e) => e.issue.id));
-  assert.ok(openThere.size > 0 && openThere.size < 60, 'one batch of the sixty openings is with the receiver, unacknowledged');
-  // The receiver goes away; every job then leaves the queue (two listings say so).
-  for (const minutes of [5, 2]) {
-    clock += minutes * MIN; queue = queueOf(clock, []);
-    await cycle({ dataDir, ci, destination, secret: 'test-secret', now: clock, fetcher: async () => { throw new Error('connection refused'); } });
-  }
+  await cycle({ dataDir, ci, now: clock });
+  assert.deepEqual(byCode(loadIncidentState(dataDir), 'queue_wait').map((i) => [i.status, i.revision]), Array(60).fill(['open', 1]));
+  // Every job then leaves the queue (two listings say so).
+  for (const minutes of [5, 2]) { clock += minutes * MIN; queue = queueOf(clock, []); await cycle({ dataDir, ci, now: clock }); }
   const state = loadIncidentState(dataDir);
-  assert.ok(byCode(state, 'queue_wait').every((i) => i.status === 'resolved'));
-  const pending = state.outbox.filter((e) => e.issue.code === 'queue_wait');
-  assert.deepEqual([pending.length, pending.every((e) => e.transition === 'resolved')], [60, true], 'one waiting event per job: its ending');
-  // It returns: every ending arrives, each once, the ones it holds open among them.
-  for (let n = 0; n < 6 && loadIncidentState(dataDir).outbox.length; n++) { clock += 20 * MIN; queue = queueOf(clock, []); await cycle({ dataDir, ci, destination, secret: 'test-secret', now: clock, fetcher: accept }); }
-  const endings = sent.filter((e) => e.issue.code === 'queue_wait');
-  assert.deepEqual([endings.length, new Set(endings.map((e) => e.eventId)).size, endings.every((e) => e.transition === 'resolved')], [60, 60, true]);
-  assert.ok([...openThere].every((id) => endings.some((e) => e.issue.id === id)));
-  assert.equal(loadIncidentState(dataDir).outbox.filter((e) => e.issue.code === 'queue_wait').length, 0);
+  assert.deepEqual(byCode(state, 'queue_wait').map((i) => [i.status, i.revision, reason(i)]), Array(60).fill(['resolved', 2, 'left_queue']));
+  assert.deepEqual(state.outbox, []);
 });
 
 // ---- the page ------------------------------------------------------------
-test('with repair switched off and no worker, the page lists open faults with what is wrong, and shows endings for a day', () => {
+test('the list has open faults with what is wrong, and endings for a day; nothing a retired receiver last said shows in it', () => {
   const at = stamp(now);
   const base = { domain: 'ci', scope: 'mac-runner-pasta', severity: 'warning', status: 'open', firstSeen: stamp(now - HOUR), lastSeen: at, revision: 1 };
   const closed = (id, why, extra = {}) => ({ ...base, id, code: 'job_failed', target: id, status: 'resolved', resolvedAt: stamp(now - HOUR), resolutionEvidence: { reason: why }, ...extra });
@@ -459,12 +419,15 @@ test('with repair switched off and no worker, the page lists open faults with wh
     closed('policy', 'ignored_job'), closed('old', 'expired', { resolvedAt: stamp(now - HISTORY_MS - MIN) }),
     closed('plain', undefined, { resolutionEvidence: undefined }),
   ];
-  // The worker last reported four days ago, with dispatch on, and one repair "active".
-  const state = { generatedAt: at, issues, outbox: [{ eventId: 'job1:1', issue: { id: 'job1' } }, { eventId: 'aged:2', issue: { id: 'aged' } }], control: { seq: 6, dispatch: 'off', clearSeq: 4, updatedBy: 'admin' },
+  // A state as the release that still sent events left it: the receiver last
+  // answered four days ago, with dispatch on, one repair "active" and one queued.
+  const state = { generatedAt: at, issues, outbox: [{ eventId: 'job1:1', issue: { id: 'job1' } }, { eventId: 'aged:2', issue: { id: 'aged' } }], control: { seq: 6, dispatch: 'off', clearSeq: 4, updatedBy: 'admin', updatedAt: at },
     delivery: { configured: true, error: 'receiver HTTP 502', lastAckAt: stamp(now - 96 * HOUR), receiver: { workerAt: (now - 96 * HOUR) / 1000, control: { seq: 5, dispatch: 'on', clearSeq: 4 },
       remediation: { schemaVersion: 1, generatedAt: stamp(now - 96 * HOUR), enabled: true, truncated: true, cases: [{ issueId: 'host', active: true, workerState: 'running' }, { issueId: 'disk', workerState: 'queued', pendingEvents: 3 }] } } } };
   const view = remediationView(state, { full: true, visibleNetworks: ['testnet'], now });
-  assert.deepEqual([view.idle, view.stale, view.stalled, view.truncated, view.control.requested, view.control.applied, view.control.lastKnown], [true, false, false, false, 'off', null, 'on']);
+  assert.deepEqual([view.stale, view.producerFresh, view.control], [false, true, { requested: 'off', changedAt: at, changedBy: 'admin' }]);
+  assert.deepEqual(Object.keys(view).sort(), ['activityHistory', 'cases', 'control', 'counts', 'faults', 'generatedAt', 'history', 'maintenance', 'producerFresh', 'public', 'schemaVersion', 'stale']);
+  assert.deepEqual(Object.keys(view.counts).sort(), ['classified', 'closed', 'maintenance', 'open', 'recovered', 'review', 'unknown']);
   const stage = Object.fromEntries(view.cases.map((c) => [c.id, c.stage]));
   assert.deepEqual(stage, { job1: 'open', job2: 'open', evil: 'open', wait: 'open', disk: 'open', host: 'open', held: 'maintenance', addr: 'review',
     left: 'recovered', pass: 'recovered', plain: 'recovered', gone: 'closed', aged: 'closed', policy: 'closed' }, 'nothing is shown as queued or being worked on');
@@ -486,10 +449,13 @@ test('with repair switched off and no worker, the page lists open faults with wh
   assert.deepEqual(anonymous.faults, view.faults);
   assert.doesNotMatch(JSON.stringify(anonymous), /mac-runner-pasta|web-1|rc5-neg|feat\/x|eipalloc|Swift SDK|github\.com|admin/);
   assert.ok(anonymous.cases.every((c) => !('detail' in c) && !('link' in c) && !('group' in c)));
-  // Switched on again: an absent worker is a gap once more, and its last word is shown as it was.
+  assert.deepEqual([anonymous.control, view.public, anonymous.public], [{ requested: 'off' }, false, true]);
+  // The switch is for the triage worker. Switched on, the list is the same list.
   const on = remediationView({ ...state, control: { ...state.control, seq: 7, dispatch: 'on' } }, { full: true, visibleNetworks: ['testnet'], now });
-  assert.deepEqual([on.idle, on.stale, on.stalled, on.cases.find((c) => c.id === 'host').stage, on.cases.find((c) => c.id === 'disk').stage, on.cases.find((c) => c.id === 'job1').stage], [false, true, true, 'working', 'queued', 'queued']);
-  assert.equal(on.cases.find((c) => c.id === 'aged').stage, 'closed', 'how a case ended does not wait for its event to be delivered');
+  assert.deepEqual([on.control.requested, on.stale, on.cases], ['on', false, view.cases]);
+  // Monitoring that stopped cannot say a case is over; what is open stays listed as open.
+  const stopped = remediationView({ ...state, generatedAt: stamp(now - HOUR) }, { full: true, visibleNetworks: ['testnet'], now });
+  assert.deepEqual([stopped.stale, stopped.cases.find((c) => c.id === 'left').stage, stopped.cases.find((c) => c.id === 'host').stage, stopped.cases.every((c) => c.stale)], [true, 'unknown', 'open', true]);
 });
 
 test('the ended list is limited but fully counted, and clearing activity never hides a fault monitoring still sees', () => {
@@ -520,8 +486,8 @@ test('one cycle over a state full of cases that could never close leaves the fau
     ...Array.from({ length: 10 }, (_, n) => stuck(`d${n}`, 'host_health', { domain: 'network', scope: 'devnet-sakura', evidence: { instanceId: `i-${n}`, faults: ['["probe",""]'] } })),
     stuck('real', 'job_failed', { scope: 'mac-runner-pasta', observedAt: recent, firstSeen: recent, lastSeen: recent, lastFaultAt: recent, evidence: { repo: 'dashpay/platform', runId: 99, attempt: 1, jobName: 'Tests', end: recent } }),
   ];
-  // Thirty of the old cases were opened while the receiver was away; the rest it knows.
-  const outbox = issues.filter((i) => /^[qjd]\d$/.test(i.id)).map((i) => event(i.id, 1));
+  // The release that wrote this state still sent events; thirty were waiting.
+  const outbox = issues.filter((i) => /^[qjd]\d$/.test(i.id)).map((i) => ({ schemaVersion: 1, eventId: `${i.id}:1`, occurredAt: old, transition: 'opened', issue: i }));
   saveIncidentState(dataDir, { schemaVersion: 1, issues, outbox, revisionCounters: Object.fromEntries(issues.map((i) => [i.id, 1])) });
   const ci = { summary: () => ({ ...ciHost(now), queue: queueOf(now, []) }) };
   await cycle({ dataDir, ci, now });
@@ -530,15 +496,14 @@ test('one cycle over a state full of cases that could never close leaves the fau
   // The deleted devnet's cases wait their ten minutes; the aged CI cases end at once.
   assert.deepEqual([stale.filter((i) => i.status === 'resolved').length, stale.filter((i) => i.status === 'open').map((i) => i.code).every((c) => c === 'host_health')], [80, true]);
   assert.equal(state.issues.find((i) => i.id === 'real').status, 'open');
-  const pending = (s, id) => s.outbox.filter((e) => e.issue.id === id).map((e) => e.transition);
-  for (const id of ['q0', 'q9', 'j0', 'j9', 'q10', 'q39', 'j10', 'j39']) assert.deepEqual(pending(state, id), ['resolved'], `${id}: one waiting event, its ending`);
-  assert.deepEqual(pending(state, 'd0'), ['opened']);
+  const revision = (s, id) => s.issues.find((i) => i.id === id).revision;
+  for (const id of ['q0', 'q9', 'j0', 'j9', 'q10', 'q39', 'j10', 'j39']) assert.equal(revision(state, id), 2, `${id}: opened, then ended`);
+  assert.deepEqual([revision(state, 'd0'), revision(state, 'real'), state.outbox], [1, 1, []]);
   await cycle({ dataDir, ci, now: now + GONE_AFTER_MS });
   const done = loadIncidentState(dataDir);
   assert.deepEqual(done.issues.filter((i) => i.status === 'open' && i.sourceKey === 'legacy').map((i) => i.id), ['real']);
   assert.ok(done.issues.filter((i) => i.scope === 'devnet-sakura').every((i) => reason(i) === 'network_removed'));
-  assert.deepEqual(pending(done, 'd0'), ['resolved'], 'the opening that was never sent is replaced by the ending');
-  assert.equal(new Set(done.outbox.map((e) => e.issue.id)).size, done.outbox.length, 'one waiting event per issue');
+  assert.deepEqual([revision(done, 'd0'), revision(done, 'real')], [2, 1]);
   const view = remediationView({ ...done, control: { dispatch: 'off' } }, { full: true, now: now + GONE_AFTER_MS });
   assert.deepEqual(view.cases.filter((c) => ['job_failed', 'queue_wait', 'host_health'].includes(c.code) && c.monitoring === 'open').map((c) => c.id), ['real']);
 });

@@ -1,5 +1,5 @@
 // Machine-readable, read-only issue derivation. Evidence is data, never commands.
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { evaluateNetwork, explorerReadiness } from '../shared/evaluate.js';
@@ -183,7 +183,7 @@ export function deriveIssues({ settings, states, ci, aws, operations = [], maint
   };
   const add = (domain, scope, target, code, severity, sourceKey, evidence = {}, observedAt = iso(now), identity = []) => {
     // Collection gaps are observed NOW. Their stale/future clocks belong in
-    // bounded evidence, not in the signed event's current observation clock.
+    // bounded evidence, not in the issue's current observation clock.
     const at = fresh(observedAt, now, 24 * 3600_000) ? observedAt : iso(now);
     issues.push({ id: idFor(domain, scope, target, code, identity), domain, scope, target, code, severity,
       summary: TITLES[code], sourceKey, observedAt: at, evidence });
@@ -436,18 +436,21 @@ export function reconcile(previous, derived, now = Date.now()) {
   const state = structuredClone(previous || { schemaVersion: 1, issues: [], outbox: [] });
   const existing = new Map((state.issues || []).map((i) => [i.id, i]));
   const counters = { ...(state.revisionCounters || {}) };
-  // Seed migrations from BOTH records and unsent events. Display retention
-  // must never recycle an event ID still remembered by the receiver.
+  // The counters outlive the records, so that a case dropped from the list and
+  // seen again is not numbered from one. A state written while events were
+  // still sent can hold a higher revision in a waiting event than in its
+  // record: those are read once more here, before they are dropped below.
   for (const i of [...existing.values(), ...(state.outbox || []).map((e) => e.issue), ...(state.quarantined || []).map((q) => q.event?.issue)]) {
     if (i && Number.isSafeInteger(i.revision)) counters[i.id] = Math.max(counters[i.id] || 0, i.revision);
   }
-  const events = [];
-  const emit = (issue, transition) => {
+  // A case's revision counts the times it opened, changed or ended while it was
+  // not held. `lastEventAt` is when that last happened: the name is from when
+  // each revision was also an event sent to a receiver.
+  const revise = (issue) => {
     const revision = (counters[issue.id] || 0) + 1;
-    if (!Number.isSafeInteger(revision) || revision > 999_999_999) throw new Error('incident revision exhausted; refusing event ID reuse');
+    if (!Number.isSafeInteger(revision) || revision > 999_999_999) throw new Error('incident revision exhausted; refusing to reuse one');
     counters[issue.id] = revision;
     Object.assign(issue, { revision, lastEventAt: iso(now) });
-    events.push({ schemaVersion: 1, eventId: `${issue.id}:${revision}`, occurredAt: iso(now), transition, issue: structuredClone(issue) });
   };
   // `exempt` marks a check the network-wide hold must not cover (a crash loop).
   const excluded = (issue) => issue?.domain === 'ci' && (derived.excludedCiHosts || []).includes(issue.scope);
@@ -548,7 +551,7 @@ export function reconcile(previous, derived, now = Date.now()) {
     issue.status = 'resolved'; issue.resolvedAt = iso(now); if (at) issue.observedAt = at;
     if (evidence) issue.resolutionEvidence = evidence; else delete issue.resolutionEvidence;
     issue.suppressed = false; delete issue.missingSince; delete issue.quiet; delete issue.absentAt;
-    emit(issue, 'resolved');
+    revise(issue);
   };
   const signature = (issue) => issue.code === 'host_health' ? JSON.stringify(knownFaults(issue))
     : issue.code === 'aws_instance_impaired' ? JSON.stringify([issue.evidence?.instanceStatus === 'impaired', issue.evidence?.systemStatus === 'impaired'])
@@ -584,17 +587,15 @@ export function reconcile(previous, derived, now = Date.now()) {
       if (retained.some((f) => (faultLevels[f] || old.severity) === 'critical')) issue.severity = 'critical';
     }
     if (maintenance) issue.suppressedUntil = iso(now);
-    if (!issue.suppressed) {
-      if (!old || !old.revision || old.status !== 'open') emit(issue, old?.revision ? 'reopened' : 'opened');
-      else if (old.suppressed || old.severity !== issue.severity || signature(old) !== signature(issue)) emit(issue, 'changed');
-      else if (now - Date.parse(old.lastEventAt) >= 6 * 3600_000) emit(issue, 'reminder');
-    }
+    // Opened or reopened; or changed: released from a hold, another severity,
+    // other faults. A fault that only lasts is not revised.
+    if (!issue.suppressed && (!old || !old.revision || old.status !== 'open'
+      || old.suppressed || old.severity !== issue.severity || signature(old) !== signature(issue))) revise(issue);
     existing.set(issue.id, issue);
   }
   for (const issue of existing.values()) if (issue.status === 'open' && !active.has(issue.id)) {
     const check = derived.checks?.[issue.id];
-    // An excluded host's cases stay as they are: nothing about them is sent, so
-    // an ending could never be delivered either. Exclusion is not an ending.
+    // An excluded host's cases stay as they are. Exclusion is not an ending.
     const over = excluded(issue) ? null : ended(issue, check);
     if (over) { close(issue, null, over); continue; }
     issue.suppressed = suppressed(issue, check);
@@ -635,16 +636,16 @@ export function reconcile(previous, derived, now = Date.now()) {
     if (clear) close(issue, clearAt, evidence);
   }
   state.issues = [...existing.values()].filter((i) => i.status === 'open' || now - Date.parse(i.resolvedAt) < 30 * 86400_000);
-  // Exclusion is not recovery. Retain observations/history and withdraw only
-  // undelivered remediation events; the broker rechecks suppressed live issues.
+  // Exclusion is not recovery: the observations and the history are kept.
   for (const issue of state.issues) {
     issue.remediationExcluded = excluded(issue);
     if (issue.remediationExcluded) issue.suppressed = true;
   }
-  const pending = [...(state.outbox || []), ...events];
-  state.quarantined = [...(state.quarantined || []), ...pending.filter((e) => excluded(e.issue))
-    .map((event) => ({ event, at: iso(now), reason: 'owner-configured remediation exclusion' }))];
-  state.outbox = pending.filter((e) => !excluded(e.issue));
+  // Nothing is sent to a receiver any more. The events an earlier release left
+  // waiting, and the ones it set aside, are dropped. The empty list stays in
+  // the file: that release reads it without a guard, should it be put back.
+  state.outbox = [];
+  delete state.quarantined;
   state.revisionCounters = counters;
   const samples = { ...(state.explorerSamples || {}) };
   for (const [key, sample] of Object.entries(derived.samples || {})) {
@@ -654,25 +655,6 @@ export function reconcile(previous, derived, now = Date.now()) {
   // No unbounded probe history. Expired identities cannot verify recovery.
   state.explorerSamples = Object.fromEntries(Object.entries(samples).filter(([, s]) => !derived.suppressions?.[s.scope] && fresh(s.probe?.at, now, 180_000)));
   state.generatedAt = iso(now); state.sources = derived.sources;
-  return state;
-}
-
-// More than one delivery batch waiting is a backlog: the receiver is away or
-// behind. It acts on the newest state of an issue, so only the newest waiting
-// event of each issue is kept. Otherwise a receiver that returns is handed days
-// of faults that are long over, hours before the events that say so.
-//
-// The newest event is always kept, an ending included, even for an issue the
-// receiver may never have heard of: an earlier event can have been accepted
-// with its acknowledgement lost, and then only the ending closes it there. An
-// ending the receiver did not need is a record it files and ignores.
-export const BACKLOG_EVENTS = 50;
-export function compactBacklog(state) {
-  const outbox = state.outbox || [];
-  if (outbox.length <= BACKLOG_EVENTS) return state;
-  const last = new Map();
-  for (const e of outbox) last.set(e.issue?.id, e);
-  state.outbox = outbox.filter((e) => last.get(e.issue?.id) === e);
   return state;
 }
 
@@ -692,15 +674,3 @@ export function apiAuthorized(header, token) {
 export function loadIncidentState(dataDir) { return readJSON(join(dataDir, 'incidents', 'state.json')); }
 export function saveIncidentState(dataDir, state) { writeAtomic(join(dataDir, 'incidents', 'state.json'), JSON.stringify(state), 0o600); }
 export function readSecret(path) { return path ? readFileSync(path, 'utf8').trim() : null; }
-export function signedHeaders(body, secret, now = Date.now()) {
-  const timestamp = String(Math.floor(now / 1000));
-  return { 'Content-Type': 'application/json', 'X-Dash-Timestamp': timestamp, 'X-Dash-Signature': createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex') };
-}
-export function validateDestination(value) {
-  const url = new URL(value);
-  if (typeof value !== 'string' || !/^https:\/\/[a-z0-9-]+\.[a-z0-9-]+\.ts\.net(?::(?:443|8444))?\/v1\/events$/.test(value)
-    || url.protocol !== 'https:' || !/^[a-z0-9-]+\.[a-z0-9-]+\.ts\.net$/.test(url.hostname)
-    || !['', '443', '8444'].includes(url.port) || url.username || url.password || url.search || url.hash || url.pathname !== '/v1/events')
-    throw new Error('incident destination must be a Tailscale node FQDN HTTPS 443/8444 /v1/events endpoint');
-  return url.href;
-}

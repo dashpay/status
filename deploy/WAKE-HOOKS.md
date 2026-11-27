@@ -21,8 +21,9 @@ travels through this path. The console reads a delivery to check its signature. 
 parses one only for a hook that has `match` rules, only once the sender is
 authenticated, and only to decide whether this delivery wakes anyone.
 
-This is separate from the incident pipeline (`INCIDENTS.md`): nothing here is queued,
-retried, dispatched or acted on by the console.
+A wake carries no work: nothing here is queued, retried, dispatched or acted on by
+the console. What monitoring found is in `INCIDENTS.md`, and what a worker is woken
+for is in `TRIAGE.md`.
 
 ## The two requests
 
