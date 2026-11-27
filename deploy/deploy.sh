@@ -12,6 +12,9 @@
 #   DEPLOY_CHECK=1    pull and check the image, then stop: nothing is rolled
 # Pass the variables through sudo with -E.
 set -eu
+# The checkout below replaces this file while it runs, and a shell reads its
+# script as it goes. So all of it is one function, read whole before it starts.
+main() {
 src=/opt/dash-status/src
 project=dash-status-v2
 registry=${DEPLOY_REGISTRY:-ghcr.io/dashpay/status}
@@ -151,3 +154,5 @@ if [ -n "$previous" ] && [ "$previous" != "$new" ]; then
   roll
 fi
 exit 1
+}
+main "$@"
