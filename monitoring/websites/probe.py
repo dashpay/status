@@ -62,6 +62,7 @@ MAX_TOKENS = 4000
 SHAPE_HOPS = 3
 SAFE_PATH = re.compile(r'^/[A-Za-z0-9/_.~%-]{0,200}$')
 SAFE_HOST = re.compile(r'^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$')
+PLAIN_ERROR = re.compile(r'^[A-Za-z0-9 ().,-]{1,80}$')
 
 
 def stamp():
@@ -305,17 +306,25 @@ def check_page(site, spec, previous, fetch=fetch_hop, now=None):
     try:
         status, final_url, content_type, body = fetch_page('https://www.%s%s' % (site, spec['path']), site, fetch)
     except (ValueError, OSError, subprocess.TimeoutExpired) as e:
-        page['problems'] = [{'code': 'unreachable', 'detail': str(e) if isinstance(e, ValueError) else 'Probe could not complete'}]
+        # Our own sentences only: an error text that carries anything else is not passed on.
+        said = str(e) if isinstance(e, ValueError) and PLAIN_ERROR.match(str(e)) else 'Probe could not complete'
+        page['problems'] = [{'code': 'unreachable', 'detail': said}]
     else:
         page['status'] = status
-        if not 200 <= status < 300:
+        try:
+            judged = content_problems(spec, site, final_url, body) if 200 <= status < 300 and 'text/html' in content_type else None
+        except Exception:  # a page that cannot be judged is not in order, and must not cost the other pages their check
+            judged = False
+        if judged is False:
+            page['problems'] = [{'code': 'unreachable', 'detail': 'Page could not be read'}]
+        elif not 200 <= status < 300:
             page['problems'] = [{'code': 'status', 'detail': 'HTTP %d' % status}]
-        elif 'text/html' not in content_type:
+        elif judged is None:
             page['reachable'] = True
             page['problems'] = [{'code': 'not_html'}]
         else:
             page['reachable'] = True
-            problems, tokens = content_problems(spec, site, final_url, body)
+            problems, tokens = judged
             baseline, changed_since = keep.get('baseline'), keep.pop('changedSince', None)
             if baseline:
                 page['similarity'] = round(alike(tokens, baseline), 3)
@@ -393,16 +402,25 @@ def collect(output):
             state = json.loads(state_file.read_text())
         except (OSError, ValueError):
             state = {}
-        shape, state = check_pages(state)
-        write_private(state_file, state)
+        failed = None
+        try:
+            shape, state = check_pages(state)
+            write_private(state_file, state)
+        except Exception as e:
+            # The timings are still written. The page checks keep their last
+            # result and its time, so that they go stale and are filed as stale:
+            # leaving them out would read as a collector that checks no pages.
+            failed, shape = e, previous.get('shape') if isinstance(previous, dict) else None
         report = dict(schemaVersion=1, generatedAt=stamp(), intervalSeconds=INTERVAL,
-                      location='AWS us-west-2 · Oregon · status host', sites=sites, shape=shape)
+                      location='AWS us-west-2 · Oregon · status host', sites=sites, **({'shape': shape} if isinstance(shape, dict) else {}))
         temporary = output.with_suffix('.tmp')
         temporary.write_text(json.dumps(report, separators=(',', ':')))
         temporary.chmod(0o644)
         os.replace(temporary, output)
         print(json.dumps({'generatedAt': report['generatedAt'], 'sites': [{'site': s['site'], 'ok': s['latest']['ok'], 'ttfbMs': s['latest'].get('ttfbMs'), 'error': s['latest'].get('error')} for s in sites],
-                          'pages': {'checked': len(shape['pages']), 'wrong': {p['path']: [x['code'] for x in p['problems']] for p in shape['pages'] if not p['ok']}}}))
+                          'pages': {'failed': type(failed).__name__} if failed else {'checked': len(shape['pages']), 'wrong': {p['path']: [x['code'] for x in p['problems']] for p in shape['pages'] if not p['ok']}}}))
+        if failed:
+            raise failed  # the unit fails and the journal has the trace
 
 
 if __name__ == '__main__':

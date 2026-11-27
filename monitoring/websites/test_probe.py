@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 import unittest
 
@@ -208,8 +209,56 @@ class PageCheckTests(unittest.TestCase):
         self.assertEqual(len(p.check_pages('nonsense', fetch=fetch, now=1_800_000_000)[0]['pages']), len(p.SHAPE_PAGES))
 
 
+    def test_a_page_that_cannot_be_judged_is_not_in_order_and_costs_no_other_page(self):
+        real = p.content_problems
+
+        def judge(spec, *rest):
+            if spec['path'] == '/blog/':
+                raise RuntimeError('<b>page text</b>')
+            return real(spec, *rest)
+        p.content_problems = judge
+        try:
+            shape, _ = p.check_pages({}, fetch=serve(), now=1_800_000_000)
+        finally:
+            p.content_problems = real
+        blog = next(x for x in shape['pages'] if x['path'] == '/blog/')
+        self.assertEqual((blog['ok'], blog['reachable'], blog['problems']), (False, False, [{'code': 'unreachable', 'detail': 'Page could not be read'}]))
+        self.assertEqual(len(shape['pages']), len(p.SHAPE_PAGES))
+        self.assertTrue(next(x for x in shape['pages'] if x['path'] == '/download/')['ok'])
+
+    def test_an_error_text_that_is_not_one_of_ours_is_not_passed_on(self):
+        def fetch(url, _):
+            raise ValueError('Invalid URL <script>alert(1)</script>')
+        page, _ = p.check_page('dash.org', DOWNLOAD, None, fetch, 1_800_000_000)
+        self.assertEqual(page['problems'], [{'code': 'unreachable', 'detail': 'Probe could not complete'}])
+
+    def test_page_checks_that_crash_keep_their_last_result_and_the_timings_are_still_written(self):
+        import tempfile
+        real = p.probe, p.check_pages
+        p.probe = lambda site: {'site': site, 'at': p.stamp(), 'ok': True, 'ttfbMs': 1.0, 'totalMs': 2.0}
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                output = p.Path(directory) / 'report.json'
+                p.check_pages = lambda state: ({'at': '2026-11-27T18:00:00+00:00', 'pages': [{'path': '/', 'ok': True, 'problems': []}]}, {'schemaVersion': 1, 'pages': {}})
+                p.collect(output)
+                first = json.loads(output.read_text())
+                self.assertEqual(first['shape']['at'], '2026-11-27T18:00:00+00:00')
+                self.assertEqual((p.Path(directory) / 'shape-state.json').stat().st_mode & 0o777, 0o600)
+
+                def crash(state):
+                    raise RuntimeError('bug')
+                p.check_pages = crash
+                with self.assertRaises(RuntimeError):
+                    p.collect(output)
+                second = json.loads(output.read_text())
+                self.assertEqual(second['shape'], first['shape'])
+                self.assertGreater(second['generatedAt'], first['generatedAt'])
+                self.assertEqual([len(s['history']) for s in second['sites']], [2, 2])
+        finally:
+            p.probe, p.check_pages = real
+
+
 def json_text(value):
-    import json
     return json.dumps(value)
 
 
