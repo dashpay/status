@@ -28,16 +28,27 @@ if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
 fi
 git fetch --quiet origin
 rev=$(git rev-parse --verify --quiet "${1:-origin/master}^{commit}") || { echo "unknown revision: ${1:-origin/master}" >&2; exit 2; }
-was=$(git rev-parse HEAD)
 image=${DEPLOY_IMAGE:-$registry:sha-$rev}
 echo "pulling $image"
-docker pull --quiet "$image" >/dev/null || {
+# An image that is already here will do when the registry cannot be reached:
+# going back to the revision before must not depend on it.
+docker pull --quiet "$image" >/dev/null || docker image inspect "$image" >/dev/null 2>&1 || {
   echo "cannot pull $image. Is the revision published (Actions, \"Publish image\")? If the package is private, this host needs: docker login ghcr.io" >&2; exit 1
 }
-built=$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')
+revision_of() { docker image inspect "$1" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true; }
+built=$(revision_of "$image")
 [ "$built" = "$rev" ] || { echo "$image was built from ${built:-an unnamed revision}, not from $rev" >&2; exit 1; }
 new=$(docker image inspect "$image" --format '{{.Id}}')
 previous=$(docker image inspect dash-status:current --format '{{.Id}}' 2>/dev/null || true)
+# What a failed rollout goes back to: the image that is current now. When that
+# already is the new one (a second run after a failed one, or a full rollout
+# after a web-only one) it is the image kept from before. Its compose files are
+# those of the revision it was built from, not whatever the checkout holds.
+back=$previous
+if [ "$back" = "$new" ]; then back=$(docker image inspect dash-status:previous --format '{{.Id}}' 2>/dev/null || true); fi
+if [ "$back" = "$new" ]; then back=; fi
+was=$([ -z "$back" ] || revision_of "$back")
+git cat-file -e "${was:-none}^{commit}" 2>/dev/null || was=$(git rev-parse HEAD)
 
 # The engine is part of the image. Say so when it changes: plans prepared with
 # the old one keep their own copy, but everything new uses this one.
@@ -120,38 +131,52 @@ healthy() {
     [ -n "$only" ] || [ "$(docker inspect --format '{{.Image}}' "$id")" = "$new" ] || return 1
   done
 }
-record() { printf '%s %s %s image=%s previous=%s only=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$rev" "$new" "${previous:-none}" "${only:-all}" >> /var/log/dash-status-deploys.log; }
+# The log is a convenience: a disk too full to take a line must not stop a rollback.
+record() { printf '%s %s %s image=%s previous=%s only=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$rev" "$new" "${previous:-none}" "${only:-all}" >> /var/log/dash-status-deploys.log 2>/dev/null || true; }
 
-git checkout --quiet --detach "$rev"
 if [ -n "$previous" ] && [ "$previous" != "$new" ]; then docker tag "$previous" dash-status:previous; fi
-docker tag "$image" dash-status:current
-roll
-# A container reports healthy after its first check, half a minute in.
-for _ in $(seq 1 75); do
-  if healthy; then
-    echo "healthy on ${rev}"; compose ps --format '{{.Service}} {{.Status}}'
-    record deployed
-    # The registry has every published revision, so only two images are kept
-    # here: the running one and the one before it, for the rollback below and
-    # for a registry that cannot be reached. Each is about 370 MB, and a full
-    # disk fails the next pull. Only this console's own tags are removed: the
-    # host may hold other people's images. A tag whose image a container still
-    # runs is refused by Docker and stays.
-    for ref in $(docker images --format '{{.Repository}}:{{.Tag}}' dash-status; docker images --format '{{.Repository}}:{{.Tag}}' "$registry"); do
-      case "$ref" in dash-status:current|dash-status:previous|"$image"|*":<none>") continue ;; esac
-      docker rmi "$ref" >/dev/null 2>&1 || true
-    done
-    exit 0
-  fi
-  sleep 2
-done
-echo "not healthy on ${rev}; rolling back" >&2
-compose ps --format '{{.Service}} {{.Status}}' >&2 || true
+# From here on a failure of any step is a failed rollout and is rolled back,
+# whether a command fails or the stack does not come up healthy.
+ok=
+if git checkout --quiet --detach "$rev" && docker tag "$image" dash-status:current && roll; then
+  # A container reports healthy after its first check, half a minute in.
+  for _ in $(seq 1 75); do
+    if healthy; then ok=1; break; fi
+    sleep 2
+  done
+fi
+if [ -n "$ok" ]; then
+  echo "healthy on ${rev}"; compose ps --format '{{.Service}} {{.Status}}' || true
+  record deployed
+  # The registry has every published revision, so two images are kept here: the
+  # running one and the one before it, for the rollback below and for a
+  # registry that cannot be reached. Each is about 400 MB, and a full disk
+  # fails the next pull. Every other tag of this console is removed, and an
+  # image goes with its last tag. Images are told apart by id, not by name: one
+  # that is kept keeps all its names, so none is left behind without a name.
+  # Other people's images are not touched, nor is one a container still uses.
+  kept=$(docker image inspect dash-status:previous --format '{{.Id}}' 2>/dev/null || true)
+  used=" $(docker ps -aq | xargs -r docker inspect --format '{{.Image}}' 2>/dev/null | tr '\n' ' ')"
+  for row in $(docker images --no-trunc --format '{{.ID}}|{{.Repository}}:{{.Tag}}' dash-status; docker images --no-trunc --format '{{.ID}}|{{.Repository}}:{{.Tag}}' "$registry"); do
+    id=${row%%|*}; ref=${row#*|}
+    case "$ref" in *":<none>") continue ;; esac
+    if [ "$id" = "$new" ] || [ "$id" = "$kept" ]; then continue; fi
+    case "$used" in *" $id "*) continue ;; esac
+    docker rmi "$ref" >/dev/null 2>&1 || true
+  done
+  exit 0
+fi
+set +e
+echo "the rollout to ${rev} failed or is not healthy; going back" >&2
+compose ps --format '{{.Service}} {{.Status}}' >&2
 record failed
-if [ -n "$previous" ] && [ "$previous" != "$new" ]; then
-  docker tag "$previous" dash-status:current
+if [ -n "$back" ]; then
+  docker tag "$back" dash-status:current
   git checkout --quiet --detach "$was"
-  roll
+  if roll; then echo "back on ${was}; check that it is healthy" >&2
+  else echo "GOING BACK FAILED TOO: dash-status:current is the image from before, the checkout is at $(git rev-parse --short HEAD); bring the stack up by hand" >&2; fi
+else
+  echo "there is no image from before to go back to" >&2
 fi
 exit 1
 }

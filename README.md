@@ -254,6 +254,16 @@ On the status host:
 sudo /opt/dash-status/src/deploy/deploy.sh             # origin/master
 sudo /opt/dash-status/src/deploy/deploy.sh <revision>  # any published revision; this is also the rollback
 DEPLOY_ONLY=web sudo -E /opt/dash-status/src/deploy/deploy.sh   # web and the key helper only
+DEPLOY_CHECK=1 sudo -E /opt/dash-status/src/deploy/deploy.sh    # pull and check the image, roll nothing
+```
+
+The script that runs is the one in the host's checkout, which is the revision
+deployed last. A host whose checkout is older than this script has to take it
+from the revision being deployed, once:
+
+```sh
+cd /opt/dash-status/src && sudo git fetch origin
+sudo git show origin/master:deploy/deploy.sh > /tmp/deploy.sh && sudo sh /tmp/deploy.sh
 ```
 
 The script pulls the image, checks that it was built from that revision, moves

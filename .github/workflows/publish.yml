@@ -10,7 +10,7 @@ name: Publish image
 # of the ref>, and a deploy has to name it (DEPLOY_IMAGE).
 on:
   push:
-    branches: [master, ci/publish-image]
+    branches: [master]
   workflow_dispatch:
     inputs:
       dashnet_ref:
