@@ -1,0 +1,27 @@
+name: Build and smoke-test the image
+description: >-
+  Builds the image of the checked-out revision as dash-status:ci, with the
+  dashnet commit pinned in deploy/dashnet.ref, and starts it once in web mode.
+inputs:
+  dashnet-ref:
+    description: Full dash-network-go commit; empty for the one in deploy/dashnet.ref
+    default: ''
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        DASHNET_REF_INPUT: ${{ inputs.dashnet-ref }}
+      run: |
+        set -euo pipefail
+        dashnet=${DASHNET_REF_INPUT:-$(tr -d '[:space:]' < deploy/dashnet.ref)}
+        # A branch name here would make two builds of one revision differ.
+        [[ $dashnet =~ ^[0-9a-f]{40}$ ]] || { echo "the dashnet ref must be a full commit, not '$dashnet'" >&2; exit 1; }
+        docker build --pull --build-arg "RELEASE_REVISION=$GITHUB_SHA" --build-arg "DASHNET_REF=$dashnet" -t dash-status:ci .
+        docker run --rm --entrypoint dashnet dash-status:ci version | grep -F "$dashnet"
+        docker run --rm --entrypoint sh dash-status:ci -c 'test -s /etc/ssl/certs/ca-certificates.crt'
+        id=$(docker run -d -e STATUS_MODE=web -e STATUS_DATA_DIR=/tmp/data -e PUBLIC_ORIGIN=https://status.example -p 127.0.0.1:3001:3001 dash-status:ci)
+        for i in $(seq 1 30); do curl -fsS http://127.0.0.1:3001/api/health && break; sleep 1; done
+        curl -fsS http://127.0.0.1:3001/api/overview | grep -q '"testnet"'
+        curl -fsS http://127.0.0.1:3001/ | grep -q '<div id="root">'
+        docker rm -f "$id"
