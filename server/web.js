@@ -49,7 +49,7 @@ export function ttlCache(clock, ttl = 15_000) {
 }
 
 export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, clock = Date.now, ciGithub = null, ciQueue = {}, mainnetReportToken = process.env.MAINNET_REPORT_TOKEN, keyReader = requestDevnetKeys, keySocket = process.env.DEVNET_KEYS_SOCKET, hooksDir = process.env.WAKE_HOOKS_DIR, hookWaitMs,
-  triageWorkersFile = process.env.TRIAGE_WORKERS_FILE, triageHook = process.env.TRIAGE_HOOK || 'remediation' } = {}) {
+  triageWorkersFile = process.env.TRIAGE_WORKERS_FILE, triageHook = process.env.TRIAGE_HOOK || 'remediation', triageSettleMs } = {}) {
   const settingsPath = join(dataDir, 'settings.json');
   const dirs = { state: join(dataDir, 'state'), requests: join(dataDir, 'requests'), ops: join(dataDir, 'ops') };
   for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
@@ -71,7 +71,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   } });
   // Triage of what monitoring reports (server/triage.js). A new incident wakes
   // the worker through a console hook; a change refreshes the page.
-  const triage = createTriage({ dataDir, clock, hooks, hook: triageHook, workersFile: triageWorkersFile, onChange: () => {
+  const triage = createTriage({ dataDir, clock, hooks, hook: triageHook, workersFile: triageWorkersFile, ...(triageSettleMs === undefined ? {} : { settleMs: triageSettleMs }), onChange: () => {
     clearTimeout(debounce.get('triage'));
     debounce.set('triage', setTimeout(() => push('remediation', { at: new Date(clock()).toISOString() }), 300));
   } });

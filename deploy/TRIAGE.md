@@ -18,6 +18,8 @@ What is new is grouped into **incidents**: one per network, CI host, repository 
 
 A **known entry** is a reason and a list of patterns. A pattern names issues by domain, scope, target and code (`*` for any run of characters), optionally by CI job name, and has a severity ceiling: the same fault grown worse than it was when filed is new again. A pattern must name a scope or a target at least in part, or one code written out, so a whole domain cannot be filed away in one line. An entry lapses when nothing has matched it for a day, unless it is kept ("keep after it recovers"). An end date removes it on that date, kept or not.
 
+**A fault counts once it has lasted.** A new issue becomes part of an incident only when monitoring has seen it for three minutes without a break (`TRIAGE_SETTLE_SECONDS`, default 180: three looks), and a higher severity counts only once it has held that long. A probe that fails for one sample, or a host that reads critical for one, opens nothing, revises nothing and wakes nobody. Such issues are counted apart (`counts.settling`) and listed nowhere. A fault that belongs to an open incident and comes back needs no second wait.
+
 Nothing moves while monitoring is stale: no incident opens, ends or wakes anybody on an old list.
 
 ## The worker

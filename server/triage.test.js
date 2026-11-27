@@ -130,6 +130,49 @@ test('no more than a fixed number of incidents is open at once, and the rest is 
   assert.deepEqual([t.episodes.map((e) => e.id).join() === ids, t.unopened], [true, 3]);
 });
 
+test('a fault counts once it has lasted: one failed sample opens nothing, and one critical sample revises nothing', () => {
+  const SETTLE = 180_000, probe = issue('network', 'mainnet', 'Quorums · fresh Core comparison', 'endpoint_failed');
+  // One sample, gone on the next look: no incident, nothing to wake for.
+  let t = advance(null, sort([probe], []), T0, SETTLE);
+  assert.deepEqual([t.episodes.length, unattended(t.episodes), Object.keys(t.pending)], [0, [], [probe.id]]);
+  t = advance(t, sort([], []), T0 + 60_000, SETTLE);
+  assert.deepEqual([t.episodes.length, Object.keys(t.pending).length], [0, 0]);
+  // It fails again later: the count starts over, and a break starts it over too.
+  t = advance(t, sort([probe], []), T0 + 600_000, SETTLE);
+  t = advance(t, sort([probe], []), T0 + 600_000 + SETTLE - 1, SETTLE);
+  assert.equal(t.episodes.length, 0);
+  t = advance(t, sort([], []), T0 + 600_000 + SETTLE, SETTLE);
+  t = advance(t, sort([probe], []), T0 + 600_000 + SETTLE + 60_000, SETTLE);
+  assert.equal(t.episodes.length, 0, 'a break in between: not three minutes in a row');
+  // There for three minutes: an incident, opened then, and the worker is to look.
+  t = advance(t, sort([probe], []), T0 + 600_000 + 2 * SETTLE + 60_000, SETTLE);
+  assert.equal(t.episodes.length, 1);
+  const id = t.episodes[0].id, opened = T0 + 600_000 + 2 * SETTLE + 60_000;
+  assert.deepEqual([t.episodes[0].openedAt, t.episodes[0].severity, unattended(t.episodes)], [at(opened), 'warning', [`${id}:1`]]);
+  t.episodes[0].ledger = { state: 'needs_you', revision: 1 };
+  // Critical for one sample: the incident stays as it is. Critical for three minutes: revised.
+  t = advance(t, sort([{ ...probe, severity: 'critical' }], []), opened + 60_000, SETTLE);
+  t = advance(t, sort([probe], []), opened + 120_000, SETTLE);
+  assert.deepEqual([t.episodes[0].severity, t.episodes[0].revision], ['warning', 1]);
+  t = advance(t, sort([{ ...probe, severity: 'critical' }], []), opened + 180_000, SETTLE);
+  t = advance(t, sort([{ ...probe, severity: 'critical' }], []), opened + 180_000 + SETTLE - 1, SETTLE);
+  assert.equal(t.episodes[0].revision, 1);
+  t = advance(t, sort([{ ...probe, severity: 'critical' }], []), opened + 180_000 + SETTLE, SETTLE);
+  assert.deepEqual([t.episodes[0].severity, t.episodes[0].revision], ['critical', 2]);
+  // Something else there for one sample joins nothing; the incident's own fault needs no second wait when it comes back.
+  const other = issue('network', 'mainnet', 'DAPI', 'endpoint_failed');
+  t.episodes[0].ledger.revision = 2;
+  t = advance(t, sort([{ ...probe, severity: 'critical' }, other], []), opened + 600_000, SETTLE);
+  assert.deepEqual([t.episodes[0].revision, t.episodes[0].current], [2, [probe.id]]);
+  t = advance(t, sort([{ ...probe, severity: 'critical' }, other], []), opened + 600_000 + SETTLE, SETTLE);
+  assert.deepEqual([t.episodes[0].revision, t.episodes[0].current], [3, [probe.id, other.id]]);
+  // An incident from before there was a settle time: its faults have done their waiting.
+  const old = advance(null, sort([probe], []), T0);
+  delete old.pending;
+  const kept = advance(old, sort([probe], []), T0 + 60_000, SETTLE);
+  assert.deepEqual([kept.episodes[0].clearSince, kept.episodes[0].current, kept.episodes[0].revision], [null, [probe.id], 1]);
+});
+
 test('an incident ends an hour after its last fault cleared, or at once when it is filed', () => {
   const a = insight();
   let t = advance(null, sort([a], []), T0);
@@ -187,7 +230,7 @@ function fixture() {
   const state = (issues, generatedAt = now) => writeFileSync(join(dataDir, 'incidents', 'state.json'), JSON.stringify({ generatedAt: at(generatedAt), issues }));
   const fired = [], logged = [];
   const hooks = { fire: (name, event) => { fired.push([name, event]); return { seq: fired.length }; } };
-  const make = () => createTriage({ dataDir, clock: () => now, hooks, hook: 'remediation', workersFile: join(dir, 'workers.json'), log: (e) => logged.push(e) });
+  const make = (settleMs = 0) => createTriage({ dataDir, clock: () => now, hooks, hook: 'remediation', workersFile: join(dir, 'workers.json'), settleMs, log: (e) => logged.push(e) });
   return { root, dataDir, dir, fired, logged, state, make, tick: (ms) => { now += ms; return now; }, done: () => rmSync(root, { recursive: true, force: true }) };
 }
 
@@ -283,6 +326,31 @@ test('filing an incident as known takes it off the list, and what it causes can 
   } finally { f.done(); }
 });
 
+test('a fault that has not lasted is counted apart, wakes nobody, and is listed for nobody', () => {
+  const f = fixture();
+  try {
+    const a = { ...insight(), scope: 'testnet' };
+    f.state([a]);
+    const triage = f.make(180_000);
+    let view = triage.view({ full: true });
+    assert.deepEqual([view.incidents.length, view.counts.new, view.counts.settling, view.counts.faults, view.settleSeconds], [0, 0, 1, 1, 180]);
+    assert.deepEqual(triage.view({ full: false, visibleNetworks: ['testnet'] }).new, []);
+    assert.equal(f.fired.length, 0);
+    // Gone a minute later: it never was an incident.
+    f.tick(60_000); f.state([]);
+    view = triage.view({ full: true });
+    assert.deepEqual([view.incidents.length, view.counts.settling, f.fired.length, view.ended.length], [0, 0, 0, 0]);
+    // There for three minutes: now it is one.
+    f.tick(60_000); f.state([a]);
+    triage.refresh();
+    f.tick(180_000); f.state([a]);
+    view = triage.view({ full: true });
+    assert.deepEqual([view.incidents.length, view.counts.new, view.counts.settling, f.fired.length], [1, 1, 0, 1]);
+    // And the time survives a restart of the console.
+    assert.equal(f.make(180_000).view({ full: true }).incidents.length, 1);
+  } finally { f.done(); }
+});
+
 test('nothing moves on stale monitoring', () => {
   const f = fixture();
   try {
@@ -375,7 +443,7 @@ test('over HTTP: an administrator files, the worker reports, and nobody else rea
   writeFileSync(join(f.dataDir, 'incidents', 'state.json'), JSON.stringify({ generatedAt: new Date().toISOString(), issues: [a, waiting(1)] }));
   const origin = 'http://127.0.0.1';
   const github = async (url) => (url.includes('access_token') ? Response.json({ access_token: 't' }) : Response.json({ id: 9920871, login: 'someone' }));
-  const app = createWeb({ dataDir: f.dataDir, origin, hooksDir: f.dir, hookWaitMs: 5000, triageWorkersFile: join(f.dir, 'workers.json'), auth: { clientId: 'c', clientSecret: 's', fetcher: github }, fetcher: github });
+  const app = createWeb({ dataDir: f.dataDir, origin, hooksDir: f.dir, hookWaitMs: 5000, triageWorkersFile: join(f.dir, 'workers.json'), triageSettleMs: 0, auth: { clientId: 'c', clientSecret: 's', fetcher: github }, fetcher: github });
   const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   const base = `http://127.0.0.1:${server.address().port}`;
   let cookie = '';

@@ -46,6 +46,9 @@ export const MAX_OPEN = 500;
 const FRESH_MS = 180_000;
 // The answer for a visitor without an account is kept this long.
 const PUBLIC_MS = 5000;
+// How long a fault has to last before it counts (TRIAGE_SETTLE_SECONDS). Three
+// looks of monitoring: one failed sample of a probe is not an incident.
+export const SETTLE_SECONDS = 180;
 // What the worker may say about an incident.
 //   working    a repair run has started
 //   fixed      the worker changed something and believes the fault is repaired
@@ -145,16 +148,34 @@ export function sort(issues, entries) {
 // ends when the group has had none for QUIET_MS (recovered) or as soon as its
 // issues were filed as known (filed). Its severity is the worst it has had; it
 // is revised, and the worker woken again, only when it gets worse than that.
-export function advance(previous, sorted, now) {
+//
+// `settleMs`: a fault counts only once it has been there that long without a
+// break, and a higher severity only once it has held that long. A probe that
+// fails for one sample, or a host that reads critical for one, opens nothing,
+// revises nothing and wakes nobody. `pending` in the result is how long each
+// new issue has been seen, kept between looks.
+export function advance(previous, sorted, now, settleMs = 0) {
   const at = iso(now);
   const open = new Map((previous?.episodes || []).map((e) => [e.key, structuredClone(e)]));
   let ended = [...(previous?.ended || [])];
-  const groups = new Map();
+  // An issue that is already part of an open incident has done its waiting.
+  const since = new Map();
+  for (const e of open.values()) for (const id of e.issues) since.set(id, iso(0));
+  const pending = {}, groups = new Map();
   for (const s of sorted) {
     if (s.pile !== 'new') continue;
+    const id = s.issue.id, severity = Object.hasOwn(RANK, s.issue.severity) ? s.issue.severity : 'warning';
+    const p = previous?.pending?.[id] ? { ...previous.pending[id] } : { since: since.get(id) || at, level: severity };
+    if (rank(severity) > rank(p.level)) {
+      if (p.up?.level !== severity) p.up = { level: severity, since: at };
+      if (now - Date.parse(p.up.since) >= settleMs) { p.level = severity; delete p.up; }
+    } else { p.level = severity; delete p.up; }
+    pending[id] = p;
+    if (now - Date.parse(p.since) < settleMs) continue;
     const group = groupOf(s.issue), key = JSON.stringify(group.key);
     if (!groups.has(key)) groups.set(key, { group, items: [] });
-    groups.get(key).items.push(s.issue);
+    // The severity that has held, not the one of this moment.
+    groups.get(key).items.push({ ...s.issue, severity: p.level });
   }
   let unopened = 0;
   for (const [key, { group, items }] of groups) {
@@ -195,7 +216,7 @@ export function advance(previous, sorted, now) {
     ended.push({ ...e, endedAt: filed ? at : e.clearSince, outcome: filed ? 'filed' : 'recovered' });
   }
   ended = ended.filter((e) => now - Date.parse(e.endedAt) <= ENDED_KEEP_MS).slice(-ENDED_MAX);
-  return { episodes: [...open.values()], ended, unopened };
+  return { episodes: [...open.values()], ended, unopened, pending };
 }
 
 // What an incident consists of, for telling "more of the same" from "something
@@ -242,6 +263,15 @@ const validLedger = (l) => (object(l) && STATES.includes(l.state) && Number.isSa
   ? { state: l.state, revision: l.revision, summary: str(l.summary).slice(0, 2000), slack: object(l.slack) ? { channel: str(l.slack.channel), ts: str(l.slack.ts) } : null,
     thread: str(l.thread).slice(0, 100) || null, by: str(l.by).slice(0, 39), at: time(l.at), since: time(l.since) } : null);
 const strings = (list) => (Array.isArray(list) ? list : []).filter((x) => typeof x === 'string').slice(-500);
+// How long each new issue has been seen: { <issue id>: { since, level, up? } }.
+function validPending(value) {
+  const out = {};
+  for (const [id, p] of Object.entries(object(value) ? value : {}).slice(0, 20_000)) {
+    if (!object(p) || !time(p.since) || !Object.hasOwn(RANK, p.level)) continue;
+    out[id] = { since: time(p.since), level: p.level, ...(object(p.up) && Object.hasOwn(RANK, p.up.level) && time(p.up.since) ? { up: { level: p.up.level, since: time(p.up.since) } } : {}) };
+  }
+  return out;
+}
 const validEpisode = (e) => (object(e) && /^[a-f0-9]{16}$/.test(e.id) && typeof e.key === 'string' && time(e.openedAt) && Number.isSafeInteger(e.revision)
   ? { id: e.id, key: e.key, title: str(e.title).slice(0, 300), kind: str(e.kind).slice(0, 40), openedAt: time(e.openedAt), severity: Object.hasOwn(RANK, e.severity) ? e.severity : 'warning', revision: e.revision,
     issues: strings(e.issues), things: strings(e.things), current: strings(e.current), clearSince: time(e.clearSince), ledger: validLedger(e.ledger),
@@ -275,7 +305,8 @@ function project(issue, full) {
 // on. Without one configured nothing is woken and the worker's own timer finds
 // the incident a little later.
 export function createTriage({ dataDir, clock = Date.now, hooks = null, hook = process.env.TRIAGE_HOOK || 'remediation', workersFile = process.env.TRIAGE_WORKERS_FILE,
-  log = (entry) => console.info(JSON.stringify(entry)), onChange = () => {} } = {}) {
+  settleMs = Number(process.env.TRIAGE_SETTLE_SECONDS ?? SETTLE_SECONDS) * 1000, log = (entry) => console.info(JSON.stringify(entry)), onChange = () => {} } = {}) {
+  if (!Number.isFinite(settleMs) || settleMs < 0 || settleMs > 3600_000) settleMs = SETTLE_SECONDS * 1000;
   const knownPath = join(dataDir, 'remediation-known.json'), triagePath = join(dataDir, 'remediation-triage.json');
   const loadKnown = () => (readJSON(knownPath)?.entries || []).map(validEntry).filter(Boolean).slice(0, MAX_ENTRIES);
   const saveKnown = (entries) => writeAtomic(knownPath, JSON.stringify({ schemaVersion: 1, entries }));
@@ -283,7 +314,7 @@ export function createTriage({ dataDir, clock = Date.now, hooks = null, hook = p
     const t = readJSON(triagePath);
     return { episodes: (t?.episodes || []).map(validEpisode).filter(Boolean), ended: (t?.ended || []).map(validEpisode).filter((e) => e?.endedAt),
       // As long as the list of open incidents can be (MAX_OPEN), so that none is forgotten and woken for twice.
-      unopened: Number.isSafeInteger(t?.unopened) && t.unopened > 0 ? t.unopened : 0, woken: (Array.isArray(t?.woken) ? t.woken : []).filter((x) => typeof x === 'string').slice(0, MAX_OPEN) };
+      unopened: Number.isSafeInteger(t?.unopened) && t.unopened > 0 ? t.unopened : 0, pending: validPending(t?.pending), woken: (Array.isArray(t?.woken) ? t.woken : []).filter((x) => typeof x === 'string').slice(0, MAX_OPEN) };
   };
   const saveTriage = (t) => writeAtomic(triagePath, JSON.stringify({ schemaVersion: 1, ...t }));
   const incidentState = () => readJSON(join(dataDir, 'incidents', 'state.json'));
@@ -315,7 +346,7 @@ export function createTriage({ dataDir, clock = Date.now, hooks = null, hook = p
       save('known', () => saveKnown(entries));
       for (const d of lapsed.dropped) log({ event: 'triage-known-lapsed', entry: d.id, why: d.why, at: iso(now) });
     }
-    const next = advance(before, sort(state.issues, entries), now);
+    const next = advance(before, sort(state.issues, entries), now, settleMs);
     const want = unattended(next.episodes), had = new Set(before.woken);
     const news = want.filter((w) => !had.has(w));
     // Kept: what is still unattended, so a restart does not wake for it twice.
@@ -343,7 +374,10 @@ export function createTriage({ dataDir, clock = Date.now, hooks = null, hook = p
     const state = { generatedAt }, fixing = (typeof dispatch === 'function' ? dispatch() : dispatch) === 'on' ? 'on' : 'off', operations = maintenance();
     const visible = new Set(visibleNetworks);
     const seen = sorted.filter((s) => full || s.issue.domain !== 'network' || visible.has(s.issue.scope));
-    const of = (pile) => seen.filter((s) => s.pile === pile);
+    // New, and not there for long enough yet to count: listed nowhere, counted on their own.
+    const waiting = new Set(Object.entries(triage.pending || {}).filter(([, p]) => now - Date.parse(p.since) < settleMs).map(([id]) => id));
+    const of = (pile) => seen.filter((s) => s.pile === pile && !(pile === 'new' && waiting.has(s.issue.id)));
+    const settling = seen.filter((s) => s.pile === 'new' && waiting.has(s.issue.id)).length;
     const byId = new Map(sorted.map((s) => [s.issue.id, s]));
     const stateOf = (e) => (e.ledger && e.ledger.revision >= e.revision ? e.ledger.state : e.ledger ? 'worse' : 'new');
     const incident = (e) => {
@@ -364,7 +398,8 @@ export function createTriage({ dataDir, clock = Date.now, hooks = null, hook = p
       maintenance: Object.entries(object(operations) ? operations : {}).filter(([name, v]) => v?.active === true && (full || visible.has(name)))
         .map(([network, v]) => ({ network, ...(full ? { operations: Array.isArray(v.operations) ? v.operations : [] } : {}) })),
       counts: { new: full ? count('new') + count('worse') : listing(of('new'), false).length, working: count('working'), fixed: count('fixed'), needsYou: count('needs_you'), noted: count('noted'),
-        known: of('known').length, expected: of('expected').length, held: of('held').length, review: of('review').length, faults: seen.length },
+        known: of('known').length, expected: of('expected').length, held: of('held').length, review: of('review').length, settling, faults: seen.length },
+      settleSeconds: Math.round(settleMs / 1000),
       incidents, ...(full ? {} : { new: listing(of('new'), false) }),
       known, knownOpen: full ? undefined : listing([...of('known'), ...of('expected')], false),
       held: listing(of('held'), full), review: listing(of('review'), full),
