@@ -281,32 +281,40 @@ test('issue API is additive, fails visibly when stale, and limits private detail
     mkdirSync(join(w.dataDir, 'incidents'), { recursive: true });
     const issues = [{ id: 'a'.repeat(24), domain: 'network', scope: 'testnet', target: 'PRIVATE-HOST', code: 'host_health', severity: 'critical', status: 'open', evidence: { key: 'PRIVATE-EVIDENCE' } },
       { id: 'b'.repeat(24), domain: 'network', scope: 'hidden-network', target: 'PRIVATE', code: 'host_health', severity: 'critical', status: 'open' }];
-    writeFileSync(join(w.dataDir, 'incidents', 'state.json'), JSON.stringify({ generatedAt: new Date().toISOString(), issues, sources: {}, outbox: [] }));
+    const state = { generatedAt: new Date().toISOString(), issues, sources: { 'network:testnet': { fresh: true } }, outbox: [] };
+    writeFileSync(join(w.dataDir, 'incidents', 'state.json'), JSON.stringify(state));
     const anonymous = await w.req('/api/issues'); assert.equal(anonymous.status, 200);
     const text = await anonymous.text(); assert.ok(!text.includes('PRIVATE')); assert.ok(!text.includes('hidden-network'));
+    assert.deepEqual(Object.keys(JSON.parse(text)).sort(), ['generatedAt', 'issues', 'schemaVersion', 'stale']);
     const invalid = await w.req('/api/issues', { headers: { authorization: 'Bearer invented' } });
     assert.ok(!(await invalid.text()).includes('PRIVATE'));
     await w.login(); const full = await (await w.req('/api/issues')).json();
-    assert.equal(full.issues[0].evidence.key, 'PRIVATE-EVIDENCE'); assert.equal(full.delivery.pending, 0);
+    assert.equal(full.issues[0].evidence.key, 'PRIVATE-EVIDENCE');
+    assert.deepEqual(Object.keys(full).sort(), ['delivery', 'generatedAt', 'issues', 'maintenance', 'schemaVersion', 'sources', 'stale']);
+    assert.deepEqual([full.issues, full.sources, full.delivery], [issues, state.sources, { configured: false, pending: 0, quarantined: 0 }]);
+    // A state the release that still sent events wrote: the answer does not repeat what it kept about its receiver.
+    writeFileSync(join(w.dataDir, 'incidents', 'state.json'), JSON.stringify({ ...state, outbox: [{ eventId: 'x:1', issue: issues[0] }], quarantined: [{ event: { issue: issues[0] } }],
+      delivery: { configured: true, attempts: 794, error: 'receiver HTTP 502', receiver: { control: { seq: 9, dispatch: 'on', clearSeq: 0 } } } }));
+    assert.deepEqual((await (await w.req('/api/issues')).json()).delivery, { configured: false, pending: 0, quarantined: 0 });
   } finally { w.close(); }
 });
 
-test('remediation board notes require administrator access', async () => {
+test('the case list keeps targets and details for administrators, and shows nothing a retired receiver left in the state', async () => {
   const w = await start();
   try {
     const at = new Date().toISOString();
     writeFileSync(join(w.dataDir, 'incidents', 'state.json'), JSON.stringify({ generatedAt: at, outbox: [],
-      issues: [{ id: 'a'.repeat(24), domain: 'network', scope: 'testnet', target: 'PRIVATE-HOST', code: 'host_health', severity: 'critical', status: 'open' }],
+      issues: [{ id: 'a'.repeat(24), domain: 'network', scope: 'testnet', target: 'PRIVATE-HOST', code: 'host_health', severity: 'critical', status: 'open', evidence: { reasons: ['PRIVATE-REASON'] } }],
       delivery: { receiver: { remediation: { schemaVersion: 1, generatedAt: at, enabled: true, cases: [
-        { issueId: 'a'.repeat(24), workerState: 'completed', lastResponse: { outcome: 'blocked', summary: 'PRIVATE-NOTE' } },
+        { issueId: 'a'.repeat(24), workerState: 'completed', lastResponse: { outcome: 'blocked', summary: 'RECEIVER-NOTE' } },
       ] } } } }));
     const anonymous = await w.req('/api/remediation'); assert.equal(anonymous.status, 200);
-    assert.doesNotMatch(await anonymous.text(), /PRIVATE/);
+    assert.doesNotMatch(await anonymous.text(), /PRIVATE|RECEIVER/);
     const invalid = await w.req('/api/remediation', { headers: { authorization: 'Bearer invented' } });
-    assert.doesNotMatch(await invalid.text(), /PRIVATE/);
-    await w.login(); const full = await (await w.req('/api/remediation')).json();
-    assert.equal(full.public, false); assert.equal(full.cases[0].summary, 'PRIVATE-NOTE');
-    assert.equal(full.cases[0].stage, 'blocked');
+    assert.doesNotMatch(await invalid.text(), /PRIVATE|RECEIVER/);
+    await w.login(); const response = await w.req('/api/remediation'), body = await response.text(), full = JSON.parse(body);
+    assert.deepEqual([full.public, full.cases[0].stage, full.cases[0].target, full.cases[0].detail], [false, 'open', 'PRIVATE-HOST', 'PRIVATE-REASON']);
+    assert.doesNotMatch(body, /RECEIVER/);
   } finally { w.close(); }
 });
 
@@ -369,45 +377,54 @@ test('key reader marks an absent or unreachable socket, and only that, as a serv
   await assert.rejects(requestDevnetKeys(join(tmpdir(), `absent-${process.pid}-keys.sock`), 'devnet-sakura', { id: 1 }), { code: 'key-service-down' });
 });
 
-test('remediation switch and queue clear are administrator-only, CSRF-protected and default to off', async () => {
+test('the repair switch is administrator-only, CSRF-protected, off by default, and triage answers with its file alone', async () => {
   const post = (w, path, body, csrf) => w.req(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body),
     headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(csrf ? { 'x-csrf-token': csrf } : {}) } });
-  const stored = (w) => JSON.parse(readFileSync(join(w.dataDir, 'remediation-control.json'), 'utf8'));
+  const file = (w) => join(w.dataDir, 'remediation-control.json');
+  const stored = (w) => JSON.parse(readFileSync(file(w), 'utf8'));
+  const fixing = async (w) => (await (await w.req('/api/remediation/triage')).json()).fixing;
   const w = await start();
   try {
     assert.equal((await post(w, '/api/remediation/dispatch', { enabled: true })).status, 401);
-    assert.equal((await post(w, '/api/remediation/clear')).status, 401);
+    assert.equal(await fixing(w), 'off', 'no file: off, also for a visitor without an account');
     const csrf = await w.login();
-    assert.equal((await (await w.req('/api/remediation')).json()).control.requested, 'off');
+    assert.deepEqual([await fixing(w), (await (await w.req('/api/remediation')).json()).control.requested], ['off', 'off']);
     assert.equal((await post(w, '/api/remediation/dispatch', { enabled: true })).status, 403, 'a session without the CSRF token is refused');
     assert.equal((await post(w, '/api/remediation/dispatch', { enabled: 'yes' }, csrf)).status, 400);
-    assert.equal((await post(w, '/api/remediation/dispatch', { enabled: true }, csrf)).status, 200);
-    assert.deepEqual([stored(w).seq, stored(w).dispatch, stored(w).updatedBy], [1, 'on', 'someone']);
-    assert.equal((await post(w, '/api/remediation/clear', undefined, csrf)).status, 200);
-    assert.deepEqual([stored(w).seq, stored(w).clearSeq, stored(w).dispatch], [2, 2, 'on']);
+    const switched = await post(w, '/api/remediation/dispatch', { enabled: true }, csrf);
+    assert.equal(switched.status, 200);
+    assert.deepEqual(Object.keys(stored(w)).sort(), ['clearSeq', 'dispatch', 'schemaVersion', 'seq', 'updatedAt', 'updatedBy']);
+    assert.deepEqual([stored(w).seq, stored(w).dispatch, stored(w).clearSeq, stored(w).updatedBy], [1, 'on', 0, 'someone']);
+    assert.deepEqual((await switched.json()).control, stored(w));
     const view = await (await w.req('/api/remediation')).json();
-    assert.deepEqual([view.control.requested, view.control.applied, view.control.changedBy], ['on', null, 'someone']);
-    assert.equal((await post(w, '/api/remediation/dispatch', { enabled: false }, csrf)).status, 200);
-    assert.equal(stored(w).dispatch, 'off');
-    // The file is lost while the worker is on at a sequence the new file is far below.
+    assert.deepEqual([await fixing(w), view.control.requested, view.control.changedBy], ['on', 'on', 'someone']);
+    // The retired receiver's last acknowledgement, kept in a state by the
+    // release that still asked it: a higher sequence, and it says off. It is
+    // not asked. The switch is on because its file says on.
     mkdirSync(join(w.dataDir, 'incidents'), { recursive: true });
-    writeFileSync(join(w.dataDir, 'incidents', 'state.json'), JSON.stringify({ generatedAt: new Date().toISOString(), issues: [], sources: {}, outbox: [],
-      delivery: { lastAckAt: new Date().toISOString(), receiver: { control: { seq: 9, dispatch: 'on', clearSeq: 4, localEnabled: true } } } }));
-    rmSync(join(w.dataDir, 'remediation-control.json'));
-    const lost = (await (await w.req('/api/remediation')).json()).control;
-    assert.deepEqual([lost.requested, lost.reset], ['off', true], 'the board shows OFF and says the setting was lost');
+    const left = (control) => writeFileSync(join(w.dataDir, 'incidents', 'state.json'), JSON.stringify({ generatedAt: new Date().toISOString(), issues: [], sources: {}, outbox: [],
+      delivery: { lastAckAt: new Date().toISOString(), receiver: { control } } }));
+    left({ seq: 9, dispatch: 'off', clearSeq: 4, localEnabled: true });
+    assert.deepEqual([await fixing(w), (await (await w.req('/api/remediation')).json()).control.requested], ['on', 'on']);
     assert.equal((await post(w, '/api/remediation/dispatch', { enabled: false }, csrf)).status, 200);
-    assert.deepEqual([stored(w).seq, stored(w).dispatch, stored(w).clearSeq], [11, 'off', 4], 'the command is numbered above the worker, and no clear rides along');
-    rmSync(join(w.dataDir, 'remediation-control.json'));
-    assert.equal((await post(w, '/api/remediation/clear', undefined, csrf)).status, 200);
-    assert.deepEqual([stored(w).seq, stored(w).dispatch, stored(w).clearSeq], [11, 'off', 11], 'a clear after the loss is not stale either, and does not switch on');
-    assert.equal((await (await w.req('/api/remediation')).json()).control.reset, false);
+    assert.deepEqual([stored(w).seq, stored(w).dispatch, stored(w).clearSeq, await fixing(w)], [2, 'off', 0, 'off'], 'numbered from the file, not from the receiver');
+    // And the other way round: the receiver last said on, the file says off, is lost, or is damaged. Off.
+    left({ seq: 9, dispatch: 'on', clearSeq: 4, localEnabled: true });
+    assert.equal(await fixing(w), 'off');
+    rmSync(file(w));
+    assert.deepEqual([await fixing(w), (await (await w.req('/api/remediation')).json()).control.requested], ['off', 'off'], 'a missing file is off');
+    for (const damaged of ['not json', JSON.stringify({ dispatch: 'on' }), JSON.stringify({ seq: 1, dispatch: 'on', clearSeq: 5 })]) {
+      writeFileSync(file(w), damaged);
+      assert.equal(await fixing(w), 'off', damaged);
+    }
+    assert.equal((await post(w, '/api/remediation/dispatch', { enabled: true }, csrf)).status, 200);
+    assert.deepEqual([stored(w).seq, stored(w).dispatch, await fixing(w)], [1, 'on', 'on'], 'a damaged file starts again from zero');
+    assert.equal((await post(w, '/api/remediation/clear', undefined, csrf)).status, 404, 'there is no queue to clear any more');
   } finally { w.close(); }
   const member = await start(42);
   try {
     const csrf = await member.login();
     assert.equal((await post(member, '/api/remediation/dispatch', { enabled: true }, csrf)).status, 403);
-    assert.equal((await post(member, '/api/remediation/clear', undefined, csrf)).status, 403);
     assert.equal((await (await member.req('/api/remediation')).json()).control.changedBy, undefined);
   } finally { member.close(); }
 });
@@ -588,7 +605,7 @@ test('API tokens operate networks only: no settings, access, tokens, remediation
     const refused = [
       ['PUT', '/api/settings', { settings }], ['PUT', '/api/access/583231', { login: 'octocat', role: 'admin' }], ['DELETE', '/api/access/9920871'],
       ['GET', '/api/tokens'], ['POST', '/api/tokens', { label: 'more', role: 'admin' }], ['DELETE', '/api/tokens/00000000'],
-      ['POST', '/api/remediation/dispatch', { enabled: true }], ['POST', '/api/remediation/clear'], ['POST', '/api/ci/reporters', { label: 'h' }],
+      ['POST', '/api/remediation/dispatch', { enabled: true }], ['POST', '/api/ci/reporters', { label: 'h' }],
       ['POST', '/api/networks/devnet-palmatum/keys'],
     ];
     for (const [method, path, body] of refused) {

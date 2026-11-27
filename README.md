@@ -295,38 +295,36 @@ role services and upgrade convergence. Probes are read-only: they never submit p
 New functional failures can expose old service problems hidden by homepage-only checks. Inspect the
 individual source and timestamps before changing the monitored service.
 
-## Machine-readable issues and incident response
+## Machine-readable issues and triage
 
 `GET /api/issues` aggregates network, CI and AWS issues, with a redacted public
-view and a scoped authenticated detail view. Optional durable delivery to an
-OpenClaw receiver uses tailnet-only HTTPS, HMAC authentication, deduplication and
-a serialized, owner-authorized repair worker. See [deployment, behavior and
-coverage limits](deploy/INCIDENTS.md). Retired Moutai is no longer a default network.
+view and a scoped authenticated detail view. An `incidents` sidecar derives them
+every minute; see [how they are derived, how a case ends and coverage
+limits](deploy/INCIDENTS.md). Triage sorts the open ones, groups what is new into
+incidents and wakes a worker for them; see [triage](deploy/TRIAGE.md). The console
+sends issues nowhere: the delivery to a repair receiver on another host was
+retired in November 2026. Retired Moutai is no longer a default network.
 
 ### Operation-aware remediation maintenance
 
-Confirmed/running mutating console operations automatically hold remediation for
+Confirmed/running mutating console operations automatically hold the faults of
 their managed Testnet/devnet network. Preparation/review and read-only doctor
 requests do not. Raw health stays visible; other networks, Mainnet, CI and AWS
-continue through the normal incident path. The Remediation page lists networks
-in maintenance even when no incident exists yet.
+are not held. The Remediation page lists networks in maintenance even when no
+incident exists yet.
 
-The producer suppresses new network events and holds already-queued outbox events
-without changing their immutable bytes. The broker refreshes the private issue
-snapshot immediately before dispatch and rejects suppressed/maintenance events,
-including events queued before the next producer cycle. The API reads operation
-records directly, not the collector's delayed/missing native journal field.
-Existing repair sessions are not forcibly killed; their usual live-operation
-ownership checks remain mandatory. A narrow operation-start/admission race is
-not a distributed lock.
+A held issue stays open and is marked as held: triage opens no incident for it
+and wakes nobody. The API and triage read operation records directly, not the
+collector's delayed/missing native journal field, so a hold shows at once and
+does not wait for the sidecar's next cycle. A worker already repairing
+something is not stopped; its own live-operation ownership checks remain
+mandatory. A narrow race between an operation starting and a worker being woken
+is not a distributed lock.
 
 Terminal operations release this hold; healthy recovery requires fresh
 post-maintenance measurements. Abandoned operation records expire after 35 minutes
 without a saved progress update, with an absolute 24-hour cap, so they cannot
 silence monitoring indefinitely. Manual maintenance/journal gates remain separate.
-
-Deployment requires both the status web/incident-worker changes and the broker
-refresh check. Merging this source does not deploy either component.
 
 ### API tokens for bots
 
@@ -451,13 +449,12 @@ the node solely to test persistence.
 An operator can set `remediation.excludedCiHosts` in the persisted `settings.json`
 to an array of exact CI reporter IDs (for example, `['strix-pasta']`, using JSON
 quotes in the actual file). This excludes host-scoped incidents and failed jobs
-from automated response and the remediation view without removing the reporter,
-CI history, resource observations, or CI page entry. Existing incidents remain
-recorded, not falsely resolved; unsent events are retained in quarantine with an
-explicit exclusion reason. The receiver's fresh-issue suppression gate prevents
-already-delivered events from starting repairs. Removing the ID re-enables
-admission after a fresh observation. This does not cancel an already-running
-response; settle that owner separately before changing its work.
+from triage and the remediation view without removing the reporter, CI history,
+resource observations, or CI page entry. Existing incidents remain recorded,
+not falsely resolved, and are left exactly as they are while the host is
+excluded. Removing the ID makes them count again after a fresh observation.
+This does not stop a worker that is already repairing something on the host;
+settle that separately before changing its work.
 
 ### CI jobs that are not CI faults
 

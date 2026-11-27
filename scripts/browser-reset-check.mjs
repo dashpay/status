@@ -80,7 +80,7 @@ try {
     mkdirSync(join(root,'incidents'),{recursive:true});
     writeFileSync(join(root,'incidents','state.json'),JSON.stringify({generatedAt:at,issues:[],outbox:[],sources:{}}));
     const snapshot = await (await page.request.get(origin+'/api/issues')).json();
-    assert.equal(snapshot.maintenance['devnet-sakura'].active,true,'broker snapshot reads operations without waiting for incident cycle');
+    assert.equal(snapshot.maintenance['devnet-sakura'].active,true,'the issues answer reads operations without waiting for incident cycle');
     await page.goto(origin+'/remediation');
     await page.getByText('Operation maintenance',{exact:true}).waitFor();
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));

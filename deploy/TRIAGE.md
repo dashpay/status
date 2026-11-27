@@ -48,7 +48,9 @@ The token is 32 to 128 characters of `A-Z a-z 0-9 _ -` and must not begin with `
 | `PATCH /api/remediation/known/<id>` | worker, administrator | "This follows from that": `{ "incident": "<id>" }` or `{ "covers": [patterns] }` puts more under an entry as expected. `reason` and `standing` can be changed by an administrator, and by the worker on entries it filed. The entry keeps who filed it and records who changed it last. |
 | `DELETE /api/remediation/known/<id>` | administrator | Remove an entry. The worker can file a thing away and cannot bring one back. |
 
-`fixing` in the answer is the administrator's switch on the Remediation page (`data/remediation-control.json`, off unless switched on). Off means the worker looks and announces and repairs nothing. The console does not enforce that: the worker reads it and keeps to it.
+`fixing` in the answer is the administrator's switch on the Remediation page. Off means the worker looks and announces and repairs nothing. The console does not enforce that: the worker reads it and keeps to it.
+
+The switch is the file `data/remediation-control.json` and nothing else: `POST /api/remediation/dispatch` with `{ "enabled": true | false }` (administrator session and CSRF token; an API token cannot use it) writes it, with who and when, and the next answer has the new `fixing`. A missing or damaged file is off. Until the repair receiver of the earlier pipeline was retired, the switch also had to be acknowledged by that receiver, and a file that was behind the receiver's last acknowledgement read as off. That check is gone: what the receiver last said is not consulted.
 
 "Fixed" is the worker's claim. Only monitoring ends an incident.
 
@@ -58,5 +60,6 @@ All under the data directory, written by the web process only.
 
 | File | What |
 |---|---|
+| `remediation-control.json` | The switch: `seq` (a counter of changes), `dispatch` (`on` or `off`), `updatedAt`, `updatedBy`, and `clearSeq`, which is unused and kept so that the release before the receiver was retired can still read the file. |
 | `remediation-known.json` | The known entries. |
 | `remediation-triage.json` | Open incidents with the worker's reports, those ended in the last week, and which ones the worker has been woken for. |

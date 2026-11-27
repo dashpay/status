@@ -29,8 +29,6 @@ jobs:
         run: python3 -m unittest discover -s agent -p 'test_explorer_chain.py'
       - name: Devnet key export from legacy and descriptor wallets
         run: python3 -m unittest discover -s agent -p 'test_devnet_keys.py'
-      - name: Incident receiver replay, authentication and worker safeguards
-        run: python3 -m unittest discover -s deploy/incident-broker -p 'test_*.py'
       - name: Mainnet service probes and one-notification paging
         run: python3 -m unittest discover -s deploy -p 'test_mainnet_services.py'
       - run: npm run lint

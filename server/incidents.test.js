@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { deriveIssues, reconcile, publicIssues, apiAuthorized, signedHeaders, validateDestination, loadIncidentState, saveIncidentState } from './incidents.js';
+import { fileURLToPath } from 'node:url';
+import { deriveIssues, reconcile, publicIssues, apiAuthorized, loadIncidentState, saveIncidentState } from './incidents.js';
 import { cycle } from './incident-service.js';
 import { recognizeActivity, SETTLE_MS } from './change-activity.js';
 import { DEFAULT_SETTINGS } from '../shared/settings.js';
@@ -13,11 +15,15 @@ const stamp = (ms) => new Date(ms).toISOString();
 const positive = (id, ms, extras = {}) => ({ issues: [], sources: { proof: { fresh: true, complete: true, observedAt: stamp(ms) } },
   checks: { [id]: { clear: true, sourceKey: 'proof', observedAt: stamp(ms), ...extras } } });
 
-test('stable event identity, restart persistence, recovery requires positive fresh complete evidence', () => {
+test('stable identity and revision, restart persistence, recovery requires positive fresh complete evidence', () => {
   let s = reconcile(null, { issues: [fault], sources: {} }, now);
-  assert.equal(s.outbox.length, 1); assert.equal(s.outbox[0].eventId, `${fault.id}:1`);
+  assert.deepEqual([s.issues[0].id, s.issues[0].revision, s.issues[0].lastEventAt], [fault.id, 1, at]);
+  assert.deepEqual(s.outbox, [], 'nothing waits to be sent; the list itself stays for the release that reads it');
   s = reconcile(JSON.parse(JSON.stringify(s)), { issues: [fault], sources: {} }, now + 60_000);
-  assert.equal(s.outbox.length, 1);
+  assert.equal(s.issues[0].revision, 1);
+  // A fault that only lasts is not revised, however long.
+  const lasting = reconcile(s, { issues: [fault], sources: {} }, now + 7 * 3600_000).issues[0];
+  assert.deepEqual([lasting.revision, lasting.lastEventAt, lasting.lastSeen], [1, at, stamp(now + 7 * 3600_000)]);
   for (const source of [undefined, { fresh: false, complete: true }, { fresh: true, complete: false }]) {
     s = reconcile(s, { issues: [], sources: { 'test-source': source } }, now + 90_000);
     assert.equal(s.issues[0].status, 'open');
@@ -25,9 +31,9 @@ test('stable event identity, restart persistence, recovery requires positive fre
   s = reconcile(s, { issues: [], sources: { 'test-source': { fresh: true, complete: true } } }, now + 120_000);
   assert.equal(s.issues[0].status, 'open', 'fresh source alone is not positive recovery');
   s = reconcile(s, positive(fault.id, now + 120_000), now + 120_000);
-  assert.equal(s.issues[0].status, 'resolved'); assert.equal(s.outbox.at(-1).eventId, `${fault.id}:2`);
+  assert.equal(s.issues[0].status, 'resolved'); assert.equal(s.issues[0].revision, 2);
   s = reconcile(s, { issues: [{ ...fault, observedAt: stamp(now + 180_000) }], sources: {} }, now + 180_000);
-  assert.equal(s.outbox.at(-1).transition, 'reopened'); assert.equal(s.outbox.at(-1).eventId, `${fault.id}:3`);
+  assert.deepEqual([s.issues[0].status, s.issues[0].revision, s.issues[0].firstSeen], ['open', 3, at], 'reopened: the same case, one revision on');
 });
 
 test('public issues never expose evidence, targets, raw summaries or private networks', () => {
@@ -53,60 +59,72 @@ test('partial AWS pagination errors prevent unsafe recovery and idle cleanup can
   assert.ok(!d.issues.some((i) => i.code === 'idle_volume'));
 });
 
-test('receiver URL cannot redirect evidence to an external URL or gateway control endpoint', () => {
-  const receiver = 'https://receiver.example-tailnet.ts.net';
-  assert.equal(validateDestination(`${receiver}:8444/v1/events`), `${receiver}:8444/v1/events`);
-  assert.equal(validateDestination(`${receiver}:443/v1/events`), `${receiver}/v1/events`);
-  assert.equal(validateDestination(`${receiver}/v1/events`), `${receiver}/v1/events`);
-  for (const url of ['https://example.org/v1/events', 'http://100.86.131.91:8789/v1/events', 'https://100.86.131.91/v1/events',
-    'http://receiver.example-tailnet.ts.net:8444/v1/events', 'https://receiver.example-tailnet.ts.net:8789/v1/events',
-    'https://receiver.ts.net:8444/v1/events', 'https://a.b.c.ts.net/v1/events', 'https://receiver.example-tailnet.ts.net.evil.org/v1/events',
-    'https://a:b@receiver.example-tailnet.ts.net:8444/v1/events', `${receiver}/hooks/agent`, `${receiver}/v1/events/`,
-    `${receiver}/v1/events?token=x`, `${receiver}/v1/events#fragment`, `${receiver}/v1/events?`, `${receiver}/v1/events#`,
-    'https://@receiver.example-tailnet.ts.net/v1/events', `${receiver}/hooks/../v1/events`]) assert.throws(() => validateDestination(url), url);
-  const a = signedHeaders('{}', 'secret', now), b = signedHeaders('{"a":1}', 'secret', now);
-  assert.notEqual(a['X-Dash-Signature'], b['X-Dash-Signature']);
-});
-
-test('outbox survives lost acknowledgement and drains only exact accepted events', async () => {
-  const dataDir = mkdtempSync(join(tmpdir(), 'incidents-'));
+const emptyCi = { summary: () => ({ reporters: [], hosts: [], runners: [], recent: [] }) };
+function dataDirFor(t, name) {
+  const dataDir = mkdtempSync(join(tmpdir(), name));
+  t.after(() => rmSync(dataDir, { recursive: true, force: true }));
   mkdirSync(join(dataDir, 'incidents'));
   writeFileSync(join(dataDir, 'settings.json'), JSON.stringify(DEFAULT_SETTINGS));
-  const ci = { summary: () => ({ reporters: [], hosts: [], runners: [], recent: [] }) };
-  const destination = 'https://receiver.example-tailnet.ts.net:8444/v1/events';
-  let received;
-  await cycle({ dataDir, ci, destination, secret: 'test-secret', now, fetcher: async (_, opts) => { received = JSON.parse(opts.body); throw new Error('connection lost after acceptance'); } });
-  const previous = loadIncidentState(dataDir);
-  assert.equal(previous.outbox.length, received.events.length); assert.ok(previous.outbox.length > 0);
-  await cycle({ dataDir, ci, destination, secret: 'test-secret', now: now + 60_000, fetcher: async (_, opts) => {
-    assert.equal(opts.redirect, 'error'); const next = JSON.parse(opts.body);
-    assert.deepEqual(next.events, received.events);
-    return Response.json({ accepted: next.events.map((e) => e.eventId), health: { status: 'ok' } });
-  } });
-  assert.equal(loadIncidentState(dataDir).outbox.length, 0);
-});
+  return dataDir;
+}
 
-test('oversized poison events cannot starve byte-bounded delivery and quarantine survives restart', async () => {
-  const dataDir = mkdtempSync(join(tmpdir(), 'incidents-size-'));
-  mkdirSync(join(dataDir, 'incidents'));
-  writeFileSync(join(dataDir, 'settings.json'), JSON.stringify(DEFAULT_SETTINGS));
-  const queued = Array.from({ length: 40 }, (_, n) => ({ schemaVersion: 1, eventId: `${'b'.repeat(24)}:${n + 1}`, issue: { ...fault, evidence: { text: 'x'.repeat(n === 0 ? 500_000 : 20_000) } } }));
-  saveIncidentState(dataDir, { schemaVersion: 1, issues: [], outbox: queued });
-  const params = { dataDir, ci: { summary: () => ({}) }, destination: 'https://receiver.example-tailnet.ts.net/v1/events', secret: 'test' };
-  const sent = [];
-  const fetcher = async (_, opts) => {
-    assert.ok(Buffer.byteLength(opts.body) < 512 * 1024);
-    const batch = JSON.parse(opts.body).events;
-    assert.ok(batch.length > 0);
-    sent.push(...batch.map((e) => e.eventId));
-    return Response.json({ accepted: batch.map((e) => e.eventId) });
-  };
-  for (let n = 0; n < 3; n++) await cycle({ ...params, now: now + n * 60_000, fetcher });
+test('a cycle derives and saves, and calls nobody', async (t) => {
+  const dataDir = dataDirFor(t, 'incidents-');
+  const called = t.mock.method(globalThis, 'fetch', async () => { throw new Error('the sidecar sends nothing'); });
+  const result = await cycle({ dataDir, ci: emptyCi, now });
   const state = loadIncidentState(dataDir);
-  assert.equal(state.quarantined.length, 1);
-  assert.equal(state.quarantined[0].event.eventId, queued[0].eventId);
-  assert.equal(state.outbox.length, 0);
-  assert.ok(queued.slice(1).every((e) => sent.includes(e.eventId)));
+  assert.equal(called.mock.callCount(), 0);
+  assert.ok(state.issues.length > 0 && state.issues.every((i) => i.status === 'open' && i.revision === 1));
+  assert.deepEqual(result, { active: state.issues.length });
+  assert.deepEqual([state.generatedAt, state.outbox, state.delivery, 'quarantined' in state], [at, [], { configured: false }, false]);
+});
+
+test('the first cycle over a state of the release that still sent events sheds them; cases keep their ids, revisions and times', async (t) => {
+  const dataDir = dataDirFor(t, 'incidents-shed-');
+  await cycle({ dataDir, ci: emptyCi, now: now - 6 * 86400_000 });
+  const before = loadIncidentState(dataDir);
+  // Nine days without a receiver, as that release left it: every case reminded
+  // every six hours, each reminder an event that waits; some events set aside;
+  // the receiver's last answer; the record of it not answering.
+  const waiting = (issue, revision) => ({ schemaVersion: 1, eventId: `${issue.id}:${revision}`, occurredAt: at, transition: 'reminder', issue: { ...issue, revision, evidence: { text: 'x'.repeat(1500) } } });
+  const gone = { id: 'f'.repeat(24), domain: 'ci', scope: 'github', target: 'dashpay/platform/7', code: 'queue_wait' };
+  const each = Math.ceil(4200 / before.issues.length);
+  const old = { ...before,
+    issues: before.issues.map((i) => ({ ...i, revision: each, lastEventAt: stamp(now - 3600_000) })),
+    revisionCounters: Object.fromEntries(before.issues.map((i) => [i.id, each])),
+    outbox: before.issues.flatMap((i) => Array.from({ length: each }, (_, n) => waiting(i, n + 1))),
+    quarantined: [{ event: waiting(before.issues[0], 3), at, reason: 'event exceeds delivery byte budget' }, { event: waiting(gone, 12), at, reason: 'owner-configured remediation exclusion' }],
+    delivery: { configured: true, attempts: 794, nextAttemptAt: stamp(now + 600_000), lastAttemptAt: at, lastAckAt: stamp(now - 9 * 86400_000), error: 'receiver HTTP 502',
+      receiver: { workerAt: (now - 9 * 86400_000) / 1000, control: { seq: 9, dispatch: 'on', clearSeq: 2 }, releaseRepositories: ['dashpay/platform'], remediation: { schemaVersion: 1, cases: before.issues.map((i) => ({ issueId: i.id, workerState: 'queued', pendingEvents: each })) } } },
+    stall: { since: stamp(now - 9 * 86400_000), notifiedAt: stamp(now - 9 * 86400_000), reasons: [{ code: 'receiver_unreachable', detail: 'x' }] } };
+  assert.ok(old.outbox.length > 4000);
+  saveIncidentState(dataDir, old);
+  const file = join(dataDir, 'incidents', 'state.json'), size = statSync(file).size;
+  await cycle({ dataDir, ci: emptyCi, now });
+  const after = loadIncidentState(dataDir);
+  assert.deepEqual([after.outbox, 'quarantined' in after, after.delivery, 'stall' in after], [[], false, { configured: false }, false]);
+  assert.ok(statSync(file).size < size / 50, 'the file is a fraction of what it was');
+  const kept = (s) => s.issues.map((i) => [i.id, i.revision, i.status, i.firstSeen, i.lastEventAt, i.resolvedAt]);
+  assert.deepEqual(kept(after), kept(old), 'no case is renumbered, reopened, ended or dated anew');
+  assert.ok(after.issues.every((i) => i.lastSeen === at && i.firstSeen === stamp(now - 6 * 86400_000)));
+  assert.deepEqual(after.revisionCounters, { ...old.revisionCounters, [gone.id]: 12 }, 'a revision remembered only in an event that was set aside is still counted from');
+  // The next change of a case is numbered from where it was.
+  const id = after.issues[0].id, next = reconcile(after, positive(id, now + 60_000), now + 60_000).issues.find((i) => i.id === id);
+  assert.deepEqual([next.status, next.revision], ['resolved', each + 1]);
+});
+
+test('the sidecar starts and keeps a state with the receiver\'s settings still in its environment', async (t) => {
+  const dataDir = dataDirFor(t, 'incidents-start-');
+  const index = fileURLToPath(new URL('./index.js', import.meta.url));
+  const child = spawn(process.execPath, [index], { stdio: 'ignore', env: { ...process.env, STATUS_MODE: 'incidents', STATUS_DATA_DIR: dataDir,
+    INCIDENT_WEBHOOK_URL: 'https://receiver.example-tailnet.ts.net:8444/v1/events', INCIDENT_HMAC_FILE: join(dataDir, 'absent-hmac'), INCIDENT_ALERT_WEBHOOK_FILE: join(dataDir, 'absent-alert') } });
+  t.after(() => child.kill());
+  const file = join(dataDir, 'incidents', 'state.json');
+  for (let n = 0; n < 150 && !existsSync(file) && child.exitCode === null; n++) await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(child.exitCode, null, 'still running');
+  const state = loadIncidentState(dataDir);
+  assert.ok(Number.isFinite(Date.parse(state.generatedAt)) && state.issues.length > 0);
+  assert.deepEqual([state.outbox, state.delivery], [[], { configured: false }]);
 });
 
 const settingsFor = (overrides = {}) => ({ ...structuredClone(DEFAULT_SETTINGS), networks: [{
@@ -131,31 +149,32 @@ test('same or older positive measurement cannot recover or reopen; future clocks
   const recovered = reconcile(initial, positive(fault.id, now + 30_000), now + 30_000);
   const replayed = reconcile(recovered, { issues: [fault] }, now + 60_000);
   assert.equal(replayed.issues[0].status, 'resolved');
-  assert.equal(replayed.outbox.length, 2);
+  assert.equal(replayed.issues[0].revision, 2);
 });
 
-test('revisions survive issue display retention, drained outbox and process restart', () => {
+test('revisions survive issue display retention and process restart, and go on from an event an earlier release left waiting', () => {
   let s = reconcile(null, { issues: [fault] }, now);
   s = reconcile(s, positive(fault.id, now + 1000), now + 1000);
-  s.outbox = [];
   s = reconcile(JSON.parse(JSON.stringify(s)), { issues: [] }, now + 31 * 86400_000);
   assert.equal(s.issues.length, 0);
   s = reconcile(s, { issues: [{ ...fault, observedAt: stamp(now + 32 * 86400_000) }] }, now + 32 * 86400_000);
-  assert.equal(s.outbox[0].eventId, `${fault.id}:3`);
-  const migrated = reconcile({ schemaVersion: 1, issues: [], outbox: [{ issue: { ...fault, revision: 9 } }] }, { issues: [fault] }, now);
-  assert.equal(migrated.outbox.at(-1).eventId, `${fault.id}:10`);
+  assert.equal(s.issues[0].revision, 3);
+  for (const left of [{ outbox: [{ issue: { ...fault, revision: 9 } }] }, { outbox: [], quarantined: [{ event: { issue: { ...fault, revision: 9 } } }] }]) {
+    const migrated = reconcile({ schemaVersion: 1, issues: [], ...left }, { issues: [fault] }, now);
+    assert.deepEqual([migrated.issues[0].revision, migrated.outbox, migrated.quarantined], [10, [], undefined]);
+  }
 });
 
-test('maintenance suppresses events, retains active incidents, and requires post-maintenance proof', () => {
+test('maintenance holds a case unrevised, retains active incidents, and requires post-maintenance proof', () => {
   const failing = network(now, [host(now, { services: [{ service: 'indexer', ok: false }] })]);
   let s = reconcile(null, deriveNetwork(now, failing), now);
   const id = byCode(s, 'host_health')[0].id;
-  const count = s.outbox.length;
+  const count = s.issues.find((i) => i.id === id).revision;
   const paused = network(now + 60_000, [host(now + 60_000, { services: [{ service: 'indexer', ok: true }] })]);
   s = reconcile(s, deriveNetwork(now + 60_000, paused, { lifecycle: { status: 'services' } }), now + 60_000);
   assert.equal(s.issues.find((i) => i.id === id).status, 'open');
   assert.equal(s.issues.find((i) => i.id === id).suppressed, true);
-  assert.equal(s.outbox.length, count);
+  assert.equal(s.issues.find((i) => i.id === id).revision, count);
   s = reconcile(s, deriveNetwork(now + 90_000, paused), now + 90_000);
   assert.equal(s.issues.find((i) => i.id === id).status, 'open', 'a sample measured during maintenance is not recovery');
   const after = network(now + 120_000, [host(now + 120_000, { services: [{ service: 'indexer', ok: true }] })]);
@@ -163,12 +182,12 @@ test('maintenance suppresses events, retains active incidents, and requires post
   assert.equal(s.issues.find((i) => i.id === id).status, 'resolved');
   const muted = reconcile(null, deriveNetwork(now, failing, { lifecycle: { status: 'creating' } }), now);
   assert.equal(byCode(muted, 'host_health')[0].status, 'open');
-  assert.equal(muted.outbox.filter((e) => e.issue.domain === 'network').length, 0);
+  assert.ok(muted.issues.filter((i) => i.domain === 'network').every((i) => i.revision === undefined), 'a case held from its first sight has no revision yet');
   const active = reconcile(muted, deriveNetwork(now + 60_000, network(now + 60_000, [host(now + 60_000, failing.hosts[0].probe.data)])), now + 60_000);
-  assert.equal(active.outbox.filter((e) => e.issue.code === 'host_health').length, 1);
+  assert.equal(byCode(active, 'host_health')[0].revision, 1);
 });
 
-test('a recognised reboot holds the host, its endpoint and its instance; a fault that outlives the settle window is queued', () => {
+test('a recognised reboot holds the host, its endpoint and its instance; a fault that outlives the settle window is released', () => {
   const settings = settingsFor();
   const step = (ms, bootedAt, previous) => {
     const state = network(ms, [host(ms, { services: [{ service: 'indexer', ok: false }], system: { uptime: (ms - bootedAt) / 1000 } })], [{ label: 'API', kind: 'http', ok: false }]);
@@ -180,7 +199,8 @@ test('a recognised reboot holds the host, its endpoint and its instance; a fault
   const first = step(now, now - 120_000);
   assert.equal(first.activity.hosts['testnet/i-one'].held, true);
   let s = reconcile(null, first.derived, now);
-  const emitted = (code, target) => s.outbox.filter((e) => e.issue.code === code && (!target || e.issue.target === target)).length;
+  // Released from every hold at least once: such a case has a revision.
+  const emitted = (code, target) => s.issues.filter((i) => i.revision && i.code === code && (!target || i.target === target)).length;
   assert.equal(emitted('host_health'), 0); assert.equal(emitted('endpoint_failed'), 0);
   assert.equal(emitted('aws_instance_impaired', 'i-one'), 0);
   assert.equal(emitted('aws_instance_impaired', 'i-other'), 1, 'an unrelated instance stays actionable');
@@ -206,9 +226,9 @@ test('a journal claim is held only through the bounded activity result, and a co
   const impaired = (id) => ({ id, region: 'us-west-2', state: 'running', instanceStatus: 'impaired', systemStatus: 'ok' });
   const aws = { at, errors: [], volumes: [], addresses: [], health: { at, errors: [], alarms: [], instances: [impaired('i-one'), impaired('i-other')] } };
   const s = reconcile(null, deriveIssues({ settings, states: { testnet: stale }, activity, aws, now }), now);
-  const emitted = s.outbox.filter((e) => e.issue.code === 'aws_instance_impaired').map((e) => e.issue.target);
+  const emitted = s.issues.filter((i) => i.revision && i.code === 'aws_instance_impaired').map((i) => i.target);
   assert.deepEqual(emitted, ['i-other']);
-  assert.ok(s.outbox.some((e) => e.issue.code === 'collector_stale'), 'the collector gap itself is still reported');
+  assert.ok(s.issues.some((i) => i.revision && !i.suppressed && i.code === 'collector_stale'), 'the collector gap itself is still reported');
 });
 
 test('a stale network snapshot retains individual host and endpoint holds without asserting recovery', () => {
@@ -242,16 +262,15 @@ test('omitted endpoint, skipped/stopped host, or malformed nested report cannot 
   assert.ok(byCode(recovered, 'endpoint_failed').every((i) => i.status === 'resolved'));
 });
 
-test('changed fault set notifies immediately, numeric prose does not; omitted old rule persists', () => {
+test('changed fault set revises the case at once, numeric prose does not; omitted old rule persists', () => {
   const data = (used, extra = []) => ({ system: { disks: [{ mount: '/', size: 100, used }] }, services: extra });
   let s = reconcile(null, deriveNetwork(now, network(now, [host(now, data(90))])), now);
   const id = byCode(s, 'host_health')[0].id;
-  const events = () => s.outbox.filter((e) => e.issue.id === id);
+  const revision = () => s.issues.find((i) => i.id === id).revision;
   s = reconcile(s, deriveNetwork(now + 30_000, network(now + 30_000, [host(now + 30_000, data(91))])), now + 30_000);
-  assert.equal(events().length, 1);
+  assert.equal(revision(), 1);
   s = reconcile(s, deriveNetwork(now + 60_000, network(now + 60_000, [host(now + 60_000, data(91, [{ service: 'api', ok: false }]))])), now + 60_000);
-  assert.equal(events().at(-1).transition, 'changed');
-  assert.equal(events().length, 2);
+  assert.deepEqual([revision(), byCode(s, 'host_health')[0].status, byCode(s, 'host_health')[0].lastEventAt], [2, 'open', stamp(now + 60_000)]);
   s = reconcile(s, deriveNetwork(now + 90_000, network(now + 90_000, [host(now + 90_000, { services: [{ service: 'api', ok: false }] })])), now + 90_000);
   assert.equal(byCode(s, 'host_health')[0].evidence.faults.length, 2, 'omitting disk must not erase the disk fault');
   s = reconcile(s, deriveNetwork(now + 120_000, network(now + 120_000, [host(now + 120_000, { services: [{ service: 'api', ok: true }] })])), now + 120_000);
@@ -357,7 +376,6 @@ test('explorer HTTP200 is not recovery: two independent healthy, progressing, bo
   s = reconcile(s, deriveNetwork(now + 90_000, explorerState(now + 90_000, explorer(352, 354))), now + 90_000);
   assert.equal(byCode(s, 'host_health')[0].status, 'resolved');
   assert.equal(Object.keys(s.explorerSamples).length, 1);
-  assert.equal(s.outbox.at(-1).schemaVersion, 1);
 });
 
 test('explorer replacement, restart, stale/replayed sample, regression, or chain lag prevents readiness', () => {
@@ -388,18 +406,17 @@ test('AWS absence, INSUFFICIENT_DATA, initializing checks and partial collection
   for (const code of ['aws_instance_impaired', 'aws_alarm', 'aws_scheduled_event']) assert.equal(byCode(recovered, code)[0].status, 'resolved');
 });
 
-test('new fault during maintenance gets a post-maintenance notification, not a historical replay', () => {
+test('new fault during maintenance revises the case after the maintenance, not on a replayed sample from it', () => {
   const data = (service) => ({ services: [{ service, ok: false }] });
   let s = reconcile(null, deriveNetwork(now, network(now, [host(now, data('api'))])), now);
-  const count = s.outbox.filter((e) => e.issue.code === 'host_health').length;
+  const count = byCode(s, 'host_health')[0].revision;
   s = reconcile(s, deriveNetwork(now + 30_000, network(now + 30_000, [host(now + 30_000, data('indexer'))]), { lifecycle: { status: 'services' } }), now + 30_000);
   const replay = network(now + 30_000, [host(now + 30_000, data('indexer'))]);
   s = reconcile(s, deriveNetwork(now + 60_000, replay), now + 60_000);
-  assert.equal(s.outbox.filter((e) => e.issue.code === 'host_health').length, count);
+  assert.equal(byCode(s, 'host_health')[0].revision, count);
   assert.equal(byCode(s, 'host_health')[0].suppressed, true);
   s = reconcile(s, deriveNetwork(now + 90_000, network(now + 90_000, [host(now + 90_000, data('indexer'))])), now + 90_000);
-  assert.equal(s.outbox.filter((e) => e.issue.code === 'host_health').length, count + 1);
-  assert.equal(s.outbox.at(-1).transition, 'changed');
+  assert.deepEqual([byCode(s, 'host_health')[0].revision, byCode(s, 'host_health')[0].status], [count + 1, 'open']);
   assert.equal(byCode(s, 'host_health')[0].suppressed, false);
 });
 
@@ -433,10 +450,11 @@ test('a crash loop stays actionable while a rolling change on other hosts holds 
   assert.deepEqual([activity.networks.testnet.held, activity.networks.testnet.reason], [true, 'rolling']);
   const impaired = (id) => ({ id, region: 'us-west-2', state: 'running', instanceStatus: 'impaired', systemStatus: 'ok' });
   const aws = { at, errors: [], volumes: [], addresses: [], health: { at, errors: [], alarms: [], instances: ['i-mn-1', 'i-mn-3', 'i-mn-4'].map(impaired) } };
-  const emitted = (s, code) => s.outbox.filter((e) => e.issue.code === code).map((e) => e.issue.target).sort();
+  // Not held: such a case has a revision, and triage takes it as new.
+  const emitted = (s, code) => s.issues.filter((i) => i.revision && !i.suppressed && i.code === code).map((i) => i.target).sort();
   const held = (s) => byCode(s, 'host_health').filter((i) => i.suppressed).map((i) => i.target).sort();
   const s = reconcile(null, deriveIssues({ settings, states: { testnet: state }, activity, aws, now }), now);
-  assert.deepEqual(emitted(s, 'host_health'), ['mn-3'], 'only the crashing host is sent for repair');
+  assert.deepEqual(emitted(s, 'host_health'), ['mn-3'], 'only the crashing host is left actionable');
   assert.deepEqual(emitted(s, 'aws_instance_impaired'), ['i-mn-3'], 'and its instance check with it');
   assert.deepEqual(held(s), ['mn-1', 'mn-2', 'mn-4'], 'the rest of the network stays held, as an open issue');
   // The host was held with the others a minute ago; the crash loop releases it alone.
@@ -456,12 +474,14 @@ test('a crash loop stays actionable while a rolling change on other hosts holds 
   assert.deepEqual(emitted(reconcile(null, deriveIssues({ settings, states: { testnet: claimed }, activity: journal, now }), now), 'host_health'), []);
 });
 
-test('CI remediation exclusions retain observations, retire pending delivery, and are reversible', () => {
+test('CI remediation exclusions retain observations, leave the case unrevised, and are reversible', () => {
   const settings = structuredClone(DEFAULT_SETTINGS);
   const ci = { reporters: [{ id: 'strix-pasta' }, { id: 'other' }], hosts: [], runners: [], recent: [] };
   let d = deriveIssues({ settings, states: {}, ci, now });
   let s = reconcile(null, d, now);
   const id = s.issues.find((i) => i.scope === 'strix-pasta').id;
+  const revision = () => s.issues.find((i) => i.id === id).revision;
+  assert.equal(revision(), 1);
   settings.remediation = { excludedCiHosts: ['strix-pasta'] };
   d = deriveIssues({ settings, states: {}, ci, now: now + 60_000 });
   assert.ok(d.issues.some((i) => i.id === id), 'observations retained');
@@ -469,15 +489,12 @@ test('CI remediation exclusions retain observations, retire pending delivery, an
   assert.equal(s.issues.find((i) => i.id === id).status, 'open');
   assert.equal(s.issues.find((i) => i.id === id).suppressed, true);
   assert.equal(s.issues.find((i) => i.id === id).remediationExcluded, true);
-  assert.ok(!s.outbox.some((e) => e.issue.scope === 'strix-pasta'));
-  assert.ok(s.quarantined.some((e) => e.event.issue.id === id));
-  assert.ok(s.outbox.some((e) => e.issue.scope === 'other'));
-  const count = s.quarantined.length;
+  assert.deepEqual([revision(), s.quarantined], [1, undefined], 'nothing is set aside for it');
+  assert.deepEqual(s.issues.filter((i) => i.scope === 'other').map((i) => [i.suppressed, i.remediationExcluded, i.revision]), [[false, false, 1]]);
   s = reconcile(JSON.parse(JSON.stringify(s)), d, now + 120_000);
-  assert.equal(s.quarantined.length, count);
+  assert.equal(revision(), 1);
   settings.remediation.excludedCiHosts = [];
   d = deriveIssues({ settings, states: {}, ci, now: now + 180_000 });
   s = reconcile(s, d, now + 180_000);
-  assert.equal(s.issues.find((i) => i.id === id).remediationExcluded, false);
-  assert.ok(s.outbox.some((e) => e.issue.id === id));
+  assert.deepEqual([s.issues.find((i) => i.id === id).remediationExcluded, s.issues.find((i) => i.id === id).suppressed, revision()], [false, false, 2]);
 });

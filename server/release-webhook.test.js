@@ -4,7 +4,7 @@ import { createHmac, randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { receiveRelease, loadReleaseInbox, reconcileReleaseTasks, validCompatibility } from './release-webhook.js';
+import { receiveRelease, loadReleaseInbox, reconcileReleaseTasks } from './release-webhook.js';
 import { createWeb } from './web.js';
 import { remediationView } from './remediation.js';
 
@@ -52,28 +52,24 @@ test('ping and unpublished/edited releases are acknowledged without creating wor
   assert.deepEqual(loadReleaseInbox(dataDir), []);
 });
 
-test('release task is actionable once; cannot resolve from an unbound/missing compatibility report', (t) => {
+test('a release becomes a task once; nothing a retired receiver left in the state closes it, and retention never reopens it', (t) => {
   const dataDir = temp(t); receiveRelease({ ...signed(), dataDir });
   const records = loadReleaseInbox(dataDir), state = { issues: [], outbox: [], generatedAt: new Date(now).toISOString() };
   reconcileReleaseTasks(state, records, now);
-  assert.equal(state.outbox.length, 1); assert.equal(state.issues[0].domain, 'maintenance');
+  assert.deepEqual([state.issues.length, state.issues[0].domain, state.issues[0].status, state.issues[0].revision], [1, 'maintenance', 'open', 1]);
   assert.equal(state.issues[0].evidence.liveChangesAllowed, false);
-  reconcileReleaseTasks(state, records, now + 7 * 3600_000); assert.equal(state.outbox.length, 1);
-  const lastResponse = { outcome: 'resolved' };
+  reconcileReleaseTasks(state, records, now + 7 * 3600_000);
+  assert.deepEqual([state.issues.length, state.issues[0].revision, state.outbox], [1, 1, []]);
+  // The report that used to close a task, as the release that still asked the receiver kept it.
   state.delivery = { receiver: { workerAt: now / 1000, remediation: { schemaVersion: 1, generatedAt: new Date(now).toISOString(), enabled: true,
-    cases: [{ issueId: state.issues[0].id, workerState: 'completed', active: false, lastResponse }] } } };
-  reconcileReleaseTasks(state, records, now + 1); assert.equal(state.issues[0].status, 'open');
-  lastResponse.compatibility = { releaseId: 999, platformTag: records[0].tag, platformCommit: 'a'.repeat(40), dashnetCommit: 'b'.repeat(40), result: 'fixed', report: 'reports/check.md', tests: ['config regression passed'] };
-  reconcileReleaseTasks(state, records, now + 2); assert.equal(state.issues[0].status, 'open');
-  lastResponse.compatibility.releaseId = 123;
-  reconcileReleaseTasks(state, records, now + 3); assert.equal(state.issues[0].status, 'resolved');
-  assert.equal(state.outbox.length, 2);
-  state.outbox = [];
-  const view = remediationView(state, { now });
-  assert.equal(view.cases[0].stageLabel, 'Compatibility verified');
-  assert.match(view.cases[0].reason, /no live network changes/);
+    cases: [{ issueId: state.issues[0].id, workerState: 'completed', active: false, lastResponse: { outcome: 'resolved',
+      compatibility: { releaseId: 123, platformTag: records[0].tag, platformCommit: 'a'.repeat(40), dashnetCommit: 'b'.repeat(40), result: 'fixed', report: 'reports/check.md', tests: ['config regression passed'] } } }] } } };
+  reconcileReleaseTasks(state, records, now + 3);
+  assert.deepEqual([state.issues[0].status, state.issues[0].revision], ['open', 1]);
+  const shown = remediationView(state, { now }).cases[0];
+  assert.deepEqual([shown.stage, shown.taskType, shown.title], ['open', 'compatibility', 'Check and fix dash-network-go compatibility with Platform v5.0.0-beta.2']);
   state.issues = []; reconcileReleaseTasks(state, records, now + 40 * 86400_000);
-  assert.equal(state.outbox.length, 0); // retention never replays old files
+  assert.deepEqual(state.issues, []); // retention never replays old files
 });
 
 test('real HTTP route uses raw bytes, requires signature and creates no network operation', async (t) => {
@@ -106,36 +102,27 @@ test('Core and Tenderdash releases are stored under their own repository; a mism
   assert.equal(JSON.stringify(loadReleaseInbox(dataDir)).includes('UNTRUSTED'), false);
 });
 
-test('Core and Tenderdash tasks wait for a receiver that takes them, then carry their own code and proof', (t) => {
+test('Platform, Core and Tenderdash releases each become a task with their own code, whatever a receiver once announced', (t) => {
   const dataDir = temp(t);
   for (const p of [payload(), core(), tenderdash()]) receiveRelease({ ...signed(p), dataDir });
-  const records = loadReleaseInbox(dataDir), state = { issues: [], outbox: [], generatedAt: new Date(now).toISOString() };
-  reconcileReleaseTasks(state, records, now);
-  assert.deepEqual(state.issues.map((i) => i.code), ['platform_release_compatibility'], 'an older receiver is sent Platform tasks only');
-  state.delivery = { receiver: { releaseRepositories: ['dashpay/dash', 'dashpay/platform', 'dashpay/tenderdash'] } };
-  reconcileReleaseTasks(state, records, now + 1);
-  assert.deepEqual(state.issues.map((i) => i.code).sort(), ['core_release_compatibility', 'platform_release_compatibility', 'tenderdash_release_compatibility']);
-  assert.equal(state.outbox.length, 3); assert.equal(new Set(state.issues.map((i) => i.id)).size, 3);
-  const issue = state.issues.find((i) => i.code === 'core_release_compatibility'), release = records.find((r) => r.repository === 'dashpay/dash');
-  assert.equal(issue.target, 'Dash Core v24.0.0'); assert.equal(issue.evidence.repositoryId, 19352450);
-  assert.equal(issue.evidence.liveChangesAllowed, false); assert.equal(issue.scope, 'dash-network-go');
-
-  const proof = { releaseId: 900, repository: 'dashpay/dash', releaseTag: 'v24.0.0', releaseCommit: 'a'.repeat(40), dashnetCommit: 'b'.repeat(40), result: 'compatible', report: 'reports/core.md', tests: ['matrix passed'] };
-  assert.equal(validCompatibility(proof, release), true);
-  for (const wrong of [{ repository: 'dashpay/tenderdash' }, { repository: undefined }, { releaseTag: 'v24.0.1' }, { releaseCommit: 'abc' }, { releaseId: 901 }, { tests: [] }])
-    assert.equal(validCompatibility({ ...proof, ...wrong }, release), false);
-  assert.equal(validCompatibility({ ...proof, repository: undefined, platformTag: 'v24.0.0', platformCommit: 'a'.repeat(40) }, release), false, 'the Platform form never proves a Core release');
-  const platform = records.find((r) => r.repository === 'dashpay/platform');
-  assert.equal(validCompatibility({ ...proof, releaseId: 123, repository: 'dashpay/platform', releaseTag: platform.tag }, platform), true, 'a Platform report may use either form');
-
-  state.delivery.receiver = { ...state.delivery.receiver, workerAt: now / 1000, remediation: { schemaVersion: 1, generatedAt: new Date(now).toISOString(), enabled: true,
-    cases: [{ issueId: issue.id, workerState: 'completed', active: false, lastResponse: { outcome: 'resolved', compatibility: proof } }] } };
-  reconcileReleaseTasks(state, records, now + 2);
-  assert.equal(issue.status, 'resolved'); assert.equal(issue.resolutionEvidence.releaseCommit, 'a'.repeat(40));
-  state.outbox = [];
-  const shown = remediationView(state, { now }).cases.find((c) => c.id === issue.id);
-  assert.equal(shown.title, 'Check and fix dash-network-go compatibility with Dash Core v24.0.0');
-  assert.equal(shown.stageLabel, 'Compatibility verified'); assert.equal(shown.taskType, 'compatibility');
+  const records = loadReleaseInbox(dataDir);
+  // No receiver in the state, one that announced Platform only, one that announced all three: the same tasks.
+  for (const delivery of [undefined, { configured: false }, { receiver: { releaseRepositories: ['dashpay/platform'] } }, { receiver: { releaseRepositories: ['dashpay/dash', 'dashpay/platform', 'dashpay/tenderdash'] } }]) {
+    const state = { issues: [], outbox: [], generatedAt: new Date(now).toISOString(), ...(delivery ? { delivery } : {}) };
+    reconcileReleaseTasks(state, records, now);
+    assert.deepEqual(state.issues.map((i) => i.code).sort(), ['core_release_compatibility', 'platform_release_compatibility', 'tenderdash_release_compatibility']);
+    assert.deepEqual([state.outbox, new Set(state.issues.map((i) => i.id)).size, state.issues.map((i) => i.revision)], [[], 3, [1, 1, 1]]);
+    const issue = state.issues.find((i) => i.code === 'core_release_compatibility');
+    assert.equal(issue.target, 'Dash Core v24.0.0'); assert.equal(issue.evidence.repositoryId, 19352450);
+    assert.equal(issue.evidence.liveChangesAllowed, false); assert.equal(issue.scope, 'dash-network-go');
+    const shown = remediationView(state, { now }).cases.find((c) => c.id === issue.id);
+    assert.deepEqual([shown.title, shown.taskType, shown.stage], ['Check and fix dash-network-go compatibility with Dash Core v24.0.0', 'compatibility', 'open']);
+  }
+  // A task closed by a report while the receiver still gave one stays as it was recorded.
+  const reported = { id: 'r'.repeat(24), domain: 'maintenance', scope: 'dash-network-go', target: 'Platform v4.9.0', code: 'platform_release_compatibility', severity: 'info', status: 'resolved',
+    resolvedAt: new Date(now).toISOString(), evidence: { tag: 'v4.9.0' }, resolutionEvidence: { reason: 'compatibility_report', releaseId: 100 } };
+  const shown = remediationView({ issues: [reported], generatedAt: new Date(now).toISOString() }, { now }).cases[0];
+  assert.deepEqual([shown.stage, shown.reason], ['recovered', 'A compatibility report was recorded for this release']);
 });
 
 test('one signed route serves all three repositories; the original Platform path keeps working', async (t) => {

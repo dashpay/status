@@ -75,21 +75,6 @@ export function loadReleaseInbox(dataDir) {
   });
 }
 
-// Platform reports carry platformTag/platformCommit, as they always have. Core
-// and Tenderdash reports name their repository and use releaseTag/releaseCommit;
-// a Platform report may use either form.
-export function validCompatibility(proof, release) {
-  if (!proof || typeof proof !== 'object') return false;
-  const platform = release.repository === PLATFORM_REPOSITORY;
-  const named = proof.repository === release.repository && typeof proof.releaseTag === 'string';
-  if (!named && !(platform && proof.repository === undefined)) return false;
-  const tag = named ? proof.releaseTag : proof.platformTag, commit = named ? proof.releaseCommit : proof.platformCommit;
-  return proof.releaseId === release.releaseId && tag === release.tag
-    && /^[a-f0-9]{40}$/.test(commit || '') && /^[a-f0-9]{40}$/.test(proof.dashnetCommit || '')
-    && ['compatible', 'fixed'].includes(proof.result) && typeof proof.report === 'string' && proof.report.length > 0
-    && Array.isArray(proof.tests) && proof.tests.length > 0 && proof.tests.every((t) => typeof t === 'string' && t.length > 0);
-}
-
 // Semantic-version order within one release line (major.minor). A release with
 // a newer one in its own line is superseded: checking dash-network-go against
 // it is no longer work anyone needs. A release is superseded only by a newer
@@ -124,49 +109,40 @@ export function supersededBy(release, releases) {
   return best;
 }
 
-// Called only by the incident-state single writer. No health-fault derivation or
-// six-hour reminder loop: a release is durable work, not a recurring outage.
+// Called only by the incident-state single writer. No health-fault derivation:
+// a release is durable work, not a recurring outage. A task is one more issue
+// for triage (domain `maintenance`). It ends when a newer release of its line
+// supersedes it: the report that used to close one came from the retired
+// repair receiver, and nothing reports in its place.
 export function reconcileReleaseTasks(state, releases, now = Date.now()) {
   state.revisionCounters ||= {};
-  const responses = new Map((state.delivery?.receiver?.remediation?.cases || []).map((c) => [c.issueId, c]));
-  // A receiver from before Core and Tenderdash were added rejects their tasks,
-  // and one rejected event fails its whole batch. Their releases stay in the
-  // inbox until the receiver announces it takes them. Platform never waits.
-  const announced = state.delivery?.receiver?.releaseRepositories;
-  const taken = new Set([PLATFORM_REPOSITORY, ...(Array.isArray(announced) ? announced : [])]);
   for (const release of releases) {
     const source = sourceOf(release.repository);
-    if (!source || !taken.has(release.repository)) continue;
+    if (!source) continue;
     const id = createHash('sha256').update(`platform-release:${release.repositoryId}:${release.releaseId}`).digest('hex').slice(0, 24);
     let issue = state.issues.find((i) => i.id === id);
-    const emit = (transition) => {
+    // As in reconcile (incidents.js): the revision counts openings and endings.
+    const revise = () => {
       issue.revision = (state.revisionCounters[id] || issue.revision || 0) + 1;
       state.revisionCounters[id] = issue.revision; issue.lastEventAt = iso(now);
-      state.outbox.push({ schemaVersion: 1, eventId: `${id}:${issue.revision}`, occurredAt: iso(now), transition, issue: structuredClone(issue) });
     };
     const successor = supersededBy(release, releases);
     if (!issue) {
-      // Counters survive display retention; never re-enqueue an old webhook file.
-      // A release that is already superseded never becomes a task.
+      // Counters survive display retention; an old webhook file never becomes a
+      // task again. A release that is already superseded never becomes one.
       if (state.revisionCounters[id] || successor) continue;
       issue = { id, domain: 'maintenance', scope: 'dash-network-go', target: `${source.component} ${release.tag}`, code: source.code,
         sourceKey: `github-release:${release.repositoryId}:${release.releaseId}`, severity: 'info', status: 'open',
         summary: `Check and fix dash-network-go compatibility with ${source.component} ${release.tag}`,
         observedAt: iso(now), firstSeen: iso(now), lastSeen: iso(now), resolvedAt: null,
         evidence: { ...release, taskType: 'compatibility', mode: 'code-and-tests-only', liveChangesAllowed: false } };
-      state.issues.push(issue); emit('opened');
+      state.issues.push(issue); revise();
     }
-    const response = responses.get(id);
-    if (issue.status === 'open' && !response?.active && response?.lastResponse?.outcome === 'resolved'
-        && validCompatibility(response.lastResponse.compatibility, release)) {
-      issue.status = 'resolved'; issue.resolvedAt = iso(now); issue.observedAt = iso(now);
-      issue.resolutionEvidence = { reason: 'compatibility_report', ...response.lastResponse.compatibility };
-      emit('resolved');
-    } else if (issue.status === 'open' && successor) {
+    if (issue.status === 'open' && successor) {
       // Ended, not verified: no compatibility is claimed for this release.
       issue.status = 'resolved'; issue.resolvedAt = iso(now); issue.observedAt = iso(now);
       issue.resolutionEvidence = { reason: 'superseded', by: successor.tag, releaseId: successor.releaseId };
-      emit('resolved');
+      revise();
     }
   }
   return state;

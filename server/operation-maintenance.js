@@ -44,7 +44,3 @@ export function operationMaintenance(dataDir, settings, now = Date.now(), operat
   }
   return result;
 }
-
-export function heldByOperation(issue, maintenance) {
-  return issue.domain === 'network' && maintenance?.[issue.scope]?.active === true;
-}

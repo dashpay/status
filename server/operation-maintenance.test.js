@@ -35,28 +35,22 @@ test('operation maintenance follows confirmed mutations only, ends on terminal s
   op.updatedAt=at;op.request.action='doctor';save();assert.deepEqual(operationMaintenance(root,settings,now),{});
   op.request.action='platform-reset';op.network='mainnet';save();assert.deepEqual(operationMaintenance(root,settings,now),{},'never suppress Mainnet');
 });
-test('maintenance holds queued network delivery without starving other scopes; failure returns fresh faults to remediation',async t=>{
+test('an operation holds the faults of its network and no other scope; a failed one returns them as they are',async t=>{
   const {root,op,save}=fixture(t);
-  const params={dataDir:root,ci:{summary:()=>({})},destination:'https://receiver.example-tailnet.ts.net/v1/events',secret:'fixture'};
-  await cycle({...params,now,fetcher:async()=>{throw Error('lost acknowledgement');}});
-  const before=loadIncidentState(root), queued=before.outbox.find(e=>e.issue.scope==='sakura');
-  assert.ok(queued);
-  save();let sent;
-  await cycle({...params,now:now+60_000,fetcher:async(_,options)=>{
-    sent=JSON.parse(options.body).events;return Response.json({accepted:sent.map(e=>e.eventId)});
-  }});
-  assert.ok(!sent.some(e=>e.issue.domain==='network'&&e.issue.scope==='sakura'));
-  assert.ok(sent.some(e=>e.issue.scope==='other'));
-  assert.ok(sent.some(e=>e.issue.domain==='aws'));
-  const during=loadIncidentState(root);
-  assert.equal(during.issues.find(i=>i.id===queued.issue.id).suppressed,true);
-  assert.deepEqual(during.outbox.find(e=>e.eventId===queued.eventId),queued,'durable event bytes are never rewritten');
+  const params={dataDir:root,ci:{summary:()=>({})}};
+  await cycle({...params,now});
+  const before=loadIncidentState(root), fault=before.issues.find(i=>i.scope==='sakura');
+  assert.deepEqual([fault.status,fault.suppressed,fault.revision],['open',false,1]);
+  save();
+  await cycle({...params,now:now+60_000});
+  const during=loadIncidentState(root), held=during.issues.find(i=>i.id===fault.id);
+  assert.deepEqual([held.status,held.suppressed,held.revision],['open',true,1],'held, and not revised while it is');
+  assert.deepEqual(Object.keys(during.maintenance),['sakura']);
+  assert.ok(during.issues.filter(i=>i.scope==='other'||i.domain==='aws').every(i=>i.suppressed===false));
+  assert.ok(during.issues.some(i=>i.scope==='other')&&during.issues.some(i=>i.domain==='aws'));
   op.status='failed';op.updatedAt=new Date(now+120_000).toISOString();save();
-  await cycle({...params,now:now+120_000,fetcher:async(_,options)=>{
-    sent=JSON.parse(options.body).events;return Response.json({accepted:sent.map(e=>e.eventId)});
-  }});
-  const after=loadIncidentState(root);
+  await cycle({...params,now:now+120_000});
+  const after=loadIncidentState(root), back=after.issues.find(i=>i.id===fault.id);
   assert.deepEqual(after.maintenance,{});
-  assert.ok(sent.some(e=>e.issue.scope==='sakura'&&e.issue.revision>queued.issue.revision),'fresh post-operation fault becomes actionable');
-  assert.equal(after.issues.find(i=>i.id===queued.issue.id).status,'open','maintenance never falsely resolves faults');
+  assert.deepEqual([back.status,back.suppressed,back.revision],['open',false,2],'released from the hold: actionable again, one revision on; maintenance never falsely resolves faults');
 });
