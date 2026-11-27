@@ -5,6 +5,7 @@
 import { TITLES } from './incidents.js';
 import { RELEASE_CODES } from './release-webhook.js';
 import { activityHidden } from './remediation-activity.js';
+import { PAGE_PROBLEMS } from './websites.js';
 
 const fresh = (at, now) => Number.isFinite(Date.parse(at)) && Date.parse(at) <= now + 60_000 && now - Date.parse(at) <= 180_000;
 const text = (value, size = 800) => typeof value === 'string' ? value.slice(0, size) : null;
@@ -58,7 +59,10 @@ export function describe(issue) {
     case 'disk_pressure': return { detail: join([percent(e.usedPercent) && `${percent(e.usedPercent)} used`, gib(e.freeBytes) && `${gib(e.freeBytes)} free`]) };
     case 'memory_pressure': return { detail: join([percent(e.usedPercent) && `${percent(e.usedPercent)} used`]) };
     case 'runner_offline': return { detail: join([text(e.status, 20) && `runner ${text(e.status, 20)}`]) };
-    case 'reporter_stale': case 'reporter_missing': case 'collector_stale': case 'aws_stale':
+    // What is wrong with the page, in this console's words; the detail is the collector's (a phrase from its list, a number, a host name).
+    case 'page_unreachable': case 'page_shape': return { detail: join((Array.isArray(e.problems) ? e.problems : []).slice(0, 8)
+      .map((p) => (Object.hasOwn(PAGE_PROBLEMS, p?.code) ? [PAGE_PROBLEMS[p.code], text(p.detail, 120)].filter(Boolean).join(': ') : null))) };
+    case 'reporter_stale': case 'reporter_missing': case 'collector_stale': case 'aws_stale': case 'website_stale':
       return { detail: join([iso(e.lastObservationAt) ? `last observation ${iso(e.lastObservationAt).replace('T', ' ').slice(0, 16)}Z` : 'never observed', text(e.error, 200)]) };
     case 'discovery_failed': case 'aws_collection_failed': return { detail: join([text(e.error, 300)]) };
     case 'idle_volume': return { detail: join([Number.isFinite(e.sizeGiB) ? `${e.sizeGiB} GiB` : null, 'not attached']) };
@@ -117,7 +121,7 @@ export function remediationView(state, { full = false, visibleNetworks = [], now
   const openCases = cases.filter((c) => c.monitoring !== 'resolved');
   const faults = { open: openCases.length, ...Object.fromEntries(SEVERITY.map((s) => [s, openCases.filter((c) => c.severity === s).length])),
     held: counts.maintenance, recovered: counts.recovered, closed: counts.closed + counts.classified,
-    domains: Object.fromEntries(['network', 'ci', 'aws', 'maintenance'].map((d) => [d, openCases.filter((c) => c.domain === d).length])) };
+    domains: Object.fromEntries(['network', 'ci', 'aws', 'maintenance', 'website'].map((d) => [d, openCases.filter((c) => c.domain === d).length])) };
   // The repair switch, as it is in its own file (`fixing` in triage's answer).
   // Who changed it and when stay with administrators.
   const control = { requested: state?.control?.dispatch === 'on' ? 'on' : 'off',

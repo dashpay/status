@@ -432,7 +432,7 @@ test('the list has open faults with what is wrong, and endings for a day; nothin
   assert.deepEqual(stage, { job1: 'open', job2: 'open', evil: 'open', wait: 'open', disk: 'open', host: 'open', held: 'maintenance', addr: 'review',
     left: 'recovered', pass: 'recovered', plain: 'recovered', gone: 'closed', aged: 'closed', policy: 'closed' }, 'nothing is shown as queued or being worked on');
   assert.deepEqual(view.history, { hours: 24, older: 1, unlisted: 0 });
-  assert.deepEqual(view.faults, { open: 8, critical: 2, warning: 5, info: 1, held: 1, recovered: 3, closed: 3, domains: { network: 2, ci: 5, aws: 1, maintenance: 0 } });
+  assert.deepEqual(view.faults, { open: 8, critical: 2, warning: 5, info: 1, held: 1, recovered: 3, closed: 3, domains: { network: 2, ci: 5, aws: 1, maintenance: 0, website: 0 } });
   assert.equal(view.cases[0].id, 'host', 'critical faults lead');
   const item = (id) => view.cases.find((c) => c.id === id);
   assert.deepEqual([item('job1').detail, item('job1').link, item('job1').group], ['dashpay/platform · Tests · Swift SDK build · feat/x · attempt 2 · mac-runner-pasta', 'https://github.com/dashpay/platform/actions/runs/9', 'dashpay/platform · Swift SDK build']);

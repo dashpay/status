@@ -69,6 +69,25 @@ function Site({ site, stale, now }) {
   </section>;
 }
 
+const PROBLEM = { unreachable: 'no answer', status: 'error answer', not_html: 'not a page', moved: 'leads elsewhere', short: 'almost no text', title: 'other title',
+  phrase: 'expected text missing', defaced: 'defacement marker', download_link: 'download link elsewhere', no_downloads: 'no download links', changed: 'text changed at once' };
+
+// Whether each page still is the page it should be. One failed reading is shown as it is and is not a fault yet.
+function Pages({ pages, now }) {
+  const list = Array.isArray(pages?.list) ? pages.list : [];
+  if (!list.length) return null;
+  const stale = !pages.at || now - Date.parse(pages.at) > 12 * 60_000, wrong = list.filter((p) => !p.ok);
+  return <Section title="Page checks" right={<span className={`text-[12px] ${stale ? 'lv-warn' : wrong.length ? 'lv-down' : 'lv-ok'}`}>{stale ? 'Stale' : wrong.length ? `${wrong.length} of ${list.length} not in order` : `${list.length} pages in order`} · {ago(pages.at, now)}</span>}>
+    <div className="panel p-4 min-w-0" data-page-checks>
+      <p className="text-[12px] text-dim mb-3">Each page is read every five minutes and must be the page it should be: its own address, title and text, no defacement marker, download links that point where they should, and no sudden change of most of its text. A page that fails twice in a row is filed as a fault.</p>
+      <ul className="grid sm:grid-cols-2 gap-x-8 gap-y-1 text-[12px]">{list.map((p) => <li key={p.site + p.path} className="flex justify-between gap-3 min-w-0">
+        <a href={`https://www.${p.site}${p.path}`} target="_blank" rel="noreferrer" className="mono truncate hover:underline">{p.site}{p.path}</a>
+        <span className={`text-right ${p.ok ? 'lv-ok' : p.failures > 1 ? 'lv-down' : 'lv-warn'}`}>{p.ok ? 'OK' : `${p.problems.map((c) => PROBLEM[c] || c).join(', ') || 'not in order'}${p.failures > 1 ? '' : ' · first reading'}`}</span>
+      </li>)}</ul>
+    </div>
+  </Section>;
+}
+
 export default function Websites() {
   const { data, error, reload } = useResource('/api/websites');
   const now = useNow(30_000);
@@ -79,6 +98,6 @@ export default function Websites() {
     <div className="mt-5 flex flex-wrap justify-between items-start gap-3"><div><h1 className="text-lg font-semibold">Website performance</h1><p className="text-dim mt-1">dash.dev &amp; dash.org · {data?.location || 'AWS status host'} · every 5 minutes</p></div><button className="btn" onClick={reload}>Refresh data</button></div>
     <p className="text-[12px] text-dim mt-3">HTTPS homepage checks from one AWS location, using fresh IPv4 connections and compression. TTFB is time to first byte of the final response, including redirects. Server wait includes network round-trip time. These are synthetic HTML checks, not global visitor latency, full-page load times or Core Web Vitals.</p>
     <div className="mt-3"><Err error={error} />{data && stale && <Err error={data.error || 'Collector data is stale. Last results are retained, not current health.'} />}</div>
-    {!data ? <Empty>{error ? 'Website measurements are unavailable. Use Refresh data to try again.' : 'Loading website measurements…'}</Empty> : !sites.length ? <Empty>Waiting for the first status-host checks. No history has been fabricated.</Empty> : <><History sites={sites} now={now} /><div className="grid lg:grid-cols-2 gap-4 mt-5">{sites.map((s) => <Site key={s.site} site={s} stale={stale} now={now} />)}</div><p className="text-dim text-[11px] mt-3">Last collection: {data.generatedAt ? utc(data.generatedAt) : '—'} · Seven days retained. Percentiles use successful checks only; small samples are not representative. Recommendations are HTML/header heuristics, not a browser audit.</p></>}
+    {!data ? <Empty>{error ? 'Website measurements are unavailable. Use Refresh data to try again.' : 'Loading website measurements…'}</Empty> : !sites.length ? <Empty>Waiting for the first status-host checks. No history has been fabricated.</Empty> : <><History sites={sites} now={now} /><div className="grid lg:grid-cols-2 gap-4 mt-5">{sites.map((s) => <Site key={s.site} site={s} stale={stale} now={now} />)}</div><Pages pages={data.pages} now={now} /><p className="text-dim text-[11px] mt-3">Last collection: {data.generatedAt ? utc(data.generatedAt) : '—'} · Seven days retained. Percentiles use successful checks only; small samples are not representative. Recommendations are HTML/header heuristics, not a browser audit.</p></>}
   </>;
 }
