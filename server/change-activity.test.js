@@ -16,6 +16,11 @@ test('a recreated container or a reboot is a planned change; a crash loop, an ol
   assert.deepEqual(kinds(host('a', [container('quorums', 120_000, { restarting: true })])), []);
   assert.deepEqual(kinds(host('a', [container('quorums', 120_000, { running: false, state: 'exited' })])), [], 'started and died is not an upgrade');
   assert.deepEqual(kinds(host('a', [container('quorums', 120_000, { oneShot: true })])), []);
+  // Started again as it was (`docker start` after a kill or a stop): Docker
+  // keeps when it last exited. A recreated container has never exited.
+  assert.deepEqual(kinds(host('a', [container('quorums', 120_000, { finishedAt: iso(now - 420_000) })])), [], 'bringing a stopped container back is not a planned change');
+  assert.deepEqual(kinds(host('a', [container('quorums', 120_000, { finishedAt: '0001-01-01T00:00:00Z' })])), ['container']);
+  assert.deepEqual(kinds(host('a', [container('quorums', 120_000, { finishedAt: '' })])), ['container']);
   assert.deepEqual(kinds(host('a', [container('quorums', SETTLE_MS)])), [], 'outside the settle window');
   const rebooted = host('a'); rebooted.probe.data.system.uptime = 300;
   assert.deepEqual(kinds(rebooted), ['reboot']);
@@ -64,6 +69,23 @@ test('a rolling change across hosts holds the whole network only while it lasts'
   assert.equal(rolling.networks.testnet.reason, 'rolling');
   const done = recognise([host('mn-1', [], {}, now + SETTLE_MS), host('mn-2', [], {}, now + SETTLE_MS)], rolling, now + SETTLE_MS);
   assert.notEqual(done.networks.testnet?.held, true);
+});
+
+test('containers killed and started again on several hosts hold neither the hosts nor the network', () => {
+  // Fault testing on a devnet: Tenderdash killed on four validators and
+  // started again five minutes later, by hand. Nothing was changed.
+  const back = (name) => host(name, [container('tenderdash', 30_000, { finishedAt: iso(now - 330_000) }), container('core', 86_400_000, { finishedAt: '0001-01-01T00:00:00Z' })]);
+  const state = recognise(['v-4', 'v-6', 'v-9', 'v-11'].map(back));
+  assert.deepEqual([state.hosts, state.networks, state.crashing], [{}, {}, []]);
+  // Recreated on two of them instead (an upgrade by hand): held, as before.
+  const upgraded = (name) => host(name, [container('tenderdash', 30_000, { finishedAt: '0001-01-01T00:00:00Z' })]);
+  const rolling = recognise([upgraded('v-4'), upgraded('v-6'), back('v-9')]);
+  assert.deepEqual([Object.keys(rolling.hosts), rolling.networks.testnet.reason], [['testnet/i-v-4', 'testnet/i-v-6'], 'rolling']);
+  // A hold that a recreation opened is not cut short when that container is
+  // then stopped and started again: the episode runs out by itself.
+  const first = recognise([upgraded('v-4')]);
+  const later = recognise([host('v-4', [container('tenderdash', 10_000, { finishedAt: iso(now + 45_000) }, now + 60_000)], {}, now + 60_000)], first, now + 60_000);
+  assert.deepEqual([later.hosts['testnet/i-v-4'].held, later.hosts['testnet/i-v-4'].lastSignalAt], [true, first.hosts['testnet/i-v-4'].lastSignalAt]);
 });
 
 test('a recreate loop cannot hold a host forever', () => {
