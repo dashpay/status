@@ -158,14 +158,21 @@ that is still present is revised with fresh evidence and is new to triage.
 | Dashboard operation confirmed/running | the network | terminal status, or lease expiry |
 | Dashboard operation **succeeded** | the network | 20 minutes after it finished |
 | dashnet journal claimed by another runner | the network | 20 minutes after release; at once if the journal records an error |
-| Container recreated (started under 20 minutes ago, `RestartCount` 0, running) | that host, the network's endpoint checks, its EC2 status check | 20 minutes after the last such start |
+| Container recreated (started under 20 minutes ago, `RestartCount` 0, running, never exited before) | that host, the network's endpoint checks, its EC2 status check | 20 minutes after the last such start |
 | Host rebooted (uptime under 20 minutes) | same | 20 minutes after boot |
 | Two or more hosts changing at once | the network, except a host in a crash loop | when fewer than two are changing |
 
 `server/change-activity.js` derives the observational signals from the fresh
 probe every cycle, so a manual `docker compose pull && up` of the quorum
 server, or a hand-run Testnet upgrade, is recognised without a dashboard
-operation. A crash loop under a restart policy increments `RestartCount` and is
+operation. A container that had stopped and was started again as it was
+(`docker start` after a kill, a stop or a crash, and likewise `docker restart`
+or `docker compose restart`; Docker keeps the time of its last exit, and a
+recreated container has none) is a service brought back, not a planned change:
+it holds nothing, so what is still wrong around it stays actionable. A restart
+that changes neither image nor configuration is therefore not held; it is over
+before a fault counts. After a reboot the hold rests on the host's uptime
+alone. A crash loop under a restart policy increments `RestartCount` and is
 not a planned change; seen in a fresh probe, it ends that host's hold at once,
 even inside the settle window an earlier clean start opened. A network hold
 inferred from other hosts changing does not cover that host either: its fault

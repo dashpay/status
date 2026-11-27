@@ -21,11 +21,16 @@ export function hostSignals(host, now = Date.now()) {
   const signals = [], uptime = probe.data.system?.uptime;
   if (typeof uptime === 'number' && Number.isFinite(uptime) && uptime >= 0 && uptime * 1000 < SETTLE_MS) signals.push({ kind: 'reboot', at: at - uptime * 1000 });
   for (const k of list(probe.data.containers)) {
-    const started = Date.parse(k.startedAt);
+    const started = Date.parse(k.startedAt), exited = Date.parse(k.finishedAt);
     // Recreating a container resets Docker's RestartCount. A crash loop under a
     // restart policy increments it, is not a planned change and stays actionable.
+    // A container that has stopped before and runs again was started as it was:
+    // somebody brought a service back, or a test did. That is the end of an
+    // outage, not a planned change, and holds nothing. Docker keeps the time of
+    // the last exit across a start; a recreated container has none (year 1).
     if (k.oneShot || k.running !== true || k.restarting || (k.restarts || 0) !== 0 || !text(k.name)
-      || !Number.isFinite(started) || started > at + 60_000 || at - started >= SETTLE_MS) continue;
+      || !Number.isFinite(started) || started > at + 60_000 || at - started >= SETTLE_MS
+      || exited > 0) continue;
     signals.push({ kind: 'container', at: Math.min(started, at), name: k.name.slice(0, 120) });
   }
   return signals;
