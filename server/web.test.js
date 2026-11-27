@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createWeb, ttlCache } from './web.js';
@@ -58,6 +59,9 @@ test('mainnet observer report is token-scoped and appears as limited signals', a
       quorumServer: { status: 200, latencyMs: 12, quorums: 10, banned: 2, enabled: 100 },
       mainnet: { chainLockAgeSeconds: 4, bigBans: 2, coreStall: false, platformStall: false } });
     assert.equal((await w.req('/api/mainnet/report', { method: 'POST', body, headers: { 'content-type': 'application/json' } })).status, 401);
+    for (const wrong of ['Bearer fixture-mainnet-tokeN', 'Bearer fixture-mainnet-token-and-more', 'Bearer fixture', 'fixture-mainnet-token', 'Bearer ']) {
+      assert.equal((await w.req('/api/mainnet/report', { method: 'POST', body, headers: { 'content-type': 'application/json', authorization: wrong } })).status, 401, wrong);
+    }
     const report = await w.req('/api/mainnet/report', { method: 'POST', body, headers: { 'content-type': 'application/json', authorization: 'Bearer fixture-mainnet-token' } });
     assert.equal(report.status, 202);
     const mainnet = await (await w.req('/api/networks/mainnet')).json();
@@ -914,4 +918,108 @@ test('the Webhooks page: an account with access sees the hooks by name, everyone
     assert.equal((await (await bot(admin, all.token)('/api/hooks')).json()).hooks.length, 2);
     assert.equal((await (await bot(admin, narrow.token)('/api/hooks')).json()).public, true);
   } finally { admin.close(); operator.close(); stranger.close(); rmSync(hooksDir, { recursive: true, force: true }); }
+});
+
+// EventSource hands a page only the event types it has a listener for, and
+// drops the rest without a sign: the Webhooks page waited for `hooks` for a day
+// and got its updates from a timer.
+test('every event the server pushes has a listener in the browser', () => {
+  const server = readFileSync(new URL('./web.js', import.meta.url), 'utf8'), browser = readFileSync(new URL('../src/lib.js', import.meta.url), 'utf8');
+  const pushed = [...new Set([...server.matchAll(/\bpush\('([a-z-]+)'/g)].map((m) => m[1]))].sort();
+  const heard = JSON.parse(/STREAM_EVENTS = (\[[^\]]+\])/.exec(browser)[1].replaceAll("'", '"'));
+  assert.ok(pushed.length >= 8, 'the pushes were found');
+  assert.deepEqual(pushed.filter((e) => !heard.includes(e)), []);
+  assert.deepEqual(heard.filter((e) => !pushed.includes(e)), [], 'no listener for an event nothing sends');
+});
+
+test('an open stream and an open operation log stop serving a session that signed out', async () => {
+  const w = await start(9920871, [], { ciQueue: { secret: 'hook-secret' } });
+  const ctl = new AbortController();
+  try {
+    const send = (id, priv) => {
+      const body = JSON.stringify({ action: 'queued', organization: { login: 'dashpay' }, repository: { full_name: priv ? 'dashpay/hotfix' : 'dashpay/dash', private: priv },
+        workflow_job: { id, run_id: id, status: 'queued', name: 'lint', workflow_name: 'CI', labels: ['x'], created_at: new Date().toISOString() } });
+      return w.req('/api/ci/github-webhook', { method: 'POST', body, headers: { 'content-type': 'application/json', 'x-github-event': 'workflow_job', 'x-hub-signature-256': `sha256=${createHmac('sha256', 'hook-secret').update(body).digest('hex')}` } });
+    };
+    const settle = () => new Promise((r) => setTimeout(r, 2000)); // notices are debounced by 1 s; room for a loaded runner
+    const csrf = await w.login();
+    const id = '6c8139ad-e92f-40da-943d-1e001efaccb5';
+    mkdirSync(join(w.dataDir, 'ops'), { recursive: true });
+    writeFileSync(join(w.dataDir, 'ops', `${id}.json`), JSON.stringify({ id, network: 'testnet', status: 'running', request: { action: 'upgrade' }, createdAt: new Date().toISOString() }));
+    writeFileSync(join(w.dataDir, 'ops', `${id}.log`), 'first line\n');
+    // Both are opened while signed in, with the session's cookie.
+    const stream = await w.req('/api/stream', { signal: ctl.signal });
+    const seen = [];
+    (async () => { try { for await (const chunk of stream.body) for (const m of String(Buffer.from(chunk)).matchAll(/^event: (\S+)/gm)) seen.push(m[1]); } catch { /* aborted */ } })();
+    const log = await w.req(`/api/ops/${id}/log`, { signal: ctl.signal });
+    assert.equal(log.status, 200);
+    let logText = '', logEnded = false;
+    (async () => { try { for await (const chunk of log.body) logText += String(Buffer.from(chunk)); } catch { /* closed */ } logEnded = true; })();
+    await send(1, true);
+    await settle();
+    assert.equal(seen.includes('ci-queue'), true, 'signed in: the private notice arrives');
+    assert.match(logText, /first line/);
+
+    assert.equal((await w.req('/api/auth/logout', { method: 'POST', headers: { 'x-csrf-token': csrf } })).status, 200);
+    seen.length = 0;
+    writeFileSync(join(w.dataDir, 'ops', `${id}.log`), 'first line\nwritten after signing out\n');
+    await send(2, true);
+    await settle();
+    assert.equal(seen.includes('ci-queue'), false, 'a private notice no longer reaches the stream');
+    await send(3, false);
+    await settle();
+    assert.equal(seen.includes('ci-queue'), true, 'it stays open, as a visitor\'s');
+    assert.equal(logEnded, true, 'the log stream was closed');
+    assert.ok(!logText.includes('written after signing out'));
+    assert.match(logText, /event: error\ndata: \{"error":"Signed out, or access to this network was removed"\}/);
+  } finally { ctl.abort(); w.close(); }
+});
+
+// The built-in defaults name an admin. A read of settings.json that fails once
+// (too many open files, an I/O error) answers with them; remembered under the
+// stamp of the good file, they would stay until the next change.
+test('a read of the settings that fails once is refused and not remembered', async () => {
+  const w = await start(9920871, [{ id: 77, login: 'other', role: 'admin', networks: ['*'] }]);
+  const real = fs.readFileSync;
+  try {
+    const csrf = await w.login();
+    const token = bot(w, (await issueToken(w, csrf, { label: 'was admin', role: 'admin' })).token);
+    // Another admin makes the account a viewer: in the file it is one from now on.
+    const s = JSON.parse(readFileSync(join(w.dataDir, 'settings.json'), 'utf8'));
+    s.operators = [{ id: 77, login: 'other', role: 'admin', networks: ['*'] }, { id: 9920871, login: 'someone', role: 'viewer', networks: ['testnet'] }];
+    writeFileSync(join(w.dataDir, 'settings.json'), JSON.stringify(s));
+    assert.equal((await (await token('/api/me')).json()).role, 'viewer');
+    // The agent replaces devnets.json, and the read of settings.json that follows fails, once.
+    let failures = 1;
+    fs.readFileSync = (path, ...rest) => {
+      if (failures && String(path).endsWith('settings.json')) { failures -= 1; throw Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' }); }
+      return real(path, ...rest);
+    };
+    syncBuiltinESMExports();
+    writeFileSync(join(w.dataDir, 'devnets.json'), '{}');
+    assert.equal((await token('/api/me')).status, 503, 'no answer from the defaults');
+    assert.equal(failures, 0, 'the read did fail');
+    const after = await token('/api/me');
+    assert.deepEqual([after.status, (await after.json()).role], [200, 'viewer'], 'the next request reads the file again');
+  } finally { fs.readFileSync = real; syncBuiltinESMExports(); w.close(); }
+});
+
+test('one address holds a bounded number of live streams, and gets them back when it closes one', async () => {
+  const w = await start(9920871, [], { streamsPerAddress: 2 });
+  const open = [];
+  const stream = async () => { const ctl = new AbortController(); const r = await w.req('/api/stream', { signal: ctl.signal }); if (r.status === 200) open.push(ctl); else await r.arrayBuffer(); return r; };
+  try {
+    assert.deepEqual([(await stream()).status, (await stream()).status], [200, 200]);
+    const refused = await stream();
+    assert.equal(refused.status, 429);
+    assert.equal(refused.headers.get('retry-after'), '30');
+    assert.equal((await w.req('/api/overview')).status, 200, 'only streams are counted');
+    open.shift().abort();
+    let again = 0;
+    for (let i = 0; i < 40 && again !== 200; i++) { await new Promise((r) => setTimeout(r, 50)); again = (await stream()).status; }
+    assert.equal(again, 200);
+    // The visitors hold their two again. An account at the same address has its own.
+    await w.login();
+    assert.equal((await stream()).status, 200, 'a signed-in stream is not refused for the visitors\' two');
+  } finally { for (const s of open) s.abort(); w.close(); }
 });

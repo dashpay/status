@@ -39,7 +39,7 @@ try {
     const download = page.waitForEvent('download'); await page.getByRole('button', { name: 'Download private keys (.json)' }).click();
     assert.equal((await download).suggestedFilename(), 'devnet-sakura-private-keys.json');
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'no viewport overflow');
-    await page.screenshot({ path: `../../reports/status-connect-keys-20261007/fixture-${viewport.width}.png`, fullPage: true });
+    await page.screenshot({ path: `artifacts/connect-keys-${viewport.width}.png`, fullPage: true });
     await page.getByRole('button', { name: 'Hide keys' }).click();
     assert.equal(await page.getByRole('textbox', { name: 'Voting private key (WIF)' }).count(), 0);
     assert.deepEqual(errors, []); await page.close();

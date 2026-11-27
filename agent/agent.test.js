@@ -206,6 +206,32 @@ test('operation lifecycle: request -> enroll -> plan -> review -> confirm -> upg
   assert.equal(readdirSync(dirs.requests).length, 0);
 });
 
+test('every step of an operation, the journal reads included, runs the binary it was planned with', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ops-pin-'));
+  const dirs = { data: root, private: join(root, 'private'), requests: join(root, 'req'), ops: join(root, 'ops'), work: join(root, 'work'), state: join(root, 'state') };
+  const image = join(root, 'image-dashnet');
+  writeFileSync(image, 'planned-with', { mode: 0o755 });
+  const used = [], fake = fakeDashnet([]);
+  const ops = createOps({ settings: () => settings, dirs, key: { path: '/key' }, pool: { knownHosts: () => 'x\n', pins: new Proxy({}, { get: () => ({ type: 'ssh-ed25519', key: 'k' }) }) }, binary: image, log: () => {},
+    spawnImpl: (bin, args, options) => { used.push([args[0], bin]); return fake(bin, args, options); } });
+  mkdirSync(dirs.state, { recursive: true });
+  writeFileSync(join(dirs.state, 'testnet.json'), JSON.stringify({ hosts: [host('seed-2', 'seed', [['dashd', 'dashpay/dashd'], ['tenderdash', 'dashpay/tenderdash']])] }));
+  const id = '5c8139ad-e92f-40da-943d-1e001efaccb5', actor = { id: 9920871, login: 'ktechmidas' };
+  writeFileSync(join(dirs.requests, `${id}.json`), JSON.stringify({ type: 'create', id, network: 'testnet', action: 'upgrade', nodes: ['seed-2'], components: ['tenderdash'], images: { tenderdash: 'dashpay/tenderdash:1.8.2' }, actor }));
+  const read = () => JSON.parse(readFileSync(join(dirs.ops, `${id}.json`), 'utf8'));
+  const until = async (status) => { for (let i = 0; i < 200; i++) { ops.tick(); if (read().status === status) return read(); await new Promise((r) => setTimeout(r, 5)); } throw new Error(`never reached ${status}: ${read().status} ${read().error}`); };
+  const r = await until('review');
+  // The agent image is replaced between review and confirmation.
+  writeFileSync(image, 'a-later-image', { mode: 0o755 });
+  writeFileSync(join(dirs.requests, `${id}.confirm.json`), JSON.stringify({ type: 'confirm', id, network: 'testnet', planId: r.review.planId, actor }));
+  await until('succeeded');
+  const pinned = join(dirs.work, id, '1', 'dashnet');
+  assert.equal(readFileSync(pinned, 'utf8'), 'planned-with');
+  assert.equal(used.filter(([cmd]) => cmd === 'managed-operation').length, 2, 'the journal is read when planning and again when executing');
+  assert.ok(used.some(([cmd]) => cmd === 'managed-upgrade'));
+  for (const [cmd, bin] of used) assert.equal(bin, pinned, `${cmd} ran ${bin}`);
+});
+
 test('run as soon as ready: the prepared plan is confirmed automatically and executed', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ops-'));
   const dirs = { data: root, private: join(root, 'private'), requests: join(root, 'req'), ops: join(root, 'ops'), work: join(root, 'work'), state: join(root, 'state') };
