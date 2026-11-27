@@ -218,14 +218,25 @@ export function keepNewerDevnetVersions(devnets, loaded, disk) {
   return next;
 }
 
-export function loadSettings(path) {
-  let settings;
+export function loadSettings(path) { return readSettings(path).settings; }
+
+// The settings, and whether they are what the two files hold. `fromFile` is
+// false when settings.json could not be read or did not validate and the
+// built-in defaults stand in for it. `registryRead` is false when devnets.json
+// is there and could not be read. A caller that keeps the answer must not keep
+// one that is not from the files: a read can fail once, and the defaults name
+// an admin.
+export function readSettings(path) {
+  let settings, fromFile = true, registry = {}, registryRead = true;
   try { settings = validateSettings(JSON.parse(readFileSync(path, 'utf8'))); }
   catch (e) {
     if (e.code !== 'ENOENT') console.error(`settings: ${e.message}; using defaults`);
-    settings = structuredClone(DEFAULT_SETTINGS);
+    settings = structuredClone(DEFAULT_SETTINGS); fromFile = false;
   }
-  return mergeDevnets(settings, readJSON(join(dirname(path), 'devnets.json'), {}));
+  try { registry = JSON.parse(readFileSync(join(dirname(path), 'devnets.json'), 'utf8')); }
+  catch (e) { registry = {}; registryRead = e.code === 'ENOENT'; }
+  if (!registry || typeof registry !== 'object' || Array.isArray(registry)) { registry = {}; registryRead = false; }
+  return { settings: mergeDevnets(settings, registry), fromFile, registryRead };
 }
 
 // Devnets created from the console are registered by the agent in devnets.json

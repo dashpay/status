@@ -20,7 +20,7 @@ import { createTriage } from './triage.js';
 import { loadControl, setDispatch } from './remediation-control.js';
 import { clearActivity, loadActivity } from './remediation-activity.js';
 import { publicInventory } from './aws-public.js';
-import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, keepNewerDevnetVersions, loadSettings, memberOf, operatorFor, patchDevnetVersions, readJSON, saveSettings, validateSettings, writeAtomic } from '../shared/settings.js';
+import { COMPONENTS, COMPONENT_REPOS, accessFor, adminFor, keepNewerDevnetVersions, memberOf, operatorFor, patchDevnetVersions, readJSON, readSettings, saveSettings, validateSettings, writeAtomic } from '../shared/settings.js';
 import { expectations } from '../shared/monitoring.js';
 import { evaluateNetwork, projectNetwork } from '../shared/evaluate.js';
 import { requestDevnetKeys } from './devnet-keys.js';
@@ -60,23 +60,23 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   // current settings without parsing them again.
   const stamp = (path) => { try { const s = statSync(path); return `${s.ino}|${s.size}|${s.mtimeMs}|${s.ctimeMs}`; } catch { return 'absent'; } };
   const settingsStamp = () => `${stamp(settingsPath)} ${stamp(join(dataDir, 'devnets.json'))}`;
-  let settings, loadedAs, validAs = null;
+  // Only an answer that came from both files is remembered. A read that failed
+  // gives the built-in defaults, which name an admin: kept under the stamp of a
+  // good file, one failed read would hand that admin's access to its tokens
+  // until the next change. So such an answer is read again on the next call.
+  let settings, loadedAs = null, fromFile = false;
   const reloadSettings = () => {
     const now = settingsStamp();
-    if (now !== loadedAs) { settings = loadSettings(settingsPath); loadedAs = now; }
+    if (loadedAs !== null && now === loadedAs) return settings;
+    const read = readSettings(settingsPath);
+    settings = read.settings; fromFile = read.fromFile;
+    loadedAs = read.fromFile && read.registryRead ? now : null;
     return settings;
   };
   reloadSettings();
-  // True when settings.json itself reads and validates: loadSettings answers a
-  // missing or damaged file with the built-in defaults, and those name an admin.
-  const settingsValid = () => {
-    const now = stamp(settingsPath);
-    if (now === 'absent') return false;
-    if (now !== validAs) {
-      try { validateSettings(JSON.parse(readFileSync(settingsPath, 'utf8'))); validAs = now; } catch { validAs = null; return false; }
-    }
-    return true;
-  };
+  // The current settings, and true when settings.json itself read and validated
+  // (not the defaults standing in for it).
+  const settingsValid = () => { reloadSettings(); return fromFile; };
   const app = express();
   const auth = createAuth({ origin }, { store: join(dataDir, 'sessions.json'), ...authDeps });
   const tokens = createApiTokens({ dataDir, clock });
@@ -176,8 +176,8 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     // The grant is read from the settings on disk, and only from a file that
     // validates: loadSettings falls back to the built-in defaults, which name an
     // admin, and a token must never be authorized by that fallback.
+    // settingsValid has just read them: no second read that could fail between.
     if (!settingsValid()) return { status: 503, error: 'Access settings unavailable' };
-    reloadSettings();
     const t = tokens.authenticate(header);
     const bot = t && { token: t.id, user: { id: t.owner.id, login: t.owner.login, token: t.id, grant: { role: t.role, networks: t.networks } } };
     // A demoted or removed account takes its tokens with it at once.
@@ -289,14 +289,17 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   // number: the nginx in front runs out of connections long before this
   // process does, and then the whole site is unreachable.
   app.get('/api/stream', (req, res) => {
+    // Visitors and accounts are counted apart: a visitor behind the same
+    // address as an operator cannot use up the operator's streams.
+    const known = !!user(req);
     let held = 0;
-    for (const c of clients) if (c.ip === req.ip) held++;
+    for (const c of clients) if (c.ip === req.ip && c.known === known) held++;
     if (held >= streamsPerAddress) return res.status(429).set('Retry-After', '30').json({ error: 'Too many live streams from this address' });
     res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     res.flushHeaders();
     // Who a stream belongs to is asked each time something is sent, not once:
     // a session that signed out or ran out is a visitor from then on.
-    const client = { res, req, ip: req.ip, get user() { return user(req); } };
+    const client = { res, req, ip: req.ip, known, get user() { return user(req); } };
     clients.add(client);
     // A write to a socket that has gone reports its error here, later. Without
     // a listener that error would end the process, and with it every stream.
@@ -417,7 +420,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   // Explicit, network-scoped operator action; never part of config or stream data.
   app.post('/api/networks/:name/keys', (req, res, next) => {
     if (!settingsValid()) return res.status(503).json({ error: 'Key access settings unavailable' });
-    reloadSettings(); next();
+    next();
   }, signedIn, requireOperator, auth.csrf,
     rateLimit({ windowMs: 60_000, limit: 6, standardHeaders: true, legacyHeaders: false }), async (req, res) => {
       const n = settings.networks.find(x => x.name === req.params.name);
@@ -546,7 +549,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     // Never from the built-in defaults: with the file missing or damaged, a
     // save here would replace users and networks with them.
     if (!settingsValid()) return res.status(503).json({ error: 'Settings unavailable' });
-    const current = reloadSettings();
+    const current = settings;
     if (!isAdmin(req)) return res.status(403).json({ error: 'Only admins can change devnet defaults' });
     let devnets, changed;
     try { ({ devnets, changed } = patchDevnetVersions(current.devnets, req.body)); }

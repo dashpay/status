@@ -152,11 +152,15 @@ function LiveLog({ id, initial, active }) {
   // Opened once per operation from the first loaded offset; op refreshes do not reconnect it.
   const offset = useRef(initial?.offset || 0);
   useEffect(() => {
-    let es, timer, closed = false;
+    let es, timer, closed = false, wait = 3000;
     const open = () => {
       es = new EventSource(`/api/ops/${id}/log?offset=${offset.current}`);
       es.addEventListener('log', (e) => { const d = JSON.parse(e.data); offset.current = d.offset; setText((t) => (t + d.text).slice(-400_000)); });
-      es.onerror = () => { if (es.readyState === EventSource.CLOSED && !closed) timer = setTimeout(open, 3000); };
+      // A stream that is refused (signed out, access removed) is asked for
+      // again less and less often, not every three seconds for as long as the
+      // tab is open.
+      es.onopen = () => { wait = 3000; };
+      es.onerror = () => { if (es.readyState === EventSource.CLOSED && !closed) { timer = setTimeout(open, wait); wait = Math.min(wait * 2, 60_000); } };
     };
     open();
     return () => { closed = true; clearTimeout(timer); es?.close(); };

@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createWeb, ttlCache } from './web.js';
@@ -940,7 +941,7 @@ test('an open stream and an open operation log stop serving a session that signe
         workflow_job: { id, run_id: id, status: 'queued', name: 'lint', workflow_name: 'CI', labels: ['x'], created_at: new Date().toISOString() } });
       return w.req('/api/ci/github-webhook', { method: 'POST', body, headers: { 'content-type': 'application/json', 'x-github-event': 'workflow_job', 'x-hub-signature-256': `sha256=${createHmac('sha256', 'hook-secret').update(body).digest('hex')}` } });
     };
-    const settle = () => new Promise((r) => setTimeout(r, 1300)); // notices are debounced by 1 s
+    const settle = () => new Promise((r) => setTimeout(r, 2000)); // notices are debounced by 1 s; room for a loaded runner
     const csrf = await w.login();
     const id = '6c8139ad-e92f-40da-943d-1e001efaccb5';
     mkdirSync(join(w.dataDir, 'ops'), { recursive: true });
@@ -974,6 +975,35 @@ test('an open stream and an open operation log stop serving a session that signe
   } finally { ctl.abort(); w.close(); }
 });
 
+// The built-in defaults name an admin. A read of settings.json that fails once
+// (too many open files, an I/O error) answers with them; remembered under the
+// stamp of the good file, they would stay until the next change.
+test('a read of the settings that fails once is refused and not remembered', async () => {
+  const w = await start(9920871, [{ id: 77, login: 'other', role: 'admin', networks: ['*'] }]);
+  const real = fs.readFileSync;
+  try {
+    const csrf = await w.login();
+    const token = bot(w, (await issueToken(w, csrf, { label: 'was admin', role: 'admin' })).token);
+    // Another admin makes the account a viewer: in the file it is one from now on.
+    const s = JSON.parse(readFileSync(join(w.dataDir, 'settings.json'), 'utf8'));
+    s.operators = [{ id: 77, login: 'other', role: 'admin', networks: ['*'] }, { id: 9920871, login: 'someone', role: 'viewer', networks: ['testnet'] }];
+    writeFileSync(join(w.dataDir, 'settings.json'), JSON.stringify(s));
+    assert.equal((await (await token('/api/me')).json()).role, 'viewer');
+    // The agent replaces devnets.json, and the read of settings.json that follows fails, once.
+    let failures = 1;
+    fs.readFileSync = (path, ...rest) => {
+      if (failures && String(path).endsWith('settings.json')) { failures -= 1; throw Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' }); }
+      return real(path, ...rest);
+    };
+    syncBuiltinESMExports();
+    writeFileSync(join(w.dataDir, 'devnets.json'), '{}');
+    assert.equal((await token('/api/me')).status, 503, 'no answer from the defaults');
+    assert.equal(failures, 0, 'the read did fail');
+    const after = await token('/api/me');
+    assert.deepEqual([after.status, (await after.json()).role], [200, 'viewer'], 'the next request reads the file again');
+  } finally { fs.readFileSync = real; syncBuiltinESMExports(); w.close(); }
+});
+
 test('one address holds a bounded number of live streams, and gets them back when it closes one', async () => {
   const w = await start(9920871, [], { streamsPerAddress: 2 });
   const open = [];
@@ -988,5 +1018,8 @@ test('one address holds a bounded number of live streams, and gets them back whe
     let again = 0;
     for (let i = 0; i < 40 && again !== 200; i++) { await new Promise((r) => setTimeout(r, 50)); again = (await stream()).status; }
     assert.equal(again, 200);
+    // The visitors hold their two again. An account at the same address has its own.
+    await w.login();
+    assert.equal((await stream()).status, 200, 'a signed-in stream is not refused for the visitors\' two');
   } finally { for (const s of open) s.abort(); w.close(); }
 });
