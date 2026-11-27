@@ -246,24 +246,36 @@ test('an incident filed while it is held ends as filed, once nothing of it is he
   assert.deepEqual([v.episodes.length, v.episodes[0].clearSince], [1, at(T0 + 120_000)]);
   v = advance(v, sort([a], [entry([groupOf(a).exact])]), T0 + 120_000 + QUIET_MS);
   assert.equal(v.ended.at(-1).outcome, 'recovered');
-  // A held fault keeps the level it counted at, whatever it reads while the
-  // change runs. Filed at that level it stays held, named by the entry, and
-  // ends the incident as filed when the hold ends at that level again.
+  // An incident keeps the level each of its faults last counted at, whatever a
+  // fault reads while the change runs. Filed at that level it stays held, named
+  // by the entry, and ends the incident as filed when the hold ends at that
+  // level again.
   const worseB = { ...b, severity: 'critical', suppressed: true }, filedB = [entry([groupOf(b).exact])];
   let q = advance(null, sort([b], []), T0);
   q = advance(q, sort([worseB], []), T0 + 60_000);
-  assert.deepEqual([q.pending[b.id].level, q.episodes[0].severity], ['warning', 'warning']);
+  assert.deepEqual([q.episodes[0].levels, q.episodes[0].severity], [{ [b.id]: 'warning' }, 'warning']);
   assert.deepEqual(sort([worseB], filedB).map((x) => [x.pile, x.outgrown]), [['held', 'aaaaaaaaaaaa']]);
   q = advance(q, sort([worseB], filedB), T0 + 120_000);
   assert.deepEqual([q.episodes.length, q.episodes[0].current, q.episodes[0].clearSince], [1, [b.id], null]);
   q = advance(q, sort([b], filedB), T0 + 180_000);
-  assert.deepEqual([q.episodes.length, q.ended.at(-1).outcome], [0, 'filed']);
-  // A fault held before it ever counted has no such level.
-  assert.equal(advance(null, sort([heldA], []), T0).pending[a.id], undefined);
-  // One fault new and another held: both are what the incident has now.
+  assert.deepEqual([q.episodes.length, q.ended.at(-1).outcome, 'levels' in q.ended.at(-1)], [0, 'filed', false]);
+  // One fault new and another held: both are what the incident has now, and
+  // the held one keeps the level it counted at.
   let m = advance(null, sort([a, b], []), T0);
-  m = advance(m, sort([heldA, b], []), T0 + 60_000);
-  assert.deepEqual([m.episodes[0].current, m.episodes[0].revision], [[a.id, b.id], 1]);
+  m = advance(m, sort([{ ...heldA, severity: 'info' }, { ...b, severity: 'critical' }], []), T0 + 60_000);
+  assert.deepEqual([m.episodes[0].current, m.episodes[0].levels], [[a.id, b.id], { [a.id]: 'critical', [b.id]: 'critical' }]);
+  // The incident's new fault is filed while an old one of it, filed long ago,
+  // reads above its ceiling during a restart. The old one is no part of what
+  // the incident has now: the incident ends as filed, at once.
+  const old = insight(), fresh = wallet(), filedOld = [entry([groupOf(old).exact])];
+  let k = advance(null, sort([old], []), T0);
+  k = advance(k, sort([old, fresh], filedOld), T0 + 60_000);
+  assert.deepEqual(k.episodes[0].current, [fresh.id]);
+  const oldWorse = { ...old, severity: 'critical', suppressed: true };
+  k = advance(k, sort([oldWorse, fresh], filedOld), T0 + 120_000);
+  assert.deepEqual(k.episodes[0].current, [fresh.id]);
+  k = advance(k, sort([oldWorse, fresh], [entry([groupOf(old).exact, groupOf(fresh).exact])]), T0 + 180_000);
+  assert.deepEqual([k.episodes.length, k.ended.at(-1).outcome, k.ended.at(-1).endedAt], [0, 'filed', at(T0 + 180_000)]);
   // A fault of the incident's past, filed since, reads above its ceiling while
   // its host restarts. That is not what the incident has now: the quiet hour of
   // the fault that did recover runs on, and the incident ends as a recovery.
@@ -446,15 +458,33 @@ test('an incident whose faults are held for a change in progress lists them and 
     const capped = triage.file({ incident: mild.id, reason: 'devnet-z is being moved to new hosts', wide: true }, 'latte');
     assert.deepEqual(capped.match.map((p) => [p.target, p.severity]), [['host-3', 'warning'], ['api', 'warning']]);
     assert.deepEqual(capped.covers.map((p) => [p.target, p.severity]), [['*', 'warning']]);
-    // It reads above what was filed: it stays held and says which entry names
-    // it, the incident waits, and it is not filed a second time.
+    // It reads above what was filed: it stays held and says that it is filed
+    // and under which entry, the incident waits, and it is not filed a second time.
     const during = triage.view({ full: true }).incidents.find((i) => i.id === mild.id);
-    assert.deepEqual([during.issues.length, during.held.map((i) => [i.target, i.outgrown]), during.canWiden, during.clearSince], [0, [['host-3', capped.id]], false, null]);
+    assert.deepEqual([during.issues.length, during.held.map((i) => [i.target, i.outgrown, i.filed]), during.canWiden, during.clearSince], [0, [['host-3', capped.id, true]], false, null]);
     assert.throws(() => triage.file({ incident: mild.id, reason: 'once more' }, 'latte'), (e) => e.status === 409 && /no open fault/.test(e.message));
     assert.equal(triage.view({ full: true }).known.filter((k) => k.title === 'devnet-z').length, 1);
     // The hold ends and it is still critical: above what was filed, so new again.
     f.tick(60_000); f.state([a, b, c, { ...host3, severity: 'critical' }, api3]);
     assert.deepEqual(triage.view({ full: true }).incidents.filter((i) => i.title === 'devnet-z').map((i) => i.issues.map((x) => [x.target, x.outgrown])), [[['host-3', capped.id]]]);
+    // Worse than when it was filed, counted as such, and then held: that
+    // reading was looked at, so it can be filed, at that level.
+    const now3 = triage.view({ full: true }).incidents.find((i) => i.id === mild.id);
+    assert.deepEqual(now3.issues.map((x) => [x.target, x.severity]), [['host-3', 'critical']]);
+    f.tick(60_000); f.state([a, b, c, { ...host3, severity: 'critical', suppressed: true }, api3]);
+    const heldWorse = triage.view({ full: true }).incidents.find((i) => i.id === mild.id);
+    assert.deepEqual([heldWorse.held.map((i) => [i.target, i.outgrown, i.filed]), heldWorse.canWiden], [[['host-3', capped.id, undefined]], true]);
+    const again = triage.file({ incident: mild.id, reason: 'host-3 stays down until the move is done' }, 'latte');
+    assert.deepEqual(again.match.map((p) => [p.target, p.severity]), [['host-3', 'critical']]);
+    assert.deepEqual([triage.view({ full: true }).ended[0].id, triage.view({ full: true }).ended[0].outcome], [mild.id, 'filed']);
+    // Killed, gone for one look, and started again in an incident that has had
+    // a critical fault: the level it counted at is still on record.
+    const host4 = issue('network', 'devnet-w', 'host-4', 'host_health'), host5 = issue('network', 'devnet-w', 'host-5', 'host_health', 'critical');
+    f.tick(60_000); f.state([a, b, c, host4, host5]);
+    const flap = triage.view({ full: true }).incidents.find((i) => i.title === 'devnet-w');
+    f.tick(60_000); f.state([a, b, c]);
+    f.tick(60_000); f.state([a, b, c, { ...host4, severity: 'critical', suppressed: true }]);
+    assert.deepEqual(triage.file({ incident: flap.id, reason: 'host-4 is restarted by the test rig', wide: true }, 'latte').covers.map((p) => [p.target, p.severity]), [['*', 'warning']]);
     f.tick(60_000); f.state([a, b, c]);
     // Nothing of an incident open or held any more: there is nothing to file, and the answer says so.
     const d = issue('network', 'devnet-y', 'host-2', 'host_health');

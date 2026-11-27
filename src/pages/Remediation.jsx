@@ -16,13 +16,14 @@ function Severity({ level }) {
   return <Dot level={dot} title={title} className="mr-2 align-middle" />;
 }
 
-function Fault({ issue, held = false }) {
+function Fault({ issue }) {
   return <li className="break-words">
     <Severity level={issue.severity} />{issue.title}
     <span className="text-dim"> · {[issue.target, issue.scope !== issue.target ? issue.scope : null].filter(Boolean).join(' · ')}</span>
     {issue.detail && <span> · {issue.detail}</span>}
     {issue.link && <> · <a className="link" href={issue.link} target="_blank" rel="noreferrer noopener">run ↗</a></>}
-    {issue.outgrown && <span className="lv-warn"> · {held ? 'filed as known; reads worse while it is held' : 'worse than when it was filed as known'}</span>}
+    {issue.filed ? <span className="text-dim"> · filed as known; reads worse while it is held</span>
+      : issue.outgrown && <span className="lv-warn"> · worse than when it was filed as known</span>}
   </li>;
 }
 
@@ -83,9 +84,9 @@ function Incident({ item, known, now, admin, reload }) {
     </summary>
     <div className="border-t border-line px-3 py-3 text-[12px] space-y-3">
       {faults ? <ul className="space-y-1">{item.issues.map((i) => <Fault key={i.id} issue={i} />)}</ul> : !held && <p className="text-dim">No fault of this incident is open right now.</p>}
-      {held > 0 && <div data-incident-held><div className="label mb-1">Held for a change in progress · not counted until it ends</div><ul className="space-y-1">{item.held.map((i) => <Fault key={i.id} issue={i} held />)}</ul></div>}
+      {held > 0 && <div data-incident-held><div className="label mb-1">Held for a change in progress · not counted until it ends</div><ul className="space-y-1">{item.held.map((i) => <Fault key={i.id} issue={i} />)}</ul></div>}
       {l && <p className="text-dim">{STATE[l.state]?.[0] || l.state} since {clock(l.since || l.at)}{l.slack ? ' · reported in Slack' : ''}{l.thread ? ` · worker thread ${l.thread}` : ''}{l.revision < item.revision ? ' · the incident got worse, or something else failed, after this report' : ''}</p>}
-      {admin && (faults > 0 || item.held?.some((i) => !i.outgrown)) && <FileKnown incident={item} known={known} reload={reload} />}
+      {admin && (faults > 0 || item.held?.some((i) => !i.filed)) && <FileKnown incident={item} known={known} reload={reload} />}
       <div className="mono text-[10px] text-dim break-all">Incident {item.id} · revision {item.revision} · {item.seen} fault{item.seen === 1 ? '' : 's'} seen in all</div>
     </div>
   </details>;
