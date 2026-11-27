@@ -22,7 +22,8 @@ function Fault({ issue }) {
     <span className="text-dim"> · {[issue.target, issue.scope !== issue.target ? issue.scope : null].filter(Boolean).join(' · ')}</span>
     {issue.detail && <span> · {issue.detail}</span>}
     {issue.link && <> · <a className="link" href={issue.link} target="_blank" rel="noreferrer noopener">run ↗</a></>}
-    {issue.outgrown && <span className="lv-warn"> · worse than when it was filed as known</span>}
+    {issue.filed ? <span className="text-dim"> · filed as known; reads worse while it is held</span>
+      : issue.outgrown && <span className="lv-warn"> · worse than when it was filed as known</span>}
   </li>;
 }
 
@@ -65,12 +66,12 @@ function FileKnown({ incident, known, reload }) {
 
 function Incident({ item, known, now, admin, reload }) {
   const [label, color] = STATE[item.state] || STATE.new, l = item.ledger;
-  const faults = item.issues.length;
+  const faults = item.issues.length, held = item.held?.length || 0;
   return <details className="panel group" data-incident={item.id}>
     <summary className="cursor-pointer list-none p-3 flex flex-wrap items-start gap-3">
       <span className={`tag shrink-0 ${color}`}>{label}</span>
       <div className="min-w-0 flex-1 basis-52">
-        <div className="font-semibold break-words"><Severity level={item.severity} />{item.title} <span className="text-dim font-normal">· {item.kind}{faults !== 1 ? ` · ${faults} faults` : ''}</span></div>
+        <div className="font-semibold break-words"><Severity level={item.severity} />{item.title} <span className="text-dim font-normal">· {item.kind}{faults !== 1 && !(held && !faults) ? ` · ${faults} faults` : ''}{held ? ` · ${held} held` : ''}</span></div>
         {l?.summary ? <p className="text-[12px] mt-1 break-words">{l.summary}</p>
           : <p className="text-[12px] text-dim mt-1 break-words">{item.issues.slice(0, 3).map((i) => [i.target, i.detail || i.title].filter(Boolean).join(': ')).join(' · ')}{faults > 3 ? ` · and ${faults - 3} more` : ''}</p>}
         {item.clearSince && <p className="text-[12px] lv-ok mt-1" title={clock(item.clearSince)}>Monitoring sees no fault since {ago(item.clearSince, now)} ago; it closes after an hour clear.</p>}
@@ -82,9 +83,10 @@ function Incident({ item, known, now, admin, reload }) {
       </div>
     </summary>
     <div className="border-t border-line px-3 py-3 text-[12px] space-y-3">
-      {faults ? <ul className="space-y-1">{item.issues.map((i) => <Fault key={i.id} issue={i} />)}</ul> : <p className="text-dim">No fault of this incident is open right now.</p>}
+      {faults ? <ul className="space-y-1">{item.issues.map((i) => <Fault key={i.id} issue={i} />)}</ul> : !held && <p className="text-dim">No fault of this incident is open right now.</p>}
+      {held > 0 && <div data-incident-held><div className="label mb-1">Held for a change in progress · not counted until it ends</div><ul className="space-y-1">{item.held.map((i) => <Fault key={i.id} issue={i} />)}</ul></div>}
       {l && <p className="text-dim">{STATE[l.state]?.[0] || l.state} since {clock(l.since || l.at)}{l.slack ? ' · reported in Slack' : ''}{l.thread ? ` · worker thread ${l.thread}` : ''}{l.revision < item.revision ? ' · the incident got worse, or something else failed, after this report' : ''}</p>}
-      {admin && faults > 0 && <FileKnown incident={item} known={known} reload={reload} />}
+      {admin && (faults > 0 || item.held?.some((i) => !i.filed)) && <FileKnown incident={item} known={known} reload={reload} />}
       <div className="mono text-[10px] text-dim break-all">Incident {item.id} · revision {item.revision} · {item.seen} fault{item.seen === 1 ? '' : 's'} seen in all</div>
     </div>
   </details>;

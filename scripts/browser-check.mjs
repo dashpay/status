@@ -286,6 +286,23 @@ try {
       assert.match(await network.innerText(), /private-insight[\s\S]*private core is not running/);
       assert.ok(!(await network.innerText()).includes('private-host-2'), 'a fault held for an operation is not part of the incident');
       assert.ok(!(await page.locator('body').innerText()).includes('private-gone-host'), 'a resolved fault is in no pile');
+      // A change in progress on the incident's hosts: its faults are held, stay
+      // listed with the incident, and the incident can still be filed although
+      // none of them is open.
+      const own = board.issues.filter((i) => ['core', 'insight'].includes(i.id));
+      for (const i of own) i.suppressed = true;
+      writeBoard();
+      const heldFaults = network.locator('[data-incident-held]');
+      await heldFaults.waitFor({ timeout: 20_000 });
+      await network.getByText('2 held').waitFor({ timeout: 20_000 });
+      assert.match(await heldFaults.innerText(), /private-insight[\s\S]*private core is not running/);
+      assert.ok(!(await heldFaults.innerText()).includes('private-host-2'), 'a fault that was held before it ever counted is not part of the incident');
+      assert.ok(!/0 faults|No fault of this incident is open/.test(await network.innerText()), 'held is not "nothing open"');
+      assert.equal(await network.locator('[data-known-open]').count(), 1, 'an incident with nothing but held faults can be filed');
+      for (const i of own) delete i.suppressed;
+      writeBoard();
+      await heldFaults.waitFor({ state: 'detached', timeout: 20_000 });
+      assert.match(await network.innerText(), /private-insight[\s\S]*private core is not running/);
       // The worker reports on the job through its own token; the page follows without a reload.
       const jobId = await job.getAttribute('data-incident');
       assert.equal((await workerSays(jobId, { state: 'needs_you', summary: 'Private worker report: the build needs a maintainer', slack: { channel: 'C0C5QSM5FFG', ts: '1764237600.000100' } })).status, 200);
