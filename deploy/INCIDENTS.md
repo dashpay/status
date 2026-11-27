@@ -166,10 +166,13 @@ that is still present is revised with fresh evidence and is new to triage.
 probe every cycle, so a manual `docker compose pull && up` of the quorum
 server, or a hand-run Testnet upgrade, is recognised without a dashboard
 operation. A container that had stopped and was started again as it was
-(`docker start` after a kill, a stop or a crash; Docker keeps the time of its
-last exit, and a recreated container has none) is a service brought back, not
-a planned change: it holds nothing, so what is still wrong around it stays
-actionable. A crash loop under a restart policy increments `RestartCount` and is
+(`docker start` after a kill, a stop or a crash, and likewise `docker restart`
+or `docker compose restart`; Docker keeps the time of its last exit, and a
+recreated container has none) is a service brought back, not a planned change:
+it holds nothing, so what is still wrong around it stays actionable. A restart
+that changes neither image nor configuration is therefore not held; it is over
+before a fault counts. After a reboot the hold rests on the host's uptime
+alone. A crash loop under a restart policy increments `RestartCount` and is
 not a planned change; seen in a fresh probe, it ends that host's hold at once,
 even inside the settle window an earlier clean start opened. A network hold
 inferred from other hosts changing does not cover that host either: its fault

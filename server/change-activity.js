@@ -30,7 +30,7 @@ export function hostSignals(host, now = Date.now()) {
     // the last exit across a start; a recreated container has none (year 1).
     if (k.oneShot || k.running !== true || k.restarting || (k.restarts || 0) !== 0 || !text(k.name)
       || !Number.isFinite(started) || started > at + 60_000 || at - started >= SETTLE_MS
-      || (Number.isFinite(exited) && exited > 0)) continue;
+      || exited > 0) continue;
     signals.push({ kind: 'container', at: Math.min(started, at), name: k.name.slice(0, 120) });
   }
   return signals;
