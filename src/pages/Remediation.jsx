@@ -70,7 +70,7 @@ function Incident({ item, known, now, admin, reload }) {
     <summary className="cursor-pointer list-none p-3 flex flex-wrap items-start gap-3">
       <span className={`tag shrink-0 ${color}`}>{label}</span>
       <div className="min-w-0 flex-1 basis-52">
-        <div className="font-semibold break-words"><Severity level={item.severity} />{item.title} <span className="text-dim font-normal">· {item.kind}{faults !== 1 ? ` · ${faults} faults` : ''}</span></div>
+        <div className="font-semibold break-words"><Severity level={item.severity} />{item.title} <span className="text-dim font-normal">· {item.kind}{faults !== 1 && !(held && !faults) ? ` · ${faults} faults` : ''}{held ? ` · ${held} held` : ''}</span></div>
         {l?.summary ? <p className="text-[12px] mt-1 break-words">{l.summary}</p>
           : <p className="text-[12px] text-dim mt-1 break-words">{item.issues.slice(0, 3).map((i) => [i.target, i.detail || i.title].filter(Boolean).join(': ')).join(' · ')}{faults > 3 ? ` · and ${faults - 3} more` : ''}</p>}
         {item.clearSince && <p className="text-[12px] lv-ok mt-1" title={clock(item.clearSince)}>Monitoring sees no fault since {ago(item.clearSince, now)} ago; it closes after an hour clear.</p>}

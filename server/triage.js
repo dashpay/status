@@ -202,10 +202,12 @@ export function advance(previous, sorted, now, settleMs = 0) {
   const pile = new Map(sorted.map((s) => [s.issue.id, s.pile]));
   for (const [key, e] of open) {
     if (groups.has(key)) continue;
-    // Held for an operation is neither over nor new: it waits as it is, and
-    // keeps what was new on its last look, so that filing it while it is held
-    // ends it as filed and not, an hour later, as a recovery.
-    if (e.issues.some((id) => pile.get(id) === 'held')) continue;
+    // Held for an operation is neither over nor new: it waits as it is, and no
+    // quiet hour runs, whatever was clear before the hold. What is held is what
+    // it has now, so that filing it during the hold ends it as filed and not,
+    // an hour later, as a recovery.
+    const held = e.issues.filter((id) => pile.get(id) === 'held');
+    if (held.length) { e.current = held; e.clearSince = null; continue; }
     // Filed: what was new on the last look is known now. A fault that recovered
     // beside a filed one is a recovery, and gets its quiet hour.
     const filed = (e.current || []).some((id) => pile.get(id) === 'known' || pile.get(id) === 'expected');
@@ -423,9 +425,13 @@ export function createTriage({ dataDir, clock = Date.now, hooks = null, hook = p
   // `wide` everything else of its kind. A fault held for a change in progress
   // is one it has now: the hold says when to look at it, not whether it is
   // known, and whoever looked while it was open may file it after the hold began.
+  // A held fault often reads worse than it is while the change runs, and nobody
+  // has looked at that reading: it is filed at no more than the worst the
+  // incident has counted, so it cannot lift a ceiling by being restarted.
   const patternsOf = (id, wide) => {
     const episode = openEpisode(id), { sorted } = refresh();
-    const faults = sorted.filter((s) => (s.pile === 'new' || s.pile === 'held') && episode.issues.includes(s.issue.id)).map((s) => s.issue);
+    const counted = (issue) => (rank(issue.severity) > rank(episode.severity) ? { ...issue, severity: episode.severity } : issue);
+    const faults = sorted.filter((s) => (s.pile === 'new' || s.pile === 'held') && episode.issues.includes(s.issue.id)).map((s) => (s.pile === 'held' ? counted(s.issue) : s.issue));
     if (!faults.length) throw Object.assign(new Error('This incident has no open fault to file'), { status: 409 });
     // A name is taken as written, and `*` in a pattern means "anything": a
     // fault with one in its name would be filed wider than it is.
