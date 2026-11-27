@@ -202,13 +202,15 @@ export function advance(previous, sorted, now, settleMs = 0) {
   const pile = new Map(sorted.map((s) => [s.issue.id, s.pile]));
   for (const [key, e] of open) {
     if (groups.has(key)) continue;
+    // Held for an operation is neither over nor new: it waits as it is, and
+    // keeps what was new on its last look, so that filing it while it is held
+    // ends it as filed and not, an hour later, as a recovery.
+    if (e.issues.some((id) => pile.get(id) === 'held')) continue;
     // Filed: what was new on the last look is known now. A fault that recovered
     // beside a filed one is a recovery, and gets its quiet hour.
     const filed = (e.current || []).some((id) => pile.get(id) === 'known' || pile.get(id) === 'expected');
     e.current = [];
     if (!filed) {
-      // Held for an operation is neither over nor new: it waits as it is.
-      if (e.issues.some((id) => pile.get(id) === 'held')) continue;
       e.clearSince ??= at;
       if (now - Date.parse(e.clearSince) < QUIET_MS) continue;
     }
@@ -381,11 +383,15 @@ export function createTriage({ dataDir, clock = Date.now, hooks = null, hook = p
     const byId = new Map(sorted.map((s) => [s.issue.id, s]));
     const stateOf = (e) => (e.ledger && e.ledger.revision >= e.revision ? e.ledger.state : e.ledger ? 'worse' : 'new');
     const incident = (e) => {
-      const current = e.issues.map((id) => byId.get(id)).filter((s) => s?.pile === 'new');
-      const group = current.length ? groupOf(current[0].issue) : null;
+      const mine = e.issues.map((id) => byId.get(id)).filter(Boolean);
+      const current = mine.filter((s) => s.pile === 'new');
+      // Faults of this incident that a change in progress holds: not news and
+      // not over. They are listed apart, and can be filed like the open ones.
+      const held = mine.filter((s) => s.pile === 'held');
+      const first = current[0] || held[0], group = first ? groupOf(first.issue) : null;
       return { id: e.id, title: e.title, kind: e.kind, severity: e.severity, revision: e.revision, openedAt: e.openedAt, clearSince: e.clearSince, endedAt: e.endedAt || null, outcome: e.outcome || null,
         state: e.endedAt ? 'ended' : stateOf(e), ledger: e.ledger, issues: current.map((s) => ({ ...project(s.issue, true), ...(s.outgrown ? { outgrown: s.outgrown } : {}) })),
-        seen: e.issues.length, canWiden: !!group?.wide };
+        held: held.map((s) => project(s.issue, true)), seen: e.issues.length, canWiden: !!group?.wide };
     };
     const incidents = full ? triage.episodes.map(incident).sort((a, b) => rank(b.severity) - rank(a.severity) || a.openedAt.localeCompare(b.openedAt)) : [];
     const known = full ? entries.map((entry) => ({ ...entry, issues: seen.filter((s) => s.entry === entry.id && s.pile === 'known').map((s) => project(s.issue, true)),
@@ -414,10 +420,12 @@ export function createTriage({ dataDir, clock = Date.now, hooks = null, hook = p
     return found;
   };
   // The patterns an incident is filed under: every fault it has now, and with
-  // `wide` everything else of its kind.
+  // `wide` everything else of its kind. A fault held for a change in progress
+  // is one it has now: the hold says when to look at it, not whether it is
+  // known, and whoever looked while it was open may file it after the hold began.
   const patternsOf = (id, wide) => {
     const episode = openEpisode(id), { sorted } = refresh();
-    const faults = sorted.filter((s) => s.pile === 'new' && episode.issues.includes(s.issue.id)).map((s) => s.issue);
+    const faults = sorted.filter((s) => (s.pile === 'new' || s.pile === 'held') && episode.issues.includes(s.issue.id)).map((s) => s.issue);
     if (!faults.length) throw Object.assign(new Error('This incident has no open fault to file'), { status: 409 });
     // A name is taken as written, and `*` in a pattern means "anything": a
     // fault with one in its name would be filed wider than it is.

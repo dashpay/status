@@ -65,7 +65,7 @@ function FileKnown({ incident, known, reload }) {
 
 function Incident({ item, known, now, admin, reload }) {
   const [label, color] = STATE[item.state] || STATE.new, l = item.ledger;
-  const faults = item.issues.length;
+  const faults = item.issues.length, held = item.held?.length || 0;
   return <details className="panel group" data-incident={item.id}>
     <summary className="cursor-pointer list-none p-3 flex flex-wrap items-start gap-3">
       <span className={`tag shrink-0 ${color}`}>{label}</span>
@@ -82,9 +82,10 @@ function Incident({ item, known, now, admin, reload }) {
       </div>
     </summary>
     <div className="border-t border-line px-3 py-3 text-[12px] space-y-3">
-      {faults ? <ul className="space-y-1">{item.issues.map((i) => <Fault key={i.id} issue={i} />)}</ul> : <p className="text-dim">No fault of this incident is open right now.</p>}
+      {faults ? <ul className="space-y-1">{item.issues.map((i) => <Fault key={i.id} issue={i} />)}</ul> : !held && <p className="text-dim">No fault of this incident is open right now.</p>}
+      {held > 0 && <div data-incident-held><div className="label mb-1">Held for a change in progress · not counted until it ends</div><ul className="space-y-1">{item.held.map((i) => <Fault key={i.id} issue={i} />)}</ul></div>}
       {l && <p className="text-dim">{STATE[l.state]?.[0] || l.state} since {clock(l.since || l.at)}{l.slack ? ' · reported in Slack' : ''}{l.thread ? ` · worker thread ${l.thread}` : ''}{l.revision < item.revision ? ' · the incident got worse, or something else failed, after this report' : ''}</p>}
-      {admin && faults > 0 && <FileKnown incident={item} known={known} reload={reload} />}
+      {admin && faults + held > 0 && <FileKnown incident={item} known={known} reload={reload} />}
       <div className="mono text-[10px] text-dim break-all">Incident {item.id} · revision {item.revision} · {item.seen} fault{item.seen === 1 ? '' : 's'} seen in all</div>
     </div>
   </details>;
