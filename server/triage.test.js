@@ -276,6 +276,18 @@ test('an incident filed while it is held ends as filed, once nothing of it is he
   assert.deepEqual(k.episodes[0].current, [fresh.id]);
   k = advance(k, sort([oldWorse, fresh], [entry([groupOf(old).exact, groupOf(fresh).exact])]), T0 + 180_000);
   assert.deepEqual([k.episodes.length, k.ended.at(-1).outcome, k.ended.at(-1).endedAt], [0, 'filed', at(T0 + 180_000)]);
+  // Worse than its entry, counted as such, gone for one look and back held at
+  // that level: that is what the incident has now. It waits, with no quiet
+  // hour, and filing it at that level ends it as filed.
+  const grown = { ...old, severity: 'critical' };
+  let g = advance(null, sort([grown], filedOld), T0);
+  assert.deepEqual([g.episodes[0].levels, sort([grown], filedOld)[0].outgrown], [{ [old.id]: 'critical' }, 'aaaaaaaaaaaa']);
+  g = advance(g, sort([], filedOld), T0 + 60_000);
+  assert.equal(g.episodes[0].clearSince, at(T0 + 60_000));
+  g = advance(g, sort([oldWorse], filedOld), T0 + 120_000);
+  assert.deepEqual([g.episodes[0].current, g.episodes[0].clearSince], [[old.id], null]);
+  g = advance(g, sort([oldWorse], [entry([groupOf(grown).exact])]), T0 + 180_000);
+  assert.deepEqual([g.episodes.length, g.ended.at(-1).outcome], [0, 'filed']);
   // A fault of the incident's past, filed since, reads above its ceiling while
   // its host restarts. That is not what the incident has now: the quiet hour of
   // the fault that did recover runs on, and the incident ends as a recovery.

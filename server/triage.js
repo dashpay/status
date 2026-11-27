@@ -182,11 +182,15 @@ export function advance(previous, sorted, now, settleMs = 0) {
   }
   const pile = new Map(sorted.map((s) => [s.issue.id, s.pile]));
   const outgrown = new Set(sorted.filter((s) => s.outgrown).map((s) => s.issue.id));
+  const reading = new Map(sorted.map((s) => [s.issue.id, s.issue.severity]));
   // What of an incident a change in progress holds, as far as it is what the
-  // incident has now: the faults that were current on its last look, and any
-  // other of its faults that nobody has filed. A fault that was filed long ago
-  // and reads above its ceiling while its host restarts is not among them.
-  const heldOf = (e, was) => e.issues.filter((id) => pile.get(id) === 'held' && (was.has(id) || !outgrown.has(id)));
+  // incident has now: the faults that were current on its last look, any other
+  // of its faults that no entry names, and one that reads no worse than it
+  // last counted (it had outgrown its entry before the hold). A fault that was
+  // filed long ago and reads above its ceiling only while its host restarts is
+  // not among them.
+  const heldOf = (e, was) => e.issues.filter((id) => pile.get(id) === 'held'
+    && (was.has(id) || !outgrown.has(id) || rank(reading.get(id)) <= rank(e.levels?.[id] ?? e.severity)));
   let unopened = 0;
   for (const [key, { group, items }] of groups) {
     const severity = worst(items.map((i) => i.severity)), things = [...new Set(items.map(thingOf))], ids = items.map((i) => i.id);
