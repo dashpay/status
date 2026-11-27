@@ -3,6 +3,7 @@
 import { liveServiceEndpoints } from './mainnet.js';
 import { convergence, monitoringSummary } from './monitoring.js';
 import { COMPONENT_REPOS, SIDECAR_REPOS } from './settings.js';
+import { REASON_CODES } from './reasons.js';
 
 export const LEVELS = ['ok', 'warn', 'down', 'unreachable', 'stopped', 'deploying'];
 // `info` facts are shown with the host but never change its status.
@@ -38,6 +39,10 @@ function versionOf(component, container, data, tags = {}) {
 
 const pct = (used, total) => (total ? Math.round((used / total) * 1000) / 10 : null);
 const height = (v) => Number.isSafeInteger(v) && v > 0;
+// A reason says what it is about as well as what to show. Incidents are keyed
+// on the code and subject (shared/reasons.js); the sentence is for people and
+// can be reworded freely. Every reason is built here, code first.
+const reason = (code, level, text, subject) => ({ level, text, code, ...(REASON_CODES[code] ? { subject: String(subject) } : {}) });
 
 // Repair readiness is stronger than HTTP/process availability. The caller
 // persists independent host samples; this pure evaluator never starts a probe
@@ -78,105 +83,104 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
     const d = live(h) || {};
     const reasons = [];
     let level = 'ok';
-    const flag = (l, text) => { reasons.push({ level: l, text }); if (RANK[l] > RANK[level]) level = l; };
-    if (h.state !== 'running') flag('stopped', `instance ${h.state}`);
-    else if (h.probe?.skipped) { flag('info', 'service health not observed; EC2 state only'); }
-    else if (!h.probe?.ok) flag('unreachable', `probe failed: ${h.probe?.error || 'no result yet'}`);
-    else if (!fresh(h)) flag('unreachable', 'host observation is stale');
+    const flag = (...fact) => { const r = reason(...fact); reasons.push(r); if (RANK[r.level] > RANK[level]) level = r.level; };
+    if (h.state !== 'running') flag('note', 'stopped', `instance ${h.state}`);
+    else if (h.probe?.skipped) { flag('note', 'info', 'service health not observed; EC2 state only'); }
+    else if (!h.probe?.ok) flag('probe', 'unreachable', `probe failed: ${h.probe?.error || 'no result yet'}`);
+    else if (!fresh(h)) flag('probe', 'unreachable', 'host observation is stale');
     else {
       const c = d.core;
       if (CORE_ROLES.has(h.role)) {
-        if (!c) flag('down', (d.containers || []).some((k) => k.running) ? 'Core RPC not answering' : 'no Dash services running on host');
+        if (!c) flag('core_rpc', 'down', (d.containers || []).some((k) => k.running) ? 'Core RPC not answering' : 'no Dash services running on host');
         else {
-          if (c.chain && network.coreNetwork && !chainMatches(c.chain, network)) flag('down', `Core on chain "${c.chain}"`);
-          if (c.ibd) flag('warn', `Core initial sync ${Math.round((c.progress || 0) * 1000) / 10}%`);
+          if (c.chain && network.coreNetwork && !chainMatches(c.chain, network)) flag('core_chain', 'down', `Core on chain "${c.chain}"`);
+          if (c.ibd) flag('core_sync', 'warn', `Core initial sync ${Math.round((c.progress || 0) * 1000) / 10}%`);
           const lag = coreTip - (c.blocks || 0);
-          if (lag > t.coreLagBlocks) flag('warn', `Core ${lag} blocks behind tip`);
-          if (Number.isFinite(c.headers) && c.headers - c.blocks > t.coreLagBlocks) flag('warn', `Core headers ${c.headers - c.blocks} ahead of validated blocks`);
-          if (!c.ibd && c.chainLockTime && now / 1000 - c.chainLockTime > 1800) flag('warn', 'ChainLock older than 30 minutes');
-          if (!c.ibd && c.chainLockHeight != null && c.blocks - c.chainLockHeight > Math.max(t.coreLagBlocks, 6)) flag('warn', 'ChainLock is behind the Core tip');
-          if ((c.dkg || []).some((v) => v.aborted)) flag('warn', 'DKG session aborted');
-          if (c.peerDiversity?.outbound === 0 && !c.ibd) flag('warn', 'no outbound Core peers');
-          if (c.synced === false) flag('warn', 'masternode sync not finished');
+          if (lag > t.coreLagBlocks) flag('core_lag', 'warn', `Core ${lag} blocks behind tip`);
+          if (Number.isFinite(c.headers) && c.headers - c.blocks > t.coreLagBlocks) flag('core_headers', 'warn', `Core headers ${c.headers - c.blocks} ahead of validated blocks`);
+          if (!c.ibd && c.chainLockTime && now / 1000 - c.chainLockTime > 1800) flag('chainlock_age', 'warn', 'ChainLock older than 30 minutes');
+          if (!c.ibd && c.chainLockHeight != null && c.blocks - c.chainLockHeight > Math.max(t.coreLagBlocks, 6)) flag('chainlock_lag', 'warn', 'ChainLock is behind the Core tip');
+          if ((c.dkg || []).some((v) => v.aborted)) flag('dkg', 'warn', 'DKG session aborted');
+          if (c.peerDiversity?.outbound === 0 && !c.ibd) flag('peers', 'warn', 'no outbound Core peers');
+          if (c.synced === false) flag('mn_sync', 'warn', 'masternode sync not finished');
           const mn = c.masternode;
           if (['validator', 'masternode'].includes(h.role)) {
-            if (!mn) flag('down', 'masternode status unavailable');
-            else if (mn.state !== 'READY') flag('down', `masternode ${mn.state}`);
-            if (mn?.posePenalty > 0) flag('warn', `PoSe penalty ${mn.posePenalty}`);
+            if (!mn) flag('mn_ready', 'down', 'masternode status unavailable');
+            else if (mn.state !== 'READY') flag('mn_ready', 'down', `masternode ${mn.state}`);
+            if (mn?.posePenalty > 0) flag('pose', 'warn', `PoSe penalty ${mn.posePenalty}`);
           }
           for (const w of c.wallets || []) {
-            if (h.role === 'wallet' && /faucet/i.test(w.name) && (w.trusted ?? 0) < t.balanceWarn) flag('warn', `wallet ${w.name} balance ${w.trusted}`);
+            if (h.role === 'wallet' && /faucet/i.test(w.name) && (w.trusted ?? 0) < t.balanceWarn) flag('wallet', 'warn', `wallet ${w.name} balance ${w.trusted}`, w.name);
           }
         }
       }
       if (h.role === 'validator') {
         const td = d.tenderdash;
-        if (!td) flag('down', 'Tenderdash RPC not answering');
+        if (!td) flag('platform_rpc', 'down', 'Tenderdash RPC not answering');
         else {
-          if (td.catchingUp) flag('warn', 'Tenderdash catching up');
+          if (td.catchingUp) flag('platform_sync', 'warn', 'Tenderdash catching up');
           const lag = platformTip - (td.height || 0);
-          if (lag > t.platformLagBlocks) flag('warn', `Platform ${lag} blocks behind tip`);
+          if (lag > t.platformLagBlocks) flag('platform_lag', 'warn', `Platform ${lag} blocks behind tip`);
         }
-        if (d.dapi && !d.dapi.ok) flag('down', `DAPI getStatus failed${d.dapi.error ? `: ${d.dapi.error}` : ''}`);
-        if (d.dapi?.query?.ok === false) flag('down', 'DAPI Drive epoch query failed');
-        if (d.dapi?.query?.protocol != null && d.tenderdash?.protocolApp && d.dapi.query.protocol !== d.tenderdash.protocolApp) flag('warn', 'DAPI epoch and consensus protocol disagree');
-        if (d.dapi?.chainId && d.tenderdash?.network && d.dapi.chainId !== d.tenderdash.network) flag('down', 'DAPI and consensus chain IDs disagree');
-        if (d.tenderdash?.round > 5) flag('warn', `consensus round ${d.tenderdash.round}`);
+        if (d.dapi && !d.dapi.ok) flag('dapi', 'down', `DAPI getStatus failed${d.dapi.error ? `: ${d.dapi.error}` : ''}`);
+        if (d.dapi?.query?.ok === false) flag('dapi_query', 'down', 'DAPI Drive epoch query failed');
+        if (d.dapi?.query?.protocol != null && d.tenderdash?.protocolApp && d.dapi.query.protocol !== d.tenderdash.protocolApp) flag('protocol', 'warn', 'DAPI epoch and consensus protocol disagree');
+        if (d.dapi?.chainId && d.tenderdash?.network && d.dapi.chainId !== d.tenderdash.network) flag('chain_ids', 'down', 'DAPI and consensus chain IDs disagree');
+        if (d.tenderdash?.round > 5) flag('consensus_round', 'warn', `consensus round ${d.tenderdash.round}`);
         // Short-lived (about 6 day) IP certificates renew with 3 days left.
         const tlsLeft = d.dapi?.tls?.expired ? 0 : d.dapi?.tls?.trusted && d.dapi.tls.expiresAt ? Date.parse(d.dapi.tls.expiresAt) - now : null;
-        if (tlsLeft !== null && tlsLeft < 36 * 3600_000) flag(tlsLeft <= 0 ? 'down' : 'warn', tlsLeft <= 0 ? 'gateway certificate expired' : `gateway certificate expires in ${Math.max(1, Math.round(tlsLeft / 3600_000))} h; renewal is not succeeding`);
-        if (h.dapiPublic && !h.dapiPublic.ok) flag('warn', `DAPI :443 not reachable from status host (${h.dapiPublic.error})`);
+        if (tlsLeft !== null && tlsLeft < 36 * 3600_000) flag('tls', tlsLeft <= 0 ? 'down' : 'warn', tlsLeft <= 0 ? 'gateway certificate expired' : `gateway certificate expires in ${Math.max(1, Math.round(tlsLeft / 3600_000))} h; renewal is not succeeding`);
+        if (h.dapiPublic && !h.dapiPublic.ok) flag('dapi_public', 'warn', `DAPI :443 not reachable from status host (${h.dapiPublic.error})`);
       }
-      if (h.p2p && !h.p2p.ok) flag('warn', `P2P :${h.p2p.port} not reachable from status host (${h.p2p.error})`);
+      if (h.p2p && !h.p2p.ok) flag('p2p', 'warn', `P2P :${h.p2p.port} not reachable from status host (${h.p2p.error})`, h.p2p.port);
       for (const k of d.containers || []) {
         const why = `container ${k.name} ${k.state}${k.exitCode ? ` (exit ${k.exitCode})` : ''}`;
         const completed = k.oneShot === true && k.state === 'exited' && k.exitCode === 0 && k.restartPolicy === 'no' && !k.restarting;
         // Shared images can serve different jobs (migration and indexer). Only
         // a replacement of the same service can supersede a stopped service.
         const replaced = !k.oneShot && (d.containers || []).some((o) => o !== k && o.running && o.repo === k.repo && (k.service ? o.service === k.service : !o.service));
-        if (completed) flag('info', `${why}; one-shot completed successfully`);
-        else if (!k.running) flag(replaced || k.state === 'created' ? 'info' : 'down', replaced ? `${why}; superseded by a running ${k.repo} container` : why);
-        else if (k.health === 'unhealthy') flag('warn', `container ${k.name} unhealthy`);
+        if (completed) flag('container', 'info', `${why}; one-shot completed successfully`, k.name);
+        else if (!k.running) flag('container', replaced || k.state === 'created' ? 'info' : 'down', replaced ? `${why}; superseded by a running ${k.repo} container` : why, k.name);
+        else if (k.health === 'unhealthy') flag('container', 'warn', `container ${k.name} unhealthy`, k.name);
       }
       const s = d.system;
       if (s) {
-        for (const disk of s.disks || []) { const p = pct(disk.used, disk.size); if (p >= t.diskWarnPercent) flag('warn', `disk ${disk.mount} ${p}%`); }
+        for (const disk of s.disks || []) { const p = pct(disk.used, disk.size); if (p >= t.diskWarnPercent) flag('disk', 'warn', `disk ${disk.mount} ${p}%`, disk.mount); }
         const mem = pct(s.memTotal - s.memAvailable, s.memTotal);
-        if (mem >= t.memWarnPercent) flag('warn', `memory ${mem}%`);
+        if (mem >= t.memWarnPercent) flag('memory', 'warn', `memory ${mem}%`);
       }
-      if (d.insight && (d.insight.syncStatus !== 'finished' || coreTip - (d.insight.blocks || 0) > t.coreLagBlocks)) flag('warn', `Insight ${d.insight.syncStatus || 'unknown'} at ${d.insight.blocks}`);
-      if (d.insight?.query?.ok === false) flag('down', 'Insight block/transaction/address query failed');
-      if (d.faucet?.queue?.ok === false) flag('warn', 'legacy faucet queue unavailable');
-      if (d.faucet?.queue?.queued > 0 && d.faucet.queue.oldestQueuedAt && now / 1000 - d.faucet.queue.oldestQueuedAt > 3600) flag('warn', 'legacy faucet has requests queued over one hour');
-      if (h.role === 'mixer' && d.core?.coinjoin?.enabled === true && d.core.coinjoin.running === false) flag('warn', 'CoinJoin is enabled but not running');
+      if (d.insight && (d.insight.syncStatus !== 'finished' || coreTip - (d.insight.blocks || 0) > t.coreLagBlocks)) flag('insight', 'warn', `Insight ${d.insight.syncStatus || 'unknown'} at ${d.insight.blocks}`);
+      if (d.insight?.query?.ok === false) flag('insight_query', 'down', 'Insight block/transaction/address query failed');
+      if (d.faucet?.queue?.ok === false) flag('faucet_queue', 'warn', 'legacy faucet queue unavailable');
+      if (d.faucet?.queue?.queued > 0 && d.faucet.queue.oldestQueuedAt && now / 1000 - d.faucet.queue.oldestQueuedAt > 3600) flag('faucet_wait', 'warn', 'legacy faucet has requests queued over one hour');
+      if (h.role === 'mixer' && d.core?.coinjoin?.enabled === true && d.core.coinjoin.running === false) flag('coinjoin', 'warn', 'CoinJoin is enabled but not running');
       for (const service of d.services || []) {
-        if (service.ok === false) flag('warn', `${service.service} functional health check failed`);
-        else if (service.ok == null) flag('info', `${service.service} health not observed (${service.reason || 'unavailable'})`);
-        else if (service.down > 0) flag('warn', `${service.service} has ${service.down} failing scrape targets`);
+        if (service.ok === false) flag('service', 'warn', `${service.service} functional health check failed`, service.service);
+        else if (service.ok == null) flag('note', 'info', `${service.service} health not observed (${service.reason || 'unavailable'})`);
+        else if (service.down > 0) flag('scrapes', 'warn', `${service.service} has ${service.down} failing scrape targets`, service.service);
       }
-      for (const [chain, value] of Object.entries({ Core: h.observation?.core, Platform: h.observation?.platform })) {
-        if (value?.stalledSeconds >= 1800) flag('down', `${chain} height unchanged through 30 minutes of continuous observation`);
-      }
-      if (h.observation?.restarts > 0) flag('info', `${h.observation.restarts} container restart/replacement(s) since previous sample`);
+      if (h.observation?.core?.stalledSeconds >= 1800) flag('core_progress', 'down', 'Core height unchanged through 30 minutes of continuous observation');
+      if (h.observation?.platform?.stalledSeconds >= 1800) flag('platform_progress', 'down', 'Platform height unchanged through 30 minutes of continuous observation');
+      if (h.observation?.restarts > 0) flag('note', 'info', `${h.observation.restarts} container restart/replacement(s) since previous sample`);
       if (d.faucet?.kind === 'dash-faucet') {
-        if (d.faucet.state === 'low_balance') flag('warn', `faucet balance ${d.faucet.balance} below payout reserve`);
-        else if (d.faucet.status !== 200) flag('down', `faucet /api/status HTTP ${d.faucet.status}`);
-      } else if (d.faucet && d.faucet.status >= 500) flag('down', `faucet HTTP ${d.faucet.status}`);
+        if (d.faucet.state === 'low_balance') flag('faucet_balance', 'warn', `faucet balance ${d.faucet.balance} below payout reserve`);
+        else if (d.faucet.status !== 200) flag('faucet_http', 'down', `faucet /api/status HTTP ${d.faucet.status}`);
+      } else if (d.faucet && d.faucet.status >= 500) flag('faucet_http', 'down', `faucet HTTP ${d.faucet.status}`);
       if (d.quorumServer) {
-        if (d.quorumServer.status !== 200) flag('down', `quorum server /health HTTP ${d.quorumServer.status}`);
-        else if (!d.quorumServer.quorums) flag('warn', 'quorum server lists no quorums');
+        if (d.quorumServer.status !== 200) flag('quorums', 'down', `quorum server /health HTTP ${d.quorumServer.status}`);
+        else if (!d.quorumServer.quorums) flag('quorums', 'warn', 'quorum server lists no quorums');
       }
       if (d.explorer) {
-        if (d.explorer.status !== 200) flag('down', `explorer API /status HTTP ${d.explorer.status}`);
-        else if (d.explorer.indexerRestarting === true || d.explorer.indexerState === 'restarting') flag('down', 'explorer indexer restarting');
-        else if (d.explorer.indexerRunning !== true) flag('down', 'explorer indexer not running');
-        else if (d.explorer.indexerHealth === 'unhealthy') flag('down', 'explorer indexer unhealthy');
-        else if (d.explorer.indexerHealth === 'starting') flag('warn', 'explorer indexer health check starting');
-        else if (!height(d.explorer.chainHeight) || !height(d.explorer.indexedHeight)) flag('warn', 'explorer indexing heights unavailable');
-        else if (d.explorer.indexedHeight > d.explorer.chainHeight) flag('warn', 'explorer indexed height exceeds its chain height');
+        if (d.explorer.status !== 200) flag('explorer_api', 'down', `explorer API /status HTTP ${d.explorer.status}`);
+        else if (d.explorer.indexerRestarting === true || d.explorer.indexerState === 'restarting') flag('explorer_runtime', 'down', 'explorer indexer restarting');
+        else if (d.explorer.indexerRunning !== true) flag('explorer_runtime', 'down', 'explorer indexer not running');
+        else if (d.explorer.indexerHealth === 'unhealthy') flag('explorer_runtime', 'down', 'explorer indexer unhealthy');
+        else if (d.explorer.indexerHealth === 'starting') flag('explorer_runtime', 'warn', 'explorer indexer health check starting');
+        else if (!height(d.explorer.chainHeight) || !height(d.explorer.indexedHeight)) flag('explorer_heights', 'warn', 'explorer indexing heights unavailable');
+        else if (d.explorer.indexedHeight > d.explorer.chainHeight) flag('explorer_heights', 'warn', 'explorer indexed height exceeds its chain height');
         else {
           const lag = Math.max(platformTip, d.explorer.chainHeight) - d.explorer.indexedHeight;
-          if (lag > t.platformLagBlocks) flag('warn', `explorer indexer ${lag} blocks behind`);
+          if (lag > t.platformLagBlocks) flag('explorer_lag', 'warn', `explorer indexer ${lag} blocks behind`);
         }
       }
       if (network.chainType === 'mainnet') {
@@ -185,26 +189,26 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
         const chainLockAge = Number.isFinite(m.chainLockAgeSeconds) ? m.chainLockAgeSeconds : null;
         const coreStall = m.coreStall === true;
         const platformStall = m.platformStall === true;
-        if (!Number.isFinite(m.chainLockHeight) || m.chainLockHeight <= 0) flag('down', 'mainnet ChainLock unavailable');
-        if (chainLockAge !== null && chainLockAge > 1800) flag('warn', `mainnet ChainLock is ${Math.round(chainLockAge)}s old`);
-        if (m.platformSyncing === true) flag('warn', 'mainnet observer Platform is catching up; live chain status not yet known');
-        if (m.bigBans == null) flag('warn', 'mainnet PoSe census unavailable');
-        if (chainLockAge === null) flag('warn', 'mainnet ChainLock age unavailable');
-        if (coreStall) flag('down', 'mainnet Core chain stalled');
-        if (platformStall) flag('down', 'mainnet Platform chain stalled');
-        if (!Number.isFinite(m.platformHeight) || m.platformHeight <= 0) flag('down', 'mainnet Platform height unavailable');
-        if (m.quorumServer?.status !== 200 || !m.quorumServer?.quorums || !m.quorumServer?.listed) flag('down', `mainnet quorum list HTTP ${m.quorumServer?.status ?? 'unavailable'}`);
+        if (!Number.isFinite(m.chainLockHeight) || m.chainLockHeight <= 0) flag('mainnet', 'down', 'mainnet ChainLock unavailable');
+        if (chainLockAge !== null && chainLockAge > 1800) flag('mainnet', 'warn', `mainnet ChainLock is ${Math.round(chainLockAge)}s old`);
+        if (m.platformSyncing === true) flag('mainnet', 'warn', 'mainnet observer Platform is catching up; live chain status not yet known');
+        if (m.bigBans == null) flag('mainnet', 'warn', 'mainnet PoSe census unavailable');
+        if (chainLockAge === null) flag('mainnet', 'warn', 'mainnet ChainLock age unavailable');
+        if (coreStall) flag('mainnet', 'down', 'mainnet Core chain stalled');
+        if (platformStall) flag('mainnet', 'down', 'mainnet Platform chain stalled');
+        if (!Number.isFinite(m.platformHeight) || m.platformHeight <= 0) flag('mainnet', 'down', 'mainnet Platform height unavailable');
+        if (m.quorumServer?.status !== 200 || !m.quorumServer?.quorums || !m.quorumServer?.listed) flag('mainnet', 'down', `mainnet quorum list HTTP ${m.quorumServer?.status ?? 'unavailable'}`);
         const banned = m.newBans;
         const banThreshold = Number.isFinite(signals.bigBanThreshold) ? signals.bigBanThreshold : 20;
-        if (banned != null && banned >= banThreshold) flag('warn', `mainnet newly PoSe-banned masternodes ${banned} in one hour`);
+        if (banned != null && banned >= banThreshold) flag('mainnet', 'warn', `mainnet newly PoSe-banned masternodes ${banned} in one hour`);
       }
     }
     const imageChecks = convergence(h, d, network, expected, COMPONENT_OF);
-    if (imageChecks.some((c) => ['drift', 'missing'].includes(c.status))) flag('warn', 'running images differ from the last confirmed deployment target');
-    if (imageChecks.some((c) => c.status === 'rolling')) flag('info', 'image rollout in progress');
+    if (imageChecks.some((c) => ['drift', 'missing'].includes(c.status))) flag('images', 'warn', 'running images differ from the last confirmed deployment target');
+    if (imageChecks.some((c) => c.status === 'rolling')) flag('note', 'info', 'image rollout in progress');
     // A console devnet under construction is not failing: say what is happening.
     if (building && level !== 'ok' && level !== 'stopped') {
-      reasons.unshift({ level: 'deploying', text: `devnet ${network.lifecycle.status}; services start as the creation operation reaches them` });
+      reasons.unshift(reason('note', 'deploying', `devnet ${network.lifecycle.status}; services start as the creation operation reaches them`));
       level = 'deploying';
     }
     return { host: h, data: d, level, reasons, convergence: imageChecks };
@@ -220,7 +224,7 @@ export function evaluateNetwork(network, state, settings, now = Date.now(), tags
     reportStale = stale;
     if (stale) {
       const row = rows.find((r) => ['fullnode', 'validator'].includes(r.host.role));
-      if (row) { row.level = 'unreachable'; row.reasons.push({ level: 'unreachable', text: 'mainnet observer report is stale' }); }
+      if (row) { row.level = 'unreachable'; row.reasons.push(reason('mainnet', 'unreachable', 'mainnet observer report is stale')); }
     }
   }
   const refreshedCounts = Object.fromEntries(LEVELS.map((l) => [l, rows.filter((r) => r.level === l).length]));
