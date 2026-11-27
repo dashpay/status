@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { evaluateNetwork, explorerReadiness } from '../shared/evaluate.js';
 import { expectations } from '../shared/monitoring.js';
+import { REASON_CODES } from '../shared/reasons.js';
 import { readJSON, writeAtomic } from '../shared/settings.js';
 import { dynamoScaleInControl } from '../shared/aws-alarm-semantics.js';
 import { activityKey } from './change-activity.js';
@@ -19,34 +20,15 @@ const list = (v) => Array.isArray(v) ? v.filter(object) : [];
 const pct = (used, total) => num(used) && num(total) && total > 0 && used <= total ? used / total * 100 : null;
 const faultKey = (rule, subject = '') => JSON.stringify([rule, subject]);
 
-// Classify evaluator facts, not changing measurements/error prose. Unknown
-// facts remain actionable but cannot be cleared without a recognized proof.
-function classify(text) {
-  const subjects = [
-    [/^disk (.+) [\d.]+%$/, 'disk'], [/^wallet (.+) balance /, 'wallet'],
-    [/^container (\S+) /, 'container'], [/^P2P :(\d+) /, 'p2p'],
-    [/^(.+) functional health check failed$/, 'service'], [/^(.+) has \d+ failing scrape targets$/, 'scrapes'],
-  ];
-  for (const [pattern, rule] of subjects) { const match = pattern.exec(text); if (match) return faultKey(rule, match[1]); }
-  const rules = [
-    [/^(probe failed:|host observation is stale)/, 'probe'],
-    [/^(Core RPC not answering|no Dash services running)/, 'core_rpc'], [/^Core on chain /, 'core_chain'],
-    [/^Core initial sync /, 'core_sync'], [/^Core \d+ blocks behind/, 'core_lag'], [/^Core headers /, 'core_headers'],
-    [/^ChainLock older/, 'chainlock_age'], [/^ChainLock is behind/, 'chainlock_lag'], [/^DKG session/, 'dkg'],
-    [/^no outbound Core peers/, 'peers'], [/^masternode sync/, 'mn_sync'], [/^masternode /, 'mn_ready'], [/^PoSe penalty/, 'pose'],
-    [/^Tenderdash RPC/, 'platform_rpc'], [/^Tenderdash catching/, 'platform_sync'], [/^Platform \d+ blocks behind/, 'platform_lag'],
-    [/^DAPI getStatus/, 'dapi'], [/^DAPI Drive epoch/, 'dapi_query'], [/^DAPI epoch and consensus protocol/, 'protocol'],
-    [/^DAPI and consensus chain/, 'chain_ids'], [/^DAPI :443/, 'dapi_public'], [/^gateway certificate/, 'tls'],
-    [/^consensus round /, 'consensus_round'], [/^memory /, 'memory'], [/^Insight block\/transaction/, 'insight_query'], [/^Insight /, 'insight'],
-    [/^legacy faucet queue unavailable/, 'faucet_queue'], [/^legacy faucet has requests queued/, 'faucet_wait'], [/^CoinJoin /, 'coinjoin'],
-    [/^Core height unchanged/, 'core_progress'], [/^Platform height unchanged/, 'platform_progress'],
-    [/^faucet balance /, 'faucet_balance'], [/^faucet /, 'faucet_http'],
-    [/^quorum server /, 'quorums'], [/^explorer API /, 'explorer_api'], [/^explorer indexer (not running|restarting|unhealthy|health check)/, 'explorer_runtime'],
-    [/^explorer (indexing heights|indexed height)/, 'explorer_heights'], [/^explorer indexer \d+ blocks behind/, 'explorer_lag'],
-    [/^mainnet /, 'mainnet'], [/^running images differ/, 'images'],
-  ];
-  for (const [pattern, rule] of rules) if (pattern.test(text)) return faultKey(rule);
-  return faultKey('unclassified', text.slice(0, 300));
+// A fault is keyed by the code and subject the evaluator attached to the reason
+// (shared/reasons.js), never by its sentence: measurements and error prose
+// change, and so may the wording. A reason without a known code, or a bare
+// sentence from a record that carries no keys, stays actionable under its own
+// text but cannot be cleared without a recognized proof.
+export function classify(reason) {
+  const r = object(reason) ? reason : { text: reason };
+  if (Object.hasOwn(REASON_CODES, r.code)) return faultKey(r.code, REASON_CODES[r.code] ? String(r.subject) : '');
+  return faultKey('unclassified', String(r.text ?? '').slice(0, 300));
 }
 
 function hostProofs(row, network, settings, coreTip, platformTip, now) {
@@ -289,10 +271,12 @@ export function deriveIssues({ settings, states, ci, aws, operations = [], maint
       }
       const reasons = row.reasons.filter((r) => ['warn', 'down', 'unreachable'].includes(r.level));
       if (['warn', 'down', 'unreachable'].includes(row.level)) {
-        const faults = [...new Set(reasons.map((r) => classify(r.text)))].sort();
-        const faultLevels = Object.fromEntries(faults.map((f) => [f, reasons.some((r) => classify(r.text) === f && r.level !== 'warn') ? 'critical' : 'warning']));
+        const faults = [...new Set(reasons.map(classify))].sort();
+        const faultLevels = Object.fromEntries(faults.map((f) => [f, reasons.some((r) => classify(r) === f && r.level !== 'warn') ? 'critical' : 'warning']));
+        // reasonFaults[i] is the fault of reasons[i]: the sentence is kept for
+        // people, and a later cycle must still know which fault it belongs to.
         add('network', n.name, h.name, 'host_health', row.level === 'warn' ? 'warning' : 'critical', hk,
-          { level: row.level, generation, instanceId: h.instanceId, faults, faultLevels, reasons: reasons.map((r) => r.text).slice(0, 30) },
+          { level: row.level, generation, instanceId: h.instanceId, faults, faultLevels, reasons: reasons.map((r) => r.text).slice(0, 30), reasonFaults: reasons.map(classify).slice(0, 30) },
           fresh(h.probe?.at, now, max) ? h.probe.at : iso(now), hi);
       }
     }
@@ -484,6 +468,9 @@ export function reconcile(previous, derived, now = Date.now()) {
     if (Array.isArray(issue?.evidence?.reasons) && issue.evidence.reasons.length) return [...new Set(issue.evidence.reasons.map(classify))].sort();
     return [faultKey('unclassified', issue.code)];
   };
+  // Each sentence of a case with its fault. A record written before the keys
+  // were kept has sentences only, and a sentence alone says "unclassified".
+  const keyed = (e) => (Array.isArray(e?.reasons) ? e.reasons : []).map((r, i) => [r, Array.isArray(e.reasonFaults) && text(e.reasonFaults[i]) ? e.reasonFaults[i] : classify(r)]);
   const healthyRules = (issue, check) => {
     if (!positive(issue, check)) return new Set();
     const rules = new Set(check.healthyRules || []);
@@ -591,8 +578,9 @@ export function reconcile(previous, derived, now = Date.now()) {
       const faults = [...new Set([...incoming, ...retained])].sort();
       // Levels of the faults that remain; a fault that left takes its level along.
       const faultLevels = Object.fromEntries(Object.entries({ ...old.evidence?.faultLevels, ...current.evidence?.faultLevels }).filter(([f]) => faults.includes(f)));
-      issue.evidence = { ...current.evidence, faults, faultLevels,
-        reasons: [...(current.evidence?.reasons || []), ...(old.evidence?.reasons || []).filter((r) => retained.includes(classify(r)))].slice(0, 30) };
+      // A retained fault keeps its sentence, found by the key stored beside it.
+      const kept = [...keyed(current.evidence), ...keyed(old.evidence).filter(([, f]) => retained.includes(f))].slice(0, 30);
+      issue.evidence = { ...current.evidence, faults, faultLevels, reasons: kept.map(([r]) => r), reasonFaults: kept.map(([, f]) => f) };
       if (retained.some((f) => (faultLevels[f] || old.severity) === 'critical')) issue.severity = 'critical';
     }
     if (maintenance) issue.suppressedUntil = iso(now);
