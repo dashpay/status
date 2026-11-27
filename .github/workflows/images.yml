@@ -20,13 +20,4 @@ jobs:
         with:
           persist-credentials: false
       - name: Build and smoke-test web and agent modes
-        run: |
-          set -euo pipefail
-          docker build --pull --build-arg "RELEASE_REVISION=$GITHUB_SHA" -t dash-status:ci .
-          docker run --rm --entrypoint dashnet dash-status:ci version
-          docker run --rm --entrypoint sh dash-status:ci -c 'test -s /etc/ssl/certs/ca-certificates.crt'
-          id=$(docker run -d -e STATUS_MODE=web -e STATUS_DATA_DIR=/tmp/data -e PUBLIC_ORIGIN=https://status.example -p 127.0.0.1:3001:3001 dash-status:ci)
-          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:3001/api/health && break; sleep 1; done
-          curl -fsS http://127.0.0.1:3001/api/overview | grep -q '"testnet"'
-          curl -fsS http://127.0.0.1:3001/ | grep -q '<div id="root">'
-          docker rm -f "$id"
+        uses: ./.github/actions/image

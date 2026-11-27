@@ -236,16 +236,45 @@ STATUS_MODE=web STATUS_DATA_DIR=./data PUBLIC_ORIGIN=http://localhost:3001 npm s
 
 ## Deploy
 
-On the status host (images are built there, Go and Node stages included):
+Every push to `master` is built for arm64 and amd64 by
+[publish.yml](.github/workflows/publish.yml), with the same build and smoke test
+as the pull request checks, and pushed to
+`ghcr.io/dashpay/status:sha-<revision>`. Nothing is built on the status host: it
+has two cores, and a build there has taken the site down.
+
+The `dashnet` engine in the image is the `dash-network-go` commit in
+[deploy/dashnet.ref](deploy/dashnet.ref). Moving the console to a newer engine
+is a pull request that changes that file. To try an engine without one, run
+"Publish image" by hand with `dashnet_ref`, and deploy the resulting tag with
+`DEPLOY_IMAGE`.
+
+On the status host:
 
 ```sh
-sudo /opt/dash-status/src/deploy/deploy.sh            # origin/master
-sudo /opt/dash-status/src/deploy/deploy.sh <git-ref>  # any ref
+sudo /opt/dash-status/src/deploy/deploy.sh             # origin/master
+sudo /opt/dash-status/src/deploy/deploy.sh <revision>  # any published revision; this is also the rollback
+DEPLOY_ONLY=web sudo -E /opt/dash-status/src/deploy/deploy.sh   # web and the key helper only
+DEPLOY_CHECK=1 sudo -E /opt/dash-status/src/deploy/deploy.sh    # pull and check the image, roll nothing
 ```
 
-The script builds `dash-status:<rev>`, retags `dash-status:current`, restarts the
-`web` and `agent` services from [deploy/compose.yml](deploy/compose.yml) and rolls
-back if the web health check fails. nginx proxies `/` and `/api/` to
+The script that runs is the one in the host's checkout, which is the revision
+deployed last. A host whose checkout is older than this script has to take it
+from the revision being deployed, once:
+
+```sh
+cd /opt/dash-status/src && sudo git fetch origin
+sudo git show origin/master:deploy/deploy.sh > /tmp/deploy.sh && sudo sh /tmp/deploy.sh
+```
+
+The script pulls the image, checks that it was built from that revision, moves
+`/opt/dash-status/src` to the same revision (the compose files come from it),
+retags `dash-status:current` and rolls the services of
+[deploy/compose.yml](deploy/compose.yml) and of each sidecar whose directory
+exists on the host. It refuses a full rollout while an operation is queued or
+running, because that restarts the agent. If the stack is not healthy within two
+and a half minutes it puts the previous image and revision back. It keeps two
+images, the running one and the one before, and writes one line per run to
+`/var/log/dash-status-deploys.log`. nginx proxies `/` and `/api/` to
 `127.0.0.1:3006`; the legacy routes in
 [nginx-legacy-api.conf](deploy/nginx-legacy-api.conf) go to the legacy container
 on `127.0.0.1:3002`. Operation history and agent state survive redeploys; an

@@ -16,8 +16,10 @@ RUN npm run build && npm prune --omit=dev
 
 FROM node:22-bookworm-slim
 ARG RELEASE_REVISION=unknown
+ARG DASHNET_REF=main
 LABEL org.opencontainers.image.source="https://github.com/dashpay/status" \
-      org.opencontainers.image.revision=$RELEASE_REVISION
+      org.opencontainers.image.revision=$RELEASE_REVISION \
+      org.dash.status.dashnet-ref=$DASHNET_REF
 WORKDIR /app
 ENV NODE_ENV=production PORT=3001 BIND_ADDRESS=0.0.0.0 STATUS_REVISION=$RELEASE_REVISION
 COPY --from=dashnet /dashnet /usr/local/bin/dashnet

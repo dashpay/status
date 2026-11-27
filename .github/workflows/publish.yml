@@ -1,0 +1,82 @@
+name: Publish image
+# Builds this revision once per architecture, exactly as the pull request
+# checks do, and pushes it to ghcr.io/dashpay/status:sha-<revision>. The status
+# host pulls that image (deploy/deploy.sh). Nothing is built on the host: it has
+# two cores, and a build there has taken the site down.
+#
+# The engine is the dash-network-go commit in deploy/dashnet.ref, so one
+# revision is one image. To try another engine without a commit, run this by
+# hand with dashnet_ref: that image is tagged sha-<revision>-dashnet-<first 12
+# of the ref>, and a deploy has to name it (DEPLOY_IMAGE).
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      dashnet_ref:
+        description: Full dash-network-go commit, or empty for deploy/dashnet.ref
+        type: string
+        default: ''
+permissions:
+  contents: read
+concurrency:
+  group: publish-${{ github.sha }}-${{ inputs.dashnet_ref }}
+  cancel-in-progress: false
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+  DASHNET_REF_INPUT: ${{ inputs.dashnet_ref }}
+jobs:
+  image:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build and smoke-test web and agent modes
+        uses: ./.github/actions/image
+        with:
+          dashnet-ref: ${{ inputs.dashnet_ref }}
+      - name: Push the image of this architecture
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          tag="sha-$GITHUB_SHA${DASHNET_REF_INPUT:+-dashnet-${DASHNET_REF_INPUT:0:12}}"
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag dash-status:ci "$IMAGE:$tag-$ARCH"
+          docker push --quiet "$IMAGE:$tag-$ARCH"
+  manifest:
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: One tag for both architectures
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="sha-$GITHUB_SHA${DASHNET_REF_INPUT:+-dashnet-${DASHNET_REF_INPUT:0:12}}"
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx imagetools create --tag "$IMAGE:$tag" "$IMAGE:$tag-amd64" "$IMAGE:$tag-arm64"
+          docker buildx imagetools inspect "$IMAGE:$tag"
+          {
+            echo "Published \`$IMAGE:$tag\`"
+            echo
+            echo "On the status host: \`sudo /opt/dash-status/src/deploy/deploy.sh $GITHUB_SHA\`${DASHNET_REF_INPUT:+ with \`DEPLOY_IMAGE=$IMAGE:$tag\`}"
+          } >> "$GITHUB_STEP_SUMMARY"
