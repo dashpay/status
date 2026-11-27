@@ -184,6 +184,7 @@ export default function Remediation() {
       </div>
       <p className="mt-2 text-dim">
         <span title={clock(data.generatedAt)}>{c.faults} open fault{c.faults === 1 ? '' : 's'} · monitoring updated {ago(data.generatedAt, now)} ago</span>
+        {c.settling > 0 && <span title={`A fault counts once it has lasted ${Math.round(data.settleSeconds / 60)} minutes without a break: one failed sample of a probe is not an incident`} data-settling> · {c.settling} seen for under {Math.round(data.settleSeconds / 60)} min, not counted yet</span>}
         {!data.public && <span title={worker ? clock(worker) : undefined}> · triage worker {worker ? `last asked ${ago(worker, now)} ago` : 'has not asked since the console started'}</span>}
       </p>
       {data.stale && <p className="mt-2 lv-warn">Monitoring is stale or unavailable: this is the last list it produced, and nothing is opened, closed or announced until it reports again.</p>}

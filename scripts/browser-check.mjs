@@ -59,7 +59,7 @@ for (const name of ['agent-directory', 'platform-release', 'platform-release-job
 // The triage worker's token, as the console holds it: a digest.
 const triageToken = 'fixture-triage-worker-token-0123456789abc', triageWorkersFile = join(temp, 'triage-workers.json');
 writeFileSync(triageWorkersFile, JSON.stringify({ schemaVersion: 1, workers: { infraclaw: createHash('sha256').update(triageToken).digest('hex') } }));
-const app = createWeb({ dataDir, origin, hooksDir, triageWorkersFile, auth: { clientId: 'fixture', clientSecret: 'fixture', fetcher }, fetcher });
+const app = createWeb({ dataDir, origin, hooksDir, triageWorkersFile, triageSettleMs: 0, auth: { clientId: 'fixture', clientSecret: 'fixture', fetcher }, fetcher });
 const server = app.listen(4799, '127.0.0.1');
 const browser = await chromium.launch();
 mkdirSync('artifacts', { recursive: true });
