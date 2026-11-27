@@ -32,6 +32,12 @@ export async function logout() {
 
 // ---- live updates --------------------------------------------------------
 const listeners = new Set();
+// Every event the server pushes (server/web.js, push). An event missing here is
+// dropped by the browser without a sign: EventSource only hands over the types
+// it has a listener for. server/web.test.js compares the two.
+export const STREAM_EVENTS = ['network', 'op', 'settings', 'ci', 'ci-queue', 'aws', 'remediation', 'hooks'];
+// What a page is told after a reconnect: everything may have changed meanwhile.
+const RESYNC = { network: { name: '*' }, op: { id: '*' } };
 let source;
 // EventSource gives up for good after a non-200 reconnect (e.g. a 502 while the
 // web container restarts); recreate it with backoff and resync everything.
@@ -39,12 +45,12 @@ let backoff = 1000;
 function ensureStream() {
   if (source) return;
   source = new EventSource('/api/stream');
-  for (const type of ['network', 'op', 'settings', 'ci', 'ci-queue', 'aws', 'remediation']) source.addEventListener(type, (e) => {
+  for (const type of STREAM_EVENTS) source.addEventListener(type, (e) => {
     const data = JSON.parse(e.data);
     listeners.forEach((l) => l(type, data));
   });
   source.onopen = () => {
-    if (backoff > 1000) listeners.forEach((l) => { l('network', { name: '*' }); l('op', { id: '*' }); l('ci', {}); l('ci-queue', {}); l('aws', {}); });
+    if (backoff > 1000) listeners.forEach((l) => { for (const type of STREAM_EVENTS) l(type, RESYNC[type] || {}); });
     backoff = 1000;
   };
   source.onerror = () => {

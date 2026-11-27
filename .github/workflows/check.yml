@@ -12,7 +12,7 @@ jobs:
     uses: ./.github/workflows/core-compat.yml
   console:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -29,6 +29,14 @@ jobs:
         run: python3 -m unittest discover -s agent -p 'test_explorer_chain.py'
       - name: Devnet key export from legacy and descriptor wallets
         run: python3 -m unittest discover -s agent -p 'test_devnet_keys.py'
+      - name: Host probe, against fixtures
+        run: python3 -m unittest discover -s agent -p 'test_probe.py'
+      - name: Validator state kept across a Platform reset
+        run: python3 -m unittest discover -s agent -p 'test_reset_pv.py'
+      - name: Website probes
+        run: python3 -m unittest discover -s monitoring/websites -p 'test_probe.py'
+      - name: Mainnet observer report
+        run: python3 -m unittest discover -s deploy -p 'test_mainnet_observer.py'
       - name: Mainnet service probes and one-notification paging
         run: python3 -m unittest discover -s deploy -p 'test_mainnet_services.py'
       - run: npm run lint
@@ -43,6 +51,12 @@ jobs:
         run: node scripts/browser-reset-check.mjs
       - name: Rendered public board and operator deploy flow (fixtures)
         run: node scripts/browser-check.mjs
+      - name: Deploy form, rollout controls (desktop and mobile)
+        run: node scripts/browser-rollout-check.mjs
+      - name: Platform reset form, validator state choice (desktop and mobile)
+        run: node scripts/browser-reset-pv-check.mjs
+      - name: Private devnet keys, reveal and download (synthetic keys)
+        run: node scripts/browser-connect-keys.mjs
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:

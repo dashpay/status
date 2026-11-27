@@ -49,12 +49,34 @@ export function ttlCache(clock, ttl = 15_000) {
 }
 
 export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, clock = Date.now, ciGithub = null, ciQueue = {}, mainnetReportToken = process.env.MAINNET_REPORT_TOKEN, keyReader = requestDevnetKeys, keySocket = process.env.DEVNET_KEYS_SOCKET, hooksDir = process.env.WAKE_HOOKS_DIR, hookWaitMs,
-  triageWorkersFile = process.env.TRIAGE_WORKERS_FILE, triageHook = process.env.TRIAGE_HOOK || 'remediation', triageSettleMs } = {}) {
+  triageWorkersFile = process.env.TRIAGE_WORKERS_FILE, triageHook = process.env.TRIAGE_HOOK || 'remediation', triageSettleMs, streamsPerAddress = 30 } = {}) {
   const settingsPath = join(dataDir, 'settings.json');
   const dirs = { state: join(dataDir, 'state'), requests: join(dataDir, 'requests'), ops: join(dataDir, 'ops') };
   for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
-  let settings = loadSettings(settingsPath);
-  const reloadSettings = () => { settings = loadSettings(settingsPath); return settings; };
+  // The settings are the two files settings.json (written here) and
+  // devnets.json (written by the agent). Both are replaced by rename, never
+  // edited in place, so a file whose stamp is unchanged is the file that was
+  // read: a token request, and an open stream every second, asks for the
+  // current settings without parsing them again.
+  const stamp = (path) => { try { const s = statSync(path); return `${s.ino}|${s.size}|${s.mtimeMs}|${s.ctimeMs}`; } catch { return 'absent'; } };
+  const settingsStamp = () => `${stamp(settingsPath)} ${stamp(join(dataDir, 'devnets.json'))}`;
+  let settings, loadedAs, validAs = null;
+  const reloadSettings = () => {
+    const now = settingsStamp();
+    if (now !== loadedAs) { settings = loadSettings(settingsPath); loadedAs = now; }
+    return settings;
+  };
+  reloadSettings();
+  // True when settings.json itself reads and validates: loadSettings answers a
+  // missing or damaged file with the built-in defaults, and those name an admin.
+  const settingsValid = () => {
+    const now = stamp(settingsPath);
+    if (now === 'absent') return false;
+    if (now !== validAs) {
+      try { validateSettings(JSON.parse(readFileSync(settingsPath, 'utf8'))); validAs = now; } catch { validAs = null; return false; }
+    }
+    return true;
+  };
   const app = express();
   const auth = createAuth({ origin }, { store: join(dataDir, 'sessions.json'), ...authDeps });
   const tokens = createApiTokens({ dataDir, clock });
@@ -154,7 +176,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     // The grant is read from the settings on disk, and only from a file that
     // validates: loadSettings falls back to the built-in defaults, which name an
     // admin, and a token must never be authorized by that fallback.
-    try { validateSettings(JSON.parse(readFileSync(settingsPath, 'utf8'))); } catch { return { status: 503, error: 'Access settings unavailable' }; }
+    if (!settingsValid()) return { status: 503, error: 'Access settings unavailable' };
     reloadSettings();
     const t = tokens.authenticate(header);
     const bot = t && { token: t.id, user: { id: t.owner.id, login: t.owner.login, token: t.id, grant: { role: t.role, networks: t.networks } } };
@@ -178,7 +200,7 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   // (not the existing mainnet-support fleet). Keep this write path token-only,
   // strictly scoped and public-data-only; it never queues operations.
   app.post('/api/mainnet/report', (req, res) => {
-    if (!mainnetReportToken || req.get('authorization') !== `Bearer ${mainnetReportToken}`) return res.status(401).json({ error: 'observer authorization required' });
+    if (!apiAuthorized(req.get('authorization'), mainnetReportToken)) return res.status(401).json({ error: 'observer authorization required' });
     try {
       const report = validateMainnetReport(req.body, clock());
       const previous = readJSON(join(dirs.state, 'mainnet.json'));
@@ -263,25 +285,42 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   });
 
   // Live updates: agent state rewrites and operation changes are pushed.
+  // Anyone may open a stream and it stays open, so one address holds a bounded
+  // number: the nginx in front runs out of connections long before this
+  // process does, and then the whole site is unreachable.
   app.get('/api/stream', (req, res) => {
+    let held = 0;
+    for (const c of clients) if (c.ip === req.ip) held++;
+    if (held >= streamsPerAddress) return res.status(429).set('Retry-After', '30').json({ error: 'Too many live streams from this address' });
     res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     res.flushHeaders();
-    const client = { res, req, user: user(req) };
+    // Who a stream belongs to is asked each time something is sent, not once:
+    // a session that signed out or ran out is a visitor from then on.
+    const client = { res, req, ip: req.ip, get user() { return user(req); } };
     clients.add(client);
+    // A write to a socket that has gone reports its error here, later. Without
+    // a listener that error would end the process, and with it every stream.
+    res.on('error', () => {});
     res.write(`retry: 3000\n\n`);
     const ping = setInterval(() => (dropIfGone(client) ? clearInterval(ping) : res.write(`: ping\n\n`)), 25_000);
     req.on('close', () => { clearInterval(ping); clients.delete(client); });
   });
   // A revoked or expired token stops receiving events, and its stream is closed.
   const dropIfGone = (c) => {
+    if (c.gone) return true;
     if (!botGone(c.req)) return false;
+    c.gone = true;
     clients.delete(c);
     c.res.end(`event: error\ndata: ${JSON.stringify({ error: 'API token unknown, revoked or expired' })}\n\n`);
     return true;
   };
   const push = (event, payload, filter = () => true) => {
     const data = `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
-    for (const c of [...clients]) if (!dropIfGone(c) && filter(c)) c.res.write(data);
+    for (const c of [...clients]) {
+      // One stream's failure must not cost the others their event.
+      try { if (!dropIfGone(c) && filter(c)) c.res.write(data); }
+      catch (e) { console.error(JSON.stringify({ event: 'stream-push-failed', type: event, error: String(e?.message).slice(0, 200), at: new Date(clock()).toISOString() })); }
+    }
   };
   const debounce = new Map();
   // A change to a private job is announced to members only: its timing is private too.
@@ -377,8 +416,8 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   });
   // Explicit, network-scoped operator action; never part of config or stream data.
   app.post('/api/networks/:name/keys', (req, res, next) => {
-    try { validateSettings(JSON.parse(readFileSync(settingsPath, 'utf8'))); reloadSettings(); next(); }
-    catch { res.status(503).json({ error: 'Key access settings unavailable' }); }
+    if (!settingsValid()) return res.status(503).json({ error: 'Key access settings unavailable' });
+    reloadSettings(); next();
   }, signedIn, requireOperator, auth.csrf,
     rateLimit({ windowMs: 60_000, limit: 6, standardHeaders: true, legacyHeaders: false }), async (req, res) => {
       const n = settings.networks.find(x => x.name === req.params.name);
@@ -438,11 +477,13 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
     res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
     res.flushHeaders();
     const send = () => {
-      // A token is checked again on every tick: revoked, expired or no longer
-      // granted this network, it gets no more of the log.
-      if (req.bot && (botGone(req) || !memberOf(settings, req.bot.user, req.network))) {
+      // Whoever reads is checked again on every tick. A token that was revoked,
+      // expired or lost this network gets no more of the log; nor does a
+      // session that signed out, ran out or lost the network.
+      const reader = req.bot ? (botGone(req) ? null : req.bot.user) : auth.session(req)?.user;
+      if (!reader || !memberOf(settings, reader, req.network)) {
         clearInterval(timer);
-        return res.end(`event: error\ndata: ${JSON.stringify({ error: 'API token unknown, revoked or expired' })}\n\n`);
+        return res.end(`event: error\ndata: ${JSON.stringify({ error: req.bot ? 'API token unknown, revoked or expired' : 'Signed out, or access to this network was removed' })}\n\n`);
       }
       try {
         if (!existsSync(path)) return;
@@ -504,9 +545,8 @@ export function createWeb({ dataDir, origin, auth: authDeps, fetcher = fetch, cl
   app.patch('/api/settings/devnet-versions', (req, res, next) => { const s = principal(req); if (!s) return res.status(401).json({ error: 'Sign in required' }); req.session = s; next(); }, csrf, (req, res) => {
     // Never from the built-in defaults: with the file missing or damaged, a
     // save here would replace users and networks with them.
-    let current;
-    try { validateSettings(JSON.parse(readFileSync(settingsPath, 'utf8'))); current = reloadSettings(); }
-    catch { return res.status(503).json({ error: 'Settings unavailable' }); }
+    if (!settingsValid()) return res.status(503).json({ error: 'Settings unavailable' });
+    const current = reloadSettings();
     if (!isAdmin(req)) return res.status(403).json({ error: 'Only admins can change devnet defaults' });
     let devnets, changed;
     try { ({ devnets, changed } = patchDevnetVersions(current.devnets, req.body)); }

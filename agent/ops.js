@@ -225,7 +225,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
 
     if (r.request.action === 'doctor') return { dir, snapshot, manifest };
     done = step(r, 'Read management journal');
-    const journal = await journalFor(dir);
+    const journal = await journalFor(r, dir);
     done('ok', journal ? `phase ${journal.record.phase}` : 'not enrolled');
     const enrolled = new Set(Object.entries(journal?.record?.enrolled || {}).filter(([n, v]) => v && (!journal.record.instances || journal.record.instances[n] === manifest.targets.find((t) => t.name === n)?.instanceId)).map(([n]) => n));
     const toEnroll = required.filter((n) => !enrolled.has(n));
@@ -257,11 +257,13 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     return { dir, snapshot, manifest, plan };
   }
 
-  async function journalFor(dir) {
+  // Read with the operation's own binary, like every other step: after an image
+  // upgrade the new CLI may not read an older operation's manifest.
+  async function journalFor(r, dir) {
     const out = join(dir, `journal-${randomUUID()}.json`);
     try {
       const result = await new Promise((resolve) => {
-        const child = spawnImpl(binary, ['managed-operation', '--manifest', join(dir, 'manifest.json'), '--timeout', '1m', '--out', out], { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, AWS_REGION: getSettings().aws.region } });
+        const child = spawnImpl(r.binary || binary, ['managed-operation', '--manifest', join(dir, 'manifest.json'), '--timeout', '1m', '--out', out], { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, AWS_REGION: getSettings().aws.region } });
         let stderr = '', timedOut = false;
         child.stderr.on('data', (d) => { stderr = (stderr + d.toString()).slice(-2000); });
         const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 90_000);
@@ -294,7 +296,7 @@ export function createOps({ settings: getSettings, dirs, key, pool, binary, onCh
     if (!plan || plan.id !== r.review?.planId) throw new Error('reviewed plan is missing');
     const { window, timeout } = validateRequest(getSettings(), r.request);
     // Resuming after an agent/runner death: release only our own stale claim.
-    const journal = await journalFor(dir);
+    const journal = await journalFor(r, dir);
     if (journal?.owner && journal.owner === r.runner) {
       const done = step(r, 'Release stale runner claim');
       const c = await dashnet(r, ['managed-unlock', '--manifest', join(dir, 'manifest.json'), '--expected-owner', r.runner, '--confirm-runner-stopped', '--timeout', '1m']);
